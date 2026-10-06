@@ -1,0 +1,113 @@
+name: CI
+
+# 每次推送：在 6 种原生运行器（Linux / macOS / Windows × x64 / arm64）上
+# 1) 做格式、静态检查与全部测试（含端到端测试：真实服务 + HTTPS + SSH/SFTP + MCP + CLI）；
+# 2) 以系统模式安装（服务账户、设备密钥封存、安全检查），探测后卸载。
+on:
+  push:
+    branches: ["**"]     # 版本标签只触发 release.yml
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # 只用于一次性 CI 运行器上的测试口令。
+  PM_CI_PASSWORD: CI-Passw0rd-For-Test-Only!
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, macos-15-intel, windows-latest, windows-11-arm]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: ./.github/actions/setup
+        with:
+          components: clippy, rustfmt
+      - name: Format
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo fmt --all --check
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Test
+        run: cargo test --workspace --locked --features pm-crypto/test-hooks
+      - name: TUI smoke test (pty)
+        if: runner.os != 'Windows'
+        run: python3 -I tests/tui_pty_smoke.py "$PWD/target/debug/PassManager" "$(mktemp -d /tmp/pm.XXXXXX)"
+
+  system:
+    name: system mode (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, macos-15-intel, windows-latest, windows-11-arm]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: ./.github/actions/setup
+      - run: cargo build --release --locked -p passmanager
+      # 运行器账户免口令提权，安全检查预期不通过、库保持锁定；这里验证安装、服务、封存与检查本身。
+      - name: Install, probe, uninstall (Linux / macOS)
+        if: runner.os != 'Windows'
+        timeout-minutes: 15
+        run: |
+          echo "$PM_CI_PASSWORD" | sudo ./target/release/PassManager install --client-user "$USER" --password-stdin --no-fix
+          ps axo user=,comm= | grep -i passmanager
+          sudo python3 -I tests/system_probe.py --password "$PM_CI_PASSWORD"
+          ! PASSMANAGER_TOKEN=pm_invalid ./target/release/PassManager list
+          sudo ./target/release/PassManager uninstall --yes
+      - name: Install, probe, uninstall (Windows)
+        if: runner.os == 'Windows'
+        timeout-minutes: 15
+        shell: pwsh
+        run: |
+          $env:PM_CI_PASSWORD | .\target\release\PassManager.exe install --password-stdin --no-fix
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          sc.exe query PassManager
+          python -I tests/system_probe.py --password $env:PM_CI_PASSWORD
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          .\target\release\PassManager.exe uninstall --yes
+      - name: Service log
+        if: failure() || cancelled()
+        shell: bash
+        run: |
+          case "$RUNNER_OS" in
+            Linux) sudo journalctl -u passmanager --no-pager | tail -50 ;;
+            macOS) sudo cat /var/log/passmanager.log || true; sudo launchctl print system/com.passmanager.service | head -40 || true ;;
+            Windows) powershell -Command "Get-WinEvent -LogName System -MaxEvents 30 | Where-Object ProviderName -eq 'Service Control Manager' | Format-List TimeCreated, Message" ;;
+          esac
+
+  # 在一次性的 Linux 运行器上真正按推荐架构加固后解锁，并以令牌跑完整的 Agent 流程。
+  system-hardened:
+    name: system mode, hardened (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: ./.github/actions/setup
+      - run: cargo build --release --locked -p passmanager
+      - name: Harden account, install, run agent flow
+        timeout-minutes: 15
+        run: |
+          echo "runner:$PM_CI_PASSWORD" | sudo chpasswd
+          sudo groupadd -f runner && sudo usermod -g runner runner && (sudo gpasswd -d runner docker || true)
+          echo "$PM_CI_PASSWORD" | sudo ./target/release/PassManager install --client-user runner --password-stdin --yes
+          echo "$PM_CI_PASSWORD" | sudo -S -p '' systemctl restart passmanager && sleep 3
+          echo "$PM_CI_PASSWORD" | sudo -S -p '' python3 -I tests/system_probe.py --password "$PM_CI_PASSWORD" \
+            --expect-ready yes --agent-flow --bin /usr/local/bin/PassManager --run-as runner
+
+  supply-chain:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1

@@ -1,0 +1,13 @@
+[package]
+name = "pm-proto"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license-file.workspace = true
+
+[dependencies]
+pm-platform = { path = "../pm-platform" }
+serde.workspace = true
+serde_json.workspace = true
+zeroize.workspace = true
+thiserror.workspace = true

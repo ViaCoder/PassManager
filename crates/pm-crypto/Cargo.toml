@@ -1,0 +1,25 @@
+[package]
+name = "pm-crypto"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license-file.workspace = true
+
+[dependencies]
+aws-lc-rs.workspace = true
+oqs.workspace = true
+oqs-sys.workspace = true
+argon2.workspace = true
+getrandom.workspace = true
+zeroize.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+hex.workspace = true
+unicode-normalization = "0.1"
+
+[features]
+test-hooks = []
+
+[[test]]
+name = "rng_stuck"
+required-features = ["test-hooks"]

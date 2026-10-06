@@ -1,0 +1,6 @@
+/target
+/dist
+/pri
+/ci-logs
+__pycache__/
+/.claude/

@@ -1,0 +1,17 @@
+[package]
+name = "pm-tui"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license-file.workspace = true
+
+[dependencies]
+pm-proto = { path = "../pm-proto" }
+pm-platform = { path = "../pm-platform" }
+pm-crypto = { path = "../pm-crypto" }
+serde.workspace = true
+serde_json.workspace = true
+zeroize.workspace = true
+ratatui = "0.30"
+toml_edit = "0.23"
+unicode-width = "0.2"

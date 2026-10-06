@@ -1,0 +1,63 @@
+name: Setup build environment
+description: Rust 工具链、Python 与编译 aws-lc / liboqs 所需的工具（cmake、libclang），覆盖 Linux / macOS / Windows 的 x64 与 arm64。
+
+inputs:
+  targets:
+    description: 额外的 Rust 目标（逗号分隔）
+    required: false
+    default: ""
+  components:
+    description: 额外的 Rust 组件（逗号分隔）
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+      with:
+        toolchain: stable
+        targets: ${{ inputs.targets }}
+        components: ${{ inputs.components }}
+    - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+      with:
+        python-version: "3.12"
+    - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+    - name: Build tools (Linux)
+      if: runner.os == 'Linux'
+      shell: bash
+      run: sudo apt-get update -q && sudo apt-get install -y -q cmake clang libclang-dev zip
+    - name: Build tools (Windows)
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: |
+        # liboqs 的 bindgen 需要与运行器架构一致的 libclang。用 arm64 镜像自带的 LLVM 时，bindgen 0.71
+        # 把 OQS_SIG 生成为空结构体（布局检查失败），因此固定安装官方 woa64 版 LLVM 19 到单独目录。
+        if ($env:RUNNER_ARCH -eq "ARM64") {
+          if (Test-Path "C:\Program Files\LLVM\bin\clang.exe") { & "C:\Program Files\LLVM\bin\clang.exe" --version }
+          $v = "19.1.7"
+          $llvm = "C:\llvm-$v\bin"
+          if (-not (Test-Path "$llvm\libclang.dll")) {
+            Invoke-WebRequest "https://github.com/llvm/llvm-project/releases/download/llvmorg-$v/LLVM-$v-woa64.exe" -OutFile llvm.exe
+            # 校验值取自已用 LLVM 官方发布密钥（GPG）验证过签名的同一文件。
+            $sum = (Get-FileHash llvm.exe -Algorithm SHA256).Hash
+            if ($sum -ne "08D871C9A20CAF0987EDE1A4E44D489E28854C9F2FFF3DA98B486891F4856E05") { throw "LLVM 安装包校验失败：$sum" }
+            Start-Process -Wait -FilePath .\llvm.exe -ArgumentList "/S", "/D=C:\llvm-$v"
+          }
+        } else {
+          $llvm = "C:\Program Files\LLVM\bin"
+          if (-not (Test-Path "$llvm\libclang.dll")) { choco install llvm -y --no-progress }
+        }
+        & "$llvm\clang.exe" --version
+        "LIBCLANG_PATH=$llvm" | Out-File -FilePath $env:GITHUB_ENV -Append
+        "$llvm" | Out-File -FilePath $env:GITHUB_PATH -Append
+        if (-not (Get-Command cmake -ErrorAction SilentlyContinue)) {
+          choco install cmake -y --no-progress
+          "C:\Program Files\CMake\bin" | Out-File -FilePath $env:GITHUB_PATH -Append
+        }
+        if ($env:RUNNER_ARCH -eq "ARM64") {
+          # Windows 报告的处理器名是大写 "ARM64"，liboqs 0.13 的 CMake 只认小写，需显式放行（McEliece 只有通用 C 实现，不受影响）。
+          $tc = Join-Path $env:RUNNER_TEMP "oqs-arm64.cmake"
+          'set(OQS_PERMIT_UNSUPPORTED_ARCHITECTURE ON CACHE BOOL "" FORCE)' | Out-File -FilePath $tc -Encoding ascii
+          "CMAKE_TOOLCHAIN_FILE_aarch64_pc_windows_msvc=$($tc -replace '\\','/')" | Out-File -FilePath $env:GITHUB_ENV -Append
+        }

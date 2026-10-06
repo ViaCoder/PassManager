@@ -1,0 +1,33 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+publish = false
+license-file = "LICENSE"
+
+[workspace.dependencies]
+aws-lc-rs = { version = "=1.18.1", default-features = false, features = ["aws-lc-sys", "prebuilt-nasm"] }
+oqs = { version = "=0.11.0", default-features = false, features = ["std", "classic_mceliece"] }
+oqs-sys = { version = "=0.11.0", default-features = false, features = ["classic_mceliece"] }
+argon2 = { version = "=0.5.3", features = ["zeroize"] }
+getrandom = "0.3"
+zeroize = { version = "1", features = ["derive", "serde"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+postcard = { version = "1", default-features = false, features = ["use-std"] }
+thiserror = "2"
+hex = "0.4"
+base64 = "0.22"
+
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[profile.dev.package."*"]
+opt-level = 2

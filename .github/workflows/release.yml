@@ -1,0 +1,126 @@
+name: Release
+
+# 发布：更新 Cargo.toml 版本与 CHANGELOG.md → 提交 → git tag vX.Y.Z && git push origin vX.Y.Z。
+# 每个平台在原生运行器上构建，构建完立即在同一台机器上运行发布包做功能测试；全部通过才发布。
+# 手动触发（workflow_dispatch）时只构建和测试，不发布。
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu }
+          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu }
+          - { os: macos-latest, target: universal-apple-darwin }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc }
+          - { os: windows-11-arm, target: aarch64-pc-windows-msvc }
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Tag must match Cargo.toml version
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          test "v$version" = "$GITHUB_REF_NAME" || { echo "标签 $GITHUB_REF_NAME 与 Cargo.toml 版本 $version 不一致"; exit 1; }
+      - uses: ./.github/actions/setup
+        with:
+          targets: ${{ runner.os == 'macOS' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+
+      # ---- 构建并打包到 dist/ ----
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        if: runner.os == 'Linux'
+        with:
+          version: 0.14.1
+      - name: Build (Linux, glibc ≥ 2.28 via zig)
+        if: runner.os == 'Linux'
+        run: |
+          cargo install cargo-zigbuild --version 0.23.4 --locked
+          scripts/cross-build.sh ${{ matrix.target }}.2.28
+      - name: Build (macOS universal)
+        if: runner.os == 'macOS'
+        run: |
+          cargo build --release --locked -p passmanager --target aarch64-apple-darwin
+          cargo build --release --locked -p passmanager --target x86_64-apple-darwin
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          name="PassManager-$version-universal-apple-darwin"
+          mkdir -p "stage/$name/docs" dist
+          lipo -create -output "stage/$name/PassManager" target/{aarch64,x86_64}-apple-darwin/release/PassManager
+          codesign --force --sign - "stage/$name/PassManager"
+          cp README.md README.zh-CN.md CHANGELOG.md CHANGELOG.zh-CN.md LICENSE LICENSE-CONTRIBUTING.md "stage/$name/"
+          cp docs/DESIGN.md docs/DESIGN.zh-CN.md "stage/$name/docs/"
+          tar -C stage -czf "dist/$name.tar.gz" "$name"
+      - name: Build (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          cargo build --release --locked -p passmanager --target ${{ matrix.target }}
+          $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.*)"').Matches[0].Groups[1].Value
+          $name = "PassManager-$version-${{ matrix.target }}"
+          New-Item -ItemType Directory -Force -Path "stage/$name/docs", dist | Out-Null
+          Copy-Item target/${{ matrix.target }}/release/PassManager.exe, README.md, README.zh-CN.md, CHANGELOG.md, CHANGELOG.zh-CN.md, LICENSE, LICENSE-CONTRIBUTING.md "stage/$name/"
+          Copy-Item docs/DESIGN.md, docs/DESIGN.zh-CN.md "stage/$name/docs/"
+          Compress-Archive -Path "stage/$name" -DestinationPath "dist/$name.zip"
+
+      # ---- 解开发布包，在本机直接运行做功能测试 ----
+      - name: Smoke test the package
+        timeout-minutes: 15
+        shell: bash
+        run: |
+          python -c "import glob, shutil; [shutil.unpack_archive(f, 'unpacked') for f in glob.glob('dist/PassManager-*')]"
+          bin=$(find unpacked -type f \( -name PassManager -o -name PassManager.exe \) | head -1)
+          chmod +x "$bin" 2>/dev/null || true
+          python -I tests/release_smoke.py "$bin"
+          if [ "$RUNNER_OS" = macOS ]; then
+            arch -x86_64 /usr/bin/true 2>/dev/null || sudo softwareupdate --install-rosetta --agree-to-license
+            python -I tests/release_smoke.py "$bin" --prefix "arch -x86_64"
+          fi
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: dist-${{ matrix.target }}
+          path: dist/PassManager-*
+
+  publish:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: dist-*
+          merge-multiple: true
+          path: dist
+      - name: Checksums
+        run: cd dist && sha256sum PassManager-* > SHA256SUMS && cat SHA256SUMS
+      - name: Build provenance
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
+        with:
+          subject-path: dist/PassManager-*
+      - name: Release notes from CHANGELOG
+        run: |
+          v="${GITHUB_REF_NAME#v}"
+          awk -v v="$v" '$0 ~ "^## \\[" v "\\]" {p=1; next} /^## \[/ {p=0} p' CHANGELOG.md > notes.md
+          test -s notes.md || { echo "CHANGELOG.md 中缺少 [$v] 一节"; exit 1; }
+          cat notes.md
+      - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
+        with:
+          files: dist/*
+          body_path: notes.md
+          prerelease: ${{ contains(github.ref_name, '-') }}
