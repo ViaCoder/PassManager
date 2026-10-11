@@ -3,6 +3,8 @@
 //! 帧格式：`u32 BE 长度 ‖ JSON`。每条连接的第一帧必须是 [`Hello`] 握手；
 //! 握手失败时服务端直接断开，不返回任何错误或特征信息（防探测）。
 
+pub mod agent_text;
+
 use std::io::{Read, Write};
 use std::path::Path;
 
@@ -173,6 +175,20 @@ pub enum Request {
     /// 新建一次性注册码（10 分钟有效、只能用一次），返回 [`EnrollView`]。
     EnrollCreate {
         label: String,
+    },
+    /// 新建注册码并生成给 AI Agent 的接入说明（`passmanager agent-setup`），返回 [`AgentSetupView`]。
+    AgentSetup {
+        label: String,
+        #[serde(default)]
+        lang: String,
+    },
+    /// 网页的 `/a/<注册码>`：查询注册码是否有效（**不消耗**），返回 [`EnrollPeekView`]；`what` 用于审计记录。
+    EnrollPeek {
+        code: String,
+        #[serde(default)]
+        what: String,
+        #[serde(default)]
+        peer: String,
     },
     /// 尚未使用的注册码。
     Enrollments,
@@ -388,6 +404,21 @@ pub struct EnrollView {
     pub label: String,
     pub url: String,
     pub expires_in_secs: u64,
+}
+
+/// `agent-setup` 的结果：一段给 AI Agent 的文字（含一次性注册码）。
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct AgentSetupView {
+    pub id: String,
+    pub label: String,
+    pub text: String,
+    pub expires_in_secs: u64,
+}
+
+/// 有效注册码对应的完整 `pm-enroll://` URL。
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct EnrollPeekView {
+    pub url: String,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -644,6 +675,8 @@ mod tests {
         for r in [
             Request::Unlock,
             Request::EnrollCreate { label: "x".into() },
+            Request::AgentSetup { label: "x".into(), lang: String::new() },
+            Request::EnrollPeek { code: "x".into(), what: String::new(), peer: String::new() },
             Request::Enrollments,
             Request::EnrollCancel { id: "x".into() },
             Request::LoginLink,

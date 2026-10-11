@@ -4,6 +4,19 @@ English | [简体中文](CHANGELOG.zh-CN.md)
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.3.0] - Unreleased
+
+### Added
+
+- **One-step agent onboarding**: `passmanager agent-setup [--label NAME] [--lang zh]` (root on the server; also on the web "Agent 令牌" page) creates a one-time enrollment code and prints one block of text for an AI agent: the command `curl --proto =https --tlsv1.3 -fsSL https://<domain>/a/<code> | sh` (a server-generated POSIX sh bootstrap that installs the matching client from the server, verifies its SHA-256, enrolls and configures MCP), a source-build fallback pinned to the server's release tag and commit (for clients without ML-KEM TLS and Windows; development builds print a note instead), and the usage rules. Fetching the script does not consume the code; unknown/expired codes return 404; `/a/` is GET/HEAD only, rate-limited, audited and CIDR-restricted.
+- **Agent usage rules**: `passmanager agent-instructions [--lang zh]`; `enroll` writes them idempotently between `<!-- passmanager:begin -->` / `<!-- passmanager:end -->` into the global instruction files of detected agents (Claude Code, Codex, Gemini CLI, Windsurf) with a backup (`--no-instructions` skips); `passmanager unenroll` and `uninstall` remove them.
+- `passmanager unenroll` removes the remote configuration, the MCP entries and the rules from an agent machine.
+- `install-server.sh --agent-bundle DIR` provides client binaries for other platforms from release archives (checked against `SHA256SUMS`).
+
+### Changed
+
+- Workspace version 0.3.0. `passmanager token add` stays available but the documented way is `agent-setup`; the web token page shows the agent setup text.
+
 ## [0.2.0] - 2026-10-11
 
 ### Added

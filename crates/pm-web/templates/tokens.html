@@ -3,16 +3,16 @@
 <h1>Agent 令牌</h1>
 {% if enroll %}
 <div class="flash ok">
-  已为 <b>{{ enroll.label }}</b> 生成一次性注册码（{{ enroll.minutes }} 分钟内有效，只能使用一次，只显示这一次）。在 Agent 所在的机器上运行：
-  <code class="token">sudo ./install-agent.sh '{{ enroll.url }}'</code>
-  或（已安装 PassManager 时）：
-  <code class="token">passmanager enroll '{{ enroll.url }}'</code>
+  已为 <b>{{ enroll.label }}</b> 生成接入说明（含一次性注册码：{{ enroll.minutes }} 分钟内有效，只能使用一次，只显示这一次）。
+  把下面整段文字交给要使用 PassManager 的那台机器上的 AI Agent，它会自行安装客户端、注册并配置 MCP：
+  <pre class="token">{{ enroll.text }}</pre>
 </div>
 {% endif %}
 <form method="post" action="/tokens" class="card">
   <input type="hidden" name="csrf" value="{{ csrf }}">
   <label>标签（例如机器名或 Agent 名）<input name="label" required maxlength="64"></label>
-  <button>生成注册码</button>
+  <label>说明语言 <select name="lang"><option value="en">English</option><option value="zh">中文</option></select></label>
+  <button>生成接入说明</button>
 </form>
 <h2>已注册的令牌</h2>
 <div class="table-wrap"><table class="list">

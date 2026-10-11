@@ -39,13 +39,30 @@ Secrets are write-only. Sessions expire after 2 h idle / 12 h absolute.
 ## 3. Agents (any platform)
 
 ```sh
-ssh root@pm.example.com passmanager token add laptop-claude    # prints pm-enroll://pm.example.com:8443/<code>#<fingerprint>
-sudo ./install-agent.sh 'pm-enroll://…'                          # Linux; or simply: PassManager enroll 'pm-enroll://…'
-PassManager list
+ssh root@pm.example.com passmanager agent-setup --label laptop      # --lang zh for Chinese
 ```
 
-`enroll` verifies the pinned server key fingerprint, stores the token in a private file and writes the MCP config of detected
-agents (without the token). MCP/CLI usage is unchanged. Revoke in the web UI or with `passmanager token revoke <id>`.
+This prints one block of text; give it to the AI agent on the agent machine (the web UI's "Agent 令牌" page shows the same
+block). The block contains a one-time enrollment code (10 minutes, single use) and:
+
+1. the command `curl --proto =https --tlsv1.3 -fsSL https://pm.example.com/a/<code> | sh`. The server returns a small POSIX sh
+   script generated for that code; it downloads the client for the machine's OS/CPU from the server itself
+   (`/a/<code>/bin/<target>`), verifies its SHA-256, installs it to `~/.local/bin` (no root), and runs `enroll`;
+2. if that fails at the TLS handshake (curl without ML-KEM, e.g. macOS or older distributions) or on Windows: build the client
+   from the release tag and commit pinned in the block (`cargo build --release -p passmanager`; needs Rust, cmake, a C compiler,
+   libclang) and run its `enroll`. A development build of the server prints a note instead of a pin;
+3. the usage rules for the AI.
+
+`enroll` verifies the pinned server key fingerprint, stores the token in a private file, writes the MCP config of detected
+agents (without the token) and the usage rules between `<!-- passmanager:begin -->` / `<!-- passmanager:end -->` in their global
+instruction files (backup `*.passmanager.bak`; `--no-instructions` skips this). Fetching the script does not consume the code;
+`enroll` does. Unknown or expired codes return 404; `/a/` requests are rate-limited, audited and, like the whole web port, only
+accepted from the configured CIDRs. `passmanager unenroll` removes the configuration, MCP entries and rules from the agent machine;
+revoke the token in the web UI or with `passmanager token revoke <id>`.
+
+The installer copies its own binary into `/var/lib/passmanager/agent-bin/`; for other platforms pass
+`--agent-bundle <dir>` with the release archives (`PassManager-<version>-<target>.tar.gz`, optionally `SHA256SUMS`). The server
+never downloads anything at request time.
 
 ### 3.1 Importing secrets (server, root)
 

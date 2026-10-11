@@ -44,6 +44,16 @@ fn ok(v: impl serde::Serialize) -> R {
     Ok(serde_json::to_value(v).unwrap_or(Value::Null))
 }
 
+/// 本服务的构建信息（见 build.rs）：只有从发布标签构建时才有标签与提交。
+pub fn build_info() -> pm_proto::agent_text::BuildInfo {
+    let s = |v: &str| (!v.is_empty()).then(|| v.to_string());
+    pm_proto::agent_text::BuildInfo {
+        version: env!("CARGO_PKG_VERSION").into(),
+        tag: s(env!("PM_BUILD_TAG")),
+        commit: s(env!("PM_BUILD_COMMIT")),
+    }
+}
+
 pub(crate) fn log(msg: &str) {
     eprintln!("[PassManager] {msg}");
 }
@@ -519,6 +529,8 @@ impl Shared {
                 && matches!(
                     req,
                     Request::EnrollCreate { .. }
+                        | Request::AgentSetup { .. }
+                        | Request::EnrollPeek { .. }
                         | Request::Enrollments
                         | Request::EnrollCancel { .. }
                         | Request::LoginLink
@@ -840,6 +852,30 @@ impl Shared {
             Request::EnrollCreate { label } => {
                 let on = self.online.as_ref().ok_or_else(|| err("BAD_REQUEST", "only available in server mode"))?;
                 ok(on.enroll_create(&label).map_err(|m| err("BAD_REQUEST", m))?)
+            }
+            Request::AgentSetup { label, lang } => {
+                let on = self.online.as_ref().ok_or_else(|| err("BAD_REQUEST", "only available in server mode"))?;
+                let lang = pm_proto::agent_text::Lang::parse(&lang).map_err(|m| err("BAD_REQUEST", m))?;
+                let label = if label.trim().is_empty() { "agent".to_string() } else { label };
+                let v = on.enroll_create(&label).map_err(|m| err("BAD_REQUEST", m))?;
+                let code = pm_net::enroll::EnrollUrl::parse(&v.url).map_err(|m| err("INTERNAL", m))?.code;
+                let text = pm_proto::agent_text::setup_text(lang, &on.web_origin(), &code, &v.url, &build_info(), v.expires_in_secs / 60);
+                log(&format!("agent-setup: enrollment code {} created for \"{}\"", v.id, v.label));
+                ok(pm_proto::AgentSetupView { id: v.id, label: v.label, text, expires_in_secs: v.expires_in_secs })
+            }
+            Request::EnrollPeek { code, what, peer } => {
+                let on = self.online.as_ref().ok_or_else(|| err("BAD_REQUEST", "only available in server mode"))?;
+                let clean = |s: &str| s.chars().filter(|c| c.is_ascii_graphic()).take(64).collect::<String>();
+                match on.enroll_peek(&code) {
+                    Some((id, url)) => {
+                        log(&format!("bootstrap: {} for enrollment code {id} from {}", clean(&what), clean(&peer)));
+                        ok(pm_proto::EnrollPeekView { url })
+                    }
+                    None => {
+                        log(&format!("bootstrap: unknown or expired code ({}) from {}", clean(&what), clean(&peer)));
+                        Err(err("NOT_FOUND", "not found"))
+                    }
+                }
             }
             Request::Enrollments => ok(self.online.as_ref().map(|o| o.enroll_list()).unwrap_or_default()),
             Request::EnrollCancel { id } => {

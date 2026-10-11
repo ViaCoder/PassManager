@@ -62,14 +62,28 @@ ssh root@pm.example.com passmanager login     # 输出 https://pm.example.com/l/
 ## 3. Agent 机器
 
 ```sh
-ssh root@pm.example.com passmanager token add laptop-claude   # 输出 pm-enroll://pm.example.com:8443/<注册码>#<指纹>
-sudo ./install-agent.sh 'pm-enroll://pm.example.com:8443/…#…'    # Linux；或直接 PassManager enroll '…'（各平台）
-PassManager list
+ssh root@pm.example.com passmanager agent-setup --label laptop --lang zh
 ```
 
-`enroll` 核对注册码里的服务端公钥指纹，令牌存到本人可读的配置目录（Linux `~/.config/passmanager`，0600），
-并为检测到的 Claude Code、Codex 等写入 MCP 配置（不含令牌）。之后 MCP 工具与 `PassManager list|http|ssh|scp`
-的用法与单机版相同。吊销：网页"Agent 令牌"页，或 `passmanager token revoke <ID>`，立即生效。
+它打印一段文字，把它交给 Agent 机器上的 AI Agent（网页"Agent 令牌"页也显示同样的文字）。其中有一个一次性注册码
+（10 分钟、只能用一次），以及：
+
+1. 命令 `curl --proto =https --tlsv1.3 -fsSL https://pm.example.com/a/<注册码> | sh`。服务器返回为该注册码生成的 POSIX sh
+   脚本：按本机的系统与 CPU 从服务器本身（`/a/<注册码>/bin/<目标>`）下载客户端、校验 SHA-256、装到 `~/.local/bin`（不需要 root），
+   然后运行 `enroll`；
+2. 在 TLS 握手失败（curl 不支持 ML-KEM，例如 macOS 或较旧的发行版）或在 Windows 上时：按文字中固定的发布标签与提交从源码构建客户端
+   （`cargo build --release -p passmanager`；需要 Rust、cmake、C 编译器、libclang），再运行它的 `enroll`。服务器是开发构建时
+   只给出说明，不给固定值；
+3. 给 AI 的使用规则。
+
+`enroll` 核对注册码里的服务端公钥指纹，令牌存到本人可读的配置目录（Linux `~/.config/passmanager`，0600），为检测到的 Agent 写入
+MCP 配置（不含令牌），并把使用规则写入它们的全局指令文件中 `<!-- passmanager:begin -->` 与 `<!-- passmanager:end -->` 之间
+（备份为 `*.passmanager.bak`；`--no-instructions` 跳过）。获取脚本不消耗注册码，`enroll` 才消耗。未知或过期的注册码返回 404；
+`/a/` 请求限速、记审计日志，并且和整个网页端口一样只接受配置的网段。`passmanager unenroll` 从 Agent 机器上移除配置、MCP 项与使用规则；
+令牌请在网页"Agent 令牌"页或用 `passmanager token revoke <ID>` 吊销。
+
+安装脚本把自身的程序复制到 `/var/lib/passmanager/agent-bin/`；其他平台用 `--agent-bundle <目录>` 提供发布包
+（`PassManager-<版本>-<目标>.tar.gz`，可附 `SHA256SUMS`）。服务器在请求时从不联网下载。
 
 ### 3.1 导入密钥（服务器，root）
 

@@ -344,6 +344,12 @@ pub fn uninstall(user: bool, restore: bool, yes: bool) -> ExitCode {
         println!("已取消。");
         return ExitCode::SUCCESS;
     }
+    // 移除写入 Agent 全局指令文件的使用规则（当前用户；sudo 时为调用者的主目录之外的 root，此时没有块也无妨）。
+    for (name, path, r) in crate::agent_instructions::remove_all() {
+        if let Ok(true) = r {
+            println!("已从 {name} 的指令文件移除 PassManager 使用规则（{}）", path.display());
+        }
+    }
     if user || std::env::var_os("PASSMANAGER_HOME").is_some() {
         let layout = Layout::user();
         #[cfg(target_os = "linux")]

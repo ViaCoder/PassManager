@@ -38,11 +38,14 @@ runs:
           $v = "19.1.7"
           $llvm = "C:\llvm-$v\bin"
           if (-not (Test-Path "$llvm\libclang.dll")) {
-            Invoke-WebRequest "https://github.com/llvm/llvm-project/releases/download/llvmorg-$v/LLVM-$v-woa64.exe" -OutFile llvm.exe
+            # 安装包下载到 RUNNER_TEMP，不放进检出目录（工作区必须保持干净，见最后一步与 release_scan）。
+            $installer = Join-Path $env:RUNNER_TEMP "LLVM-$v-woa64.exe"
+            Invoke-WebRequest "https://github.com/llvm/llvm-project/releases/download/llvmorg-$v/LLVM-$v-woa64.exe" -OutFile $installer
             # 校验值取自已用 LLVM 官方发布密钥（GPG）验证过签名的同一文件。
-            $sum = (Get-FileHash llvm.exe -Algorithm SHA256).Hash
+            $sum = (Get-FileHash $installer -Algorithm SHA256).Hash
             if ($sum -ne "08D871C9A20CAF0987EDE1A4E44D489E28854C9F2FFF3DA98B486891F4856E05") { throw "LLVM 安装包校验失败：$sum" }
-            Start-Process -Wait -FilePath .\llvm.exe -ArgumentList "/S", "/D=C:\llvm-$v"
+            Start-Process -Wait -FilePath $installer -ArgumentList "/S", "/D=C:\llvm-$v"
+            Remove-Item -Force $installer
           }
         } else {
           $llvm = "C:\Program Files\LLVM\bin"
@@ -61,3 +64,13 @@ runs:
           'set(OQS_PERMIT_UNSUPPORTED_ARCHITECTURE ON CACHE BOOL "" FORCE)' | Out-File -FilePath $tc -Encoding ascii
           "CMAKE_TOOLCHAIN_FILE_aarch64_pc_windows_msvc=$($tc -replace '\\','/')" | Out-File -FilePath $env:GITHUB_ENV -Append
         }
+    - name: Workspace must stay clean
+      # 构建环境的准备不能在检出目录里留下文件（发布前扫描会把未跟踪、未忽略的文件当作问题）。
+      shell: bash
+      run: |
+        dirty="$(git status --porcelain --untracked-files=all)"
+        if [ -n "$dirty" ]; then
+          echo "::error::setup left files in the workspace:"
+          printf '%s\n' "$dirty"
+          exit 1
+        fi

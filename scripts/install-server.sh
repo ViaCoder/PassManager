@@ -15,6 +15,9 @@
 #   --web-port N         网页端口（默认 443）                              站点文件键 WEB_PORT
 #   --agent-port N       Agent 端口（默认 8443）                           站点文件键 AGENT_PORT
 #   --tpm-socket PATH    可选：swtpm 的 Unix 数据套接字；不给时只自动检测 /dev/tpmrm0   站点文件键 TPM_SOCKET
+#   --agent-bundle DIR   可选：放有发布包（PassManager-<版本>-<目标>.tar.gz，可附 SHA256SUMS）的目录，
+#                        供一键接入（passmanager agent-setup）给其他平台的 Agent 机器下载；本机程序总会提供
+#                                                                          站点文件键 AGENT_BUNDLE
 #   --site-file FILE     读取站点配置文件（命令行参数优先）
 #   --skip-acme          不申请 Let's Encrypt 证书
 #   -h, --help           显示帮助
@@ -38,6 +41,7 @@ AGENT_PORT=""
 SKIP_ACME=0
 TPM_SOCKET=""
 SITE_FILE=""
+AGENT_BUNDLE=""
 DRY_RUN="${DRY_RUN:-0}"
 ROOT="${ROOT:-}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -52,6 +56,7 @@ while [ $# -gt 0 ]; do
     --agent-port) AGENT_PORT="${2:?--agent-port 需要参数}"; shift 2 ;;
     --tpm-socket) TPM_SOCKET="${2:?--tpm-socket 需要参数}"; shift 2 ;;
     --site-file) SITE_FILE="${2:?--site-file 需要参数}"; shift 2 ;;
+    --agent-bundle) AGENT_BUNDLE="${2:?--agent-bundle 需要参数}"; shift 2 ;;
     --skip-acme) SKIP_ACME=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "未知参数：$1（--help 查看用法）" >&2; exit 2 ;;
@@ -72,6 +77,7 @@ if [ -n "$SITE_FILE" ]; then
       WEB_PORT) [ -n "$WEB_PORT" ] || WEB_PORT="$val" ;;
       AGENT_PORT) [ -n "$AGENT_PORT" ] || AGENT_PORT="$val" ;;
       TPM_SOCKET) [ -n "$TPM_SOCKET" ] || TPM_SOCKET="$val" ;;
+      AGENT_BUNDLE) [ -n "$AGENT_BUNDLE" ] || AGENT_BUNDLE="$val" ;;
       "") ;;
       *) ;;  # 其他键（例如部署用的主机地址）与安装无关，忽略
     esac
@@ -97,6 +103,9 @@ case "$TPM_SOCKET" in
   ""|/*) ;;
   *) echo "--tpm-socket 必须是绝对路径" >&2; exit 2 ;;
 esac
+if [ -n "$AGENT_BUNDLE" ] && [ ! -d "$AGENT_BUNDLE" ]; then
+  echo "--agent-bundle 不是目录：$AGENT_BUNDLE" >&2; exit 2
+fi
 LAN_SET="$(IFS=,; printf '%s' "${LANS[*]}" | sed 's/,/, /g')"
 
 if [ "$DRY_RUN" = 1 ]; then
@@ -258,7 +267,48 @@ else
   "$PM" "${INIT_ARGS[@]}" </dev/null
 fi
 
+# ---- 7. 一键接入用的 Agent 程序（只从本机与 --agent-bundle 复制，服务运行时从不联网下载） ----
+say "一键接入用的 Agent 程序"
+AGENT_BIN_DIR="$("$PM" agent-bin-dir)"
+install -d -m 0755 "$AGENT_BIN_DIR"
+case "$(uname -m)" in
+  x86_64|amd64) install -m 0644 "$BIN_SRC" "$AGENT_BIN_DIR/PassManager-x86_64-unknown-linux-gnu" ;;
+  aarch64|arm64) install -m 0644 "$BIN_SRC" "$AGENT_BIN_DIR/PassManager-aarch64-unknown-linux-gnu" ;;
+esac
+if [ -n "$AGENT_BUNDLE" ]; then
+  for f in "$AGENT_BUNDLE"/PassManager-*.tar.gz; do
+    [ -e "$f" ] || continue
+    name="$(basename "$f")"
+    t=""
+    for k in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu universal-apple-darwin aarch64-apple-darwin x86_64-apple-darwin; do
+      case "$name" in *"-$k.tar.gz") t="$k" ;; esac
+    done
+    [ -n "$t" ] || continue
+    if [ -f "$AGENT_BUNDLE/SHA256SUMS" ]; then
+      if ! (cd "$AGENT_BUNDLE" && grep -E "[[:space:]]\*?$name\$" SHA256SUMS | sha256sum -c --status - 2>/dev/null); then
+        warn "跳过 $name：与 SHA256SUMS 不一致或没有记录"
+        continue
+      fi
+    fi
+    tmpd="$(mktemp -d)"
+    if tar -xzf "$f" -C "$tmpd" 2>/dev/null; then
+      b="$(find "$tmpd" -type f -name PassManager | head -n 1)"
+      if [ -n "$b" ]; then
+        install -m 0644 "$b" "$AGENT_BIN_DIR/PassManager-$t"
+      else
+        warn "跳过 $name：包里没有 PassManager"
+      fi
+    else
+      warn "跳过 $name：无法解压"
+    fi
+    rm -rf "$tmpd"
+  done
+fi
+for f in "$AGENT_BIN_DIR"/PassManager-*; do
+  [ -e "$f" ] && echo "   $(basename "$f")"
+done
+
 say "完成"
 echo "   状态：passmanager status"
 echo "   网页：passmanager login（输出 2 分钟有效的一次性链接）"
-echo "   Agent：passmanager token add <标签>，在 Agent 机器上运行 install-agent.sh '<注册码>'"
+echo "   Agent：passmanager agent-setup --label <名称>，把输出的整段文字交给那台机器上的 AI Agent"

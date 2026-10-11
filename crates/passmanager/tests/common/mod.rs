@@ -66,6 +66,10 @@ impl Env {
     pub fn agent_cmd(&self, args: &[&str]) -> Command {
         let mut c = Command::new(BIN);
         c.args(args).env_remove("PASSMANAGER_HOME").env_remove("PASSMANAGER_TOKEN").env("PASSMANAGER_CONFIG_DIR", &self.agent_dir);
+        // Agent 端的 MCP 配置与使用规则写入临时主目录，不碰真实的 ~/.claude 等。
+        let home = self.base.join("agent-home");
+        let _ = std::fs::create_dir_all(&home);
+        c.env("HOME", &home).env_remove("CODEX_HOME");
         c
     }
 

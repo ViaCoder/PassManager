@@ -325,10 +325,12 @@ header v2 = v1 fields + mode byte (device-only); the header hash remains the AAD
 | server (root) | `passmanager token add <label>` / `list` / `revoke <id>` | enrollment codes and tokens |
 | server (root) | `passmanager status` / `lock` / `unlock` / `reseal` | status, lock, unlock, L2 → L3 |
 | server (root) | `passmanager import --name <n> [--domain …] [--kind ssh-key] [--fields a,b] [--replace]` | import a secret from stdin |
-| agent | `passmanager enroll 'pm-enroll://…'` | join the server; MCP/CLI then work unchanged |
+| server (root) | `passmanager agent-setup [--label N] [--lang zh]` | one-time code + the text block for an AI agent |
+| agent | `passmanager enroll 'pm-enroll://…' [--no-instructions]` | join the server; configures MCP and the usage rules |
+| agent | `passmanager unenroll` / `agent-instructions` | remove the configuration / print the rules |
 | agent | `passmanager ssh-agent [--socket PATH]` | OpenSSH agent bridge (Unix) |
 | agent | `passmanager git-proxy [--listen 127.0.0.1:PORT]` | git credential-injecting proxy |
-| both | `scripts/install-server.sh`, `scripts/install-agent.sh` | one-step installers (`DRY_RUN=1` for tests) |
+| server | `scripts/install-server.sh` | one-step server installer (`DRY_RUN=1` for tests) |
 
 ### 10.7 Entries: multi-field secrets and SSH keys
 
@@ -359,3 +361,25 @@ request per connection as a stream (request frames, then a response head, then r
 the entry, drops client `Authorization` / `Cookie`, forwards a small header whitelist, adds `Authorization: Basic base64(user:PAT)`,
 refuses redirects, redacts non-pack responses, and aborts a pack stream if the raw token appears in it. Self-signed upstreams are pinned
 like HTTPS entries. The audit log records entry, host, service, status and byte counts.
+
+### 10.10 One-step agent onboarding
+
+`passmanager agent-setup` creates an ordinary enrollment code and prints one block of text for an AI agent. Nothing in it is
+secret except that code (10 minutes, single use, only its SHA-256 is kept in memory).
+
+- `GET /a/<code>` on the web port returns a POSIX sh script generated for that code: it embeds the full `pm-enroll://…#<fpr>` URL
+  and the SHA-256 of every client binary in `/var/lib/passmanager/agent-bin/` (copied there by the installer; nothing is downloaded at
+  request time). The script and the binaries travel over the same PQ-only TLS as the web UI; the SHA-256 check protects against a
+  corrupted or swapped download, and `enroll` still pins the inner server key fingerprint, so a tampered binary or script would
+  have to come from the server itself.
+- Fetching `/a/<code>` or a binary does not consume the code; `enroll` does. Unknown/expired codes answer 404 without detail;
+  only GET/HEAD; per-source limits (30 requests and 10 unknown codes per 10 minutes → 15 minutes lockout); every hit is audited
+  (code id, what was fetched, source address); the CIDR check happens before the TLS handshake as for every web request.
+- Fallback: clients whose TLS stack lacks X25519MLKEM768 cannot connect at all (by design). The block then tells the agent to build
+  the client from source at the release tag and commit of the running server (embedded at build time from the tag build — `GITHUB_*`
+  in CI, `PASSMANAGER_RELEASE_TAG`/`PASSMANAGER_RELEASE_COMMIT`, or a clean checkout at tag `v<version>`), and to refuse if
+  `git rev-parse HEAD` differs. Development builds print a note instead of an unverifiable pin.
+- `enroll` writes the usage rules between `<!-- passmanager:begin -->` and `<!-- passmanager:end -->` in the global instruction
+  files of detected agents (Claude Code `~/.claude/CLAUDE.md`, Codex `~/.codex/AGENTS.md`, Gemini CLI `~/.gemini/GEMINI.md`,
+  Windsurf `global_rules.md`): updated in place, never duplicated, previous content kept as `*.passmanager.bak`, refused when the
+  markers are damaged, removed by `unenroll` / `uninstall`.

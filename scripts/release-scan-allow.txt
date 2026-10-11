@@ -34,3 +34,5 @@ ip	scripts/release_scan.py	4b2228c26597aeca	扫描器自身的私有地址段定
 ip	scripts/release_scan.py	da51cf1afeda313d	扫描器自身的私有地址段定义
 ip	scripts/release_scan.py	8e099943f7370d7e	扫描器自检用的样例地址（只存在于临时仓库）
 pem	crates/pm-service/src/http.rs	03d104c669e3c7b6	选择规则测试的假私钥（内容是 fake）
+entropy	crates/pm-proto/src/agent_text.rs	deb87fabd17715bb	测试用的假提交哈希（0123…）
+entropy	crates/pm-web/src/tests.rs	86db3cb20c001de4	测试用的假注册码（字母表顺序）

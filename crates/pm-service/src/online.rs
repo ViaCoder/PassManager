@@ -63,7 +63,7 @@ impl Online {
     }
 
     pub fn web_origin(&self) -> String {
-        pm_web::WebConfig { domain: self.cfg.domain.clone(), port: self.cfg.web_port }.origin()
+        pm_web::WebConfig { domain: self.cfg.domain.clone(), port: self.cfg.web_port, agent_bin_dir: None }.origin()
     }
 
     pub fn allowed(&self, ip: IpAddr) -> bool {
@@ -91,6 +91,26 @@ impl Online {
         let url =
             pm_net::enroll::EnrollUrl { host: self.cfg.domain.clone(), port: self.cfg.agent_port, code, fpr: self.keys.fingerprint() };
         Ok(EnrollView { id, label, url: url.to_string(), expires_in_secs: ENROLL_TTL.as_secs() })
+    }
+
+    /// 查询注册码（**不消耗**）：有效时返回（ID，完整的 `pm-enroll://` URL）。用于网页的一键安装脚本。
+    pub fn enroll_peek(&self, code: &str) -> Option<(String, String)> {
+        self.enroll_peek_at(code, Instant::now())
+    }
+
+    fn enroll_peek_at(&self, code: &str, now: Instant) -> Option<(String, String)> {
+        if code.len() != pm_net::enroll::CODE_LEN {
+            return None;
+        }
+        let m = self.enrolls.lock().unwrap();
+        let p = m.get(&pm_crypto::sha256(code.as_bytes())).filter(|p| p.expires > now)?;
+        let url = pm_net::enroll::EnrollUrl {
+            host: self.cfg.domain.clone(),
+            port: self.cfg.agent_port,
+            code: code.to_string(),
+            fpr: self.keys.fingerprint(),
+        };
+        Some((p.id.clone(), url.to_string()))
     }
 
     /// 消耗注册码：先取出（删除）再检查是否过期，所以同一注册码最多成功一次。返回标签。
@@ -282,7 +302,15 @@ pub(crate) async fn serve_web(shared: Arc<Shared>, listener: TcpListener) {
         return;
     }
     let backend: Arc<dyn pm_web::Backend> = Arc::new(WebBackend(shared.clone()));
-    let st = pm_web::AppState::new(backend, on.links.clone(), pm_web::WebConfig { domain: on.cfg.domain.clone(), port: on.cfg.web_port });
+    let st = pm_web::AppState::new(
+        backend,
+        on.links.clone(),
+        pm_web::WebConfig {
+            domain: on.cfg.domain.clone(),
+            port: on.cfg.web_port,
+            agent_bin_dir: Some(shared.layout.data_dir.join("agent-bin")),
+        },
+    );
     let lan = on.cfg.lan.clone();
     let allow: pm_web::front::Allow = Arc::new(move |ip| pm_platform::paths::ip_allowed(ip, &lan));
     pm_web::front::Front::new(TlsAcceptor::from(cfg), &on.cfg.domain, on.cfg.web_port, allow).serve(listener, pm_web::router(st)).await;
@@ -321,7 +349,15 @@ mod tests {
         let u = pm_net::enroll::EnrollUrl::parse(&v.url).unwrap();
         assert_eq!((u.host.as_str(), u.port, u.fpr), ("pm.test", 8443, on.keys.fingerprint()));
         assert_eq!(v.expires_in_secs, 600);
+        // 查询不消耗；过期后查不到。
+        let (pid, purl) = on.enroll_peek_at(&u.code, t0 + Duration::from_secs(10)).unwrap();
+        assert_eq!(purl, v.url);
+        assert!(!pid.is_empty());
+        assert!(on.enroll_peek_at(&u.code, t0 + Duration::from_secs(20)).is_some(), "查询不消耗");
+        assert!(on.enroll_peek_at(&u.code, t0 + Duration::from_secs(600)).is_none(), "过期");
+        assert!(on.enroll_peek_at("short", t0).is_none());
         assert_eq!(on.enroll_consume_at(&u.code, t0 + Duration::from_secs(599)).as_deref(), Some("laptop"));
+        assert!(on.enroll_peek_at(&u.code, t0 + Duration::from_secs(30)).is_none(), "使用后查不到");
         assert!(on.enroll_consume_at(&u.code, t0 + Duration::from_secs(600)).is_none(), "只能用一次");
         let v2 = on.enroll_create_at("x", t0).unwrap();
         let c2 = pm_net::enroll::EnrollUrl::parse(&v2.url).unwrap().code;

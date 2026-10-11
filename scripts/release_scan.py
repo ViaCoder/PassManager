@@ -10,6 +10,7 @@
 
 用法：
   python3 -I scripts/release_scan.py                 # 扫描工作区中受跟踪及未被忽略的文件
+                                                     # （CI 的检出目录必须保持干净：下载与临时文件放到 RUNNER_TEMP）
   python3 -I scripts/release_scan.py --history       # 另外扫描所有引用可达的历史：每个 blob、提交信息与提交身份
   python3 -I scripts/release_scan.py --self-test     # 自检（在临时仓库里验证能发现问题且不泄露内容）
 

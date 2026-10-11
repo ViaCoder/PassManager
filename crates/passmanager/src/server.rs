@@ -258,15 +258,25 @@ pub fn login() -> ExitCode {
     }
 }
 
+/// `passmanager agent-setup`：新建一次性注册码并打印给 AI Agent 的接入说明（标准输出只有这段文字）。
+pub fn agent_setup(label: &str, lang: &str) -> ExitCode {
+    match root_call::<pm_proto::AgentSetupView>(Request::AgentSetup { label: label.into(), lang: lang.into() }) {
+        Ok(v) => {
+            print!("{}", v.text);
+            eprintln!("（注册码 {} 分钟内有效、只能使用一次；可在网页\"Agent 令牌\"页作废。）", v.expires_in_secs / 60);
+            ExitCode::SUCCESS
+        }
+        Err(e) => fail(e),
+    }
+}
+
 pub fn token_add(label: &str) -> ExitCode {
     match root_call::<EnrollView>(Request::EnrollCreate { label: label.into() }) {
         Ok(v) => {
             println!("{}", v.url);
             eprintln!(
-                "一次性注册码（{} 分钟内有效，只能使用一次）。在 Agent 所在的机器上运行：\n  sudo ./install-agent.sh '{}'\n或（已安装 PassManager 时）：\n  passmanager enroll '{}'",
-                v.expires_in_secs / 60,
-                v.url,
-                v.url
+                "一次性注册码（{} 分钟内有效，只能使用一次）。给 AI Agent 的完整接入说明请用：passmanager agent-setup",
+                v.expires_in_secs / 60
             );
             ExitCode::SUCCESS
         }

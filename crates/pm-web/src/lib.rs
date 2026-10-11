@@ -9,6 +9,7 @@
 // 处理函数统一用 `Result<_, Response>` 提前返回页面：Response 体积大，但每个请求只出现一次。
 #![allow(clippy::result_large_err)]
 
+pub mod bootstrap;
 pub mod front;
 
 use std::collections::HashMap;
@@ -24,7 +25,7 @@ use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use minijinja::value::Serde;
 use minijinja::{Environment, Value, context};
-use pm_proto::{EnrollView, EntryInput, EntryView, PendingEnrollView, PendingPinView, PinView, Request as Req, Response as Resp};
+use pm_proto::{EntryInput, EntryView, PendingEnrollView, PendingPinView, PinView, Request as Req, Response as Resp};
 use pm_proto::{FieldInput, SecurityView, ServerStatusView, SettingsView, TokenView};
 use serde::de::DeserializeOwned;
 
@@ -225,6 +226,8 @@ pub struct WebConfig {
     /// 例如 `pm.example.com`。
     pub domain: String,
     pub port: u16,
+    /// 一键接入用的 Agent 程序目录（`PassManager-<目标>`）；None 表示不提供一键接入。
+    pub agent_bin_dir: Option<std::path::PathBuf>,
 }
 
 impl WebConfig {
@@ -240,6 +243,11 @@ pub struct AppState {
     env: Environment<'static>,
     sessions: Sessions,
     link_limiter: RateLimiter,
+    bins: bootstrap::BinCache,
+    /// `/a/` 的访问次数（每个来源）。
+    boot_limiter: RateLimiter,
+    /// `/a/` 的无效注册码次数（每个来源）。
+    boot_fail_limiter: RateLimiter,
 }
 
 pub type St = Arc<AppState>;
@@ -254,6 +262,10 @@ impl AppState {
             sessions: Sessions::default(),
             // 每个来源 10 分钟内 10 次无效链接 → 锁定 15 分钟。
             link_limiter: RateLimiter::new(10, Duration::from_secs(600), Duration::from_secs(900)),
+            // 每个来源 10 分钟内最多 30 次 /a/ 请求、10 次无效注册码 → 锁定 15 分钟。
+            bins: bootstrap::BinCache::default(),
+            boot_limiter: RateLimiter::new(30, Duration::from_secs(600), Duration::from_secs(900)),
+            boot_fail_limiter: RateLimiter::new(10, Duration::from_secs(600), Duration::from_secs(900)),
         })
     }
 }
@@ -321,6 +333,8 @@ pub fn router(st: St) -> Router {
         .route("/pins/trust", post(pins_trust))
         .route("/settings", get(settings).post(settings_post))
         .route("/security", get(security))
+        .route("/a/{code}", get(boot_script))
+        .route("/a/{code}/bin/{target}", get(boot_bin))
         .route(
             "/static/style.css",
             get(|| async {
@@ -851,6 +865,61 @@ async fn tokens(State(st): State<St>, h: HeaderMap, conn: Option<Extension<ConnI
     tokens_page(&st, &c, flash_ctx(&q)).await
 }
 
+// ---------------- 一键接入（/a/<注册码>） ----------------
+
+fn not_found() -> Response {
+    (StatusCode::NOT_FOUND, "not found\n").into_response()
+}
+
+/// 限速并查询注册码（不消耗）。成功时返回完整的 `pm-enroll://` URL。
+async fn boot_check(st: &AppState, conn: &Option<Extension<ConnInfo>>, code: &str, what: &str) -> Result<String, Response> {
+    let peer = conn.as_ref().map(|c| c.0.peer.ip().to_string()).unwrap_or_else(|| "unknown".into());
+    if st.boot_limiter.blocked(&peer) || st.boot_fail_limiter.blocked(&peer) {
+        return Err((StatusCode::TOO_MANY_REQUESTS, "too many requests\n").into_response());
+    }
+    st.boot_limiter.fail(&peer);
+    if st.cfg.agent_bin_dir.is_none() || !bootstrap::code_ok(code) {
+        st.boot_fail_limiter.fail(&peer);
+        return Err(not_found());
+    }
+    match call::<pm_proto::EnrollPeekView>(st, Req::EnrollPeek { code: code.into(), what: what.into(), peer }).await {
+        Ok(v) => Ok(v.url),
+        Err(_) => {
+            st.boot_fail_limiter.fail(&conn.as_ref().map(|c| c.0.peer.ip().to_string()).unwrap_or_else(|| "unknown".into()));
+            Err(not_found())
+        }
+    }
+}
+
+async fn boot_script(State(st): State<St>, conn: Option<Extension<ConnInfo>>, Path(code): Path<String>) -> Response {
+    let url = match boot_check(&st, &conn, &code, "script").await {
+        Ok(u) => u,
+        Err(r) => return r,
+    };
+    let dir = st.cfg.agent_bin_dir.clone().unwrap_or_default();
+    let bins = st.bins.scan(&dir);
+    let base = format!("{}/a/{code}", st.cfg.origin());
+    ([(header::CONTENT_TYPE, "text/plain; charset=utf-8")], bootstrap::sh_script(&base, &url, &bins)).into_response()
+}
+
+async fn boot_bin(State(st): State<St>, conn: Option<Extension<ConnInfo>>, Path((code, target)): Path<(String, String)>) -> Response {
+    if !bootstrap::TARGETS.contains(&target.as_str()) {
+        return not_found();
+    }
+    if let Err(r) = boot_check(&st, &conn, &code, &format!("binary {target}")).await {
+        return r;
+    }
+    let dir = st.cfg.agent_bin_dir.clone().unwrap_or_default();
+    let Some(b) = st.bins.scan(&dir).into_iter().find(|b| b.target == target) else { return not_found() };
+    let Ok(f) = tokio::fs::File::open(&b.path).await else { return not_found() };
+    let body = axum::body::Body::from_stream(tokio_util::io::ReaderStream::new(f));
+    (
+        [(header::CONTENT_TYPE, HeaderValue::from_static("application/octet-stream")), (header::CONTENT_LENGTH, HeaderValue::from(b.size))],
+        body,
+    )
+        .into_response()
+}
+
 /// 网页上"新建令牌"实际生成的是一次性注册码：令牌本身只在 Agent 注册时生成并经双层加密通道送达，
 /// 不会出现在网页上。
 async fn token_create(
@@ -864,9 +933,10 @@ async fn token_create(
         Err(r) => return r,
     };
     let label = f.get("label").map(|s| s.trim().to_string()).unwrap_or_default();
-    match call::<EnrollView>(&st, Req::EnrollCreate { label }).await {
+    let lang = if f.get("lang").is_some_and(|l| l == "zh") { "zh" } else { "en" };
+    match call::<pm_proto::AgentSetupView>(&st, Req::AgentSetup { label, lang: lang.into() }).await {
         Ok(v) => {
-            let enroll = context! { label => v.label, url => v.url, minutes => v.expires_in_secs / 60 };
+            let enroll = context! { label => v.label, text => v.text, minutes => v.expires_in_secs / 60 };
             tokens_page(&st, &c, context! { enroll }).await
         }
         Err(e) => tokens_page(&st, &c, err_flash(&e)).await,

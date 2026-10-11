@@ -129,8 +129,10 @@ fn write_private(path: &Path, data: &[u8]) -> Result<(), String> {
 
 #[derive(Clone, Debug, Default)]
 pub struct EnrollOpts {
-    /// 不写入 Agent 的 MCP 配置（只保存远程配置与令牌）。
+    /// 不写入 Agent 的 MCP 配置（只保存远程配置与令牌；也不写使用规则）。
     pub no_mcp: bool,
+    /// 不把使用规则写入 Agent 的全局指令文件。
+    pub no_instructions: bool,
     /// 测试：直接连接的地址。
     pub connect_addr: Option<std::net::SocketAddr>,
     /// 测试：额外信任的 CA 文件。
@@ -183,12 +185,51 @@ pub fn enroll_cmd(url: &str, o: EnrollOpts) -> ExitCode {
                 if !any {
                     println!("  · 没有检测到已安装的 Agent。MCP 配置：{{\"command\": \"{bin}\", \"args\": [\"mcp\"]}}");
                 }
+                if !o.no_instructions {
+                    let block = pm_proto::agent_text::instruction_block(pm_proto::agent_text::Lang::En);
+                    for (name, path, r) in crate::agent_instructions::install_detected(&block) {
+                        match r {
+                            Ok(crate::agent_instructions::Change::Unchanged) => {
+                                println!("  · {name}：使用规则已是最新（{}）", path.display())
+                            }
+                            Ok(_) => println!("  · {name}：已写入使用规则（{}）", path.display()),
+                            Err(e) => println!("  · {name}：未写入使用规则（{e}）"),
+                        }
+                    }
+                }
             }
             println!("测试：{} list", std::env::current_exe().map(|p| p.display().to_string()).unwrap_or_else(|_| "PassManager".into()));
             ExitCode::SUCCESS
         }
         Err(e) => crate::install::fail(e),
     }
+}
+
+/// `passmanager unenroll`：删除远程配置与令牌，移除 MCP 配置与写入的使用规则。服务器上的令牌请在网页里吊销。
+pub fn unenroll() -> ExitCode {
+    let d = dir();
+    let mut removed = 0;
+    for f in [CONFIG_FILE, TOKEN_FILE, KEYS_FILE, "git-proxy.token"] {
+        if std::fs::remove_file(d.join(f)).is_ok() {
+            removed += 1;
+        }
+    }
+    println!("已删除远程配置（{} 个文件，{}）", removed, d.display());
+    for a in pm_tui::agents::ADAPTERS.iter().filter(|a| a.configured()) {
+        match a.disconnect() {
+            Ok(()) => println!("  · {}：已移除 MCP 配置", a.name),
+            Err(e) => println!("  · {}：移除 MCP 配置失败（{e}）", a.name),
+        }
+    }
+    for (name, path, r) in crate::agent_instructions::remove_all() {
+        match r {
+            Ok(true) => println!("  · {name}：已移除使用规则（{}）", path.display()),
+            Ok(false) => {}
+            Err(e) => println!("  · {name}：未移除使用规则（{e}）"),
+        }
+    }
+    println!("服务器上的令牌请在网页\"Agent 令牌\"页吊销，或在服务器上运行 passmanager token revoke <ID>。");
+    ExitCode::SUCCESS
 }
 
 /// 非服务器上的 `passmanager status`：显示远程配置并测试连接。

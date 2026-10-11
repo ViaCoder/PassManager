@@ -91,6 +91,9 @@ check "daemon-reload" 'grep -q "^systemctl daemon-reload$" "$LOG"'
 D="$R/var/lib/passmanager-dryrun/data"
 check "init：无口令库、内层密钥、封存的 Cloudflare token" '[ -f "$D/vault.pmv" ] && [ -f "$D/server-keys.pub" ] && [ -f "$D/cf-token.sealed" ]'
 check "init：配置来自参数（域名、两个网段、套接字）" 'grep -q "\"pm.example.com\"" "$D/install.json" && grep -q "203.0.113.0/24" "$D/install.json" && grep -qF "$SOCK" "$D/install.json"'
+ARCH_T="$(uname -m | sed 's/amd64/x86_64/; s/arm64/aarch64/')-unknown-linux-gnu"
+check "一键接入：本机程序复制到 Agent 程序目录" 'cmp -s "$D/agent-bin/PassManager-$ARCH_T" "$BIN"'
+check "完成提示 agent-setup" 'grep -q "passmanager agent-setup" "$OUT"'
 check "Cloudflare token 没有出现在任何文件或输出里" '! grep -rqF "$TOKEN" "$R" && ! grep -qF "$TOKEN" "$OUT"'
 
 echo "== 重复运行（幂等）、已有的 sysctl 文件、权限受限的容器"
@@ -114,6 +117,15 @@ R2="$T/root2"
 : > "$LOG"
 SITE="$T/site.local.env"
 printf '# 本地站点配置\nDOMAIN=pm2.example.com\nLAN_CIDRS="192.0.2.0/24 198.51.100.0/25"\nWEB_PORT=8444\nSERVER_HOST=203.0.113.9   # 与安装无关的键被忽略\n$(touch %s/pwned)\n' "$T" > "$SITE"
+# 发布包目录：macOS 包校验通过；aarch64 包与 SHA256SUMS 不一致；Windows 包与未知文件忽略。
+B="$T/bundle"; mkdir -p "$B/s1/PassManager-0.3.0-universal-apple-darwin" "$B/s2/PassManager-0.3.0-aarch64-unknown-linux-gnu"
+printf 'mac-client' > "$B/s1/PassManager-0.3.0-universal-apple-darwin/PassManager"
+printf 'arm-client' > "$B/s2/PassManager-0.3.0-aarch64-unknown-linux-gnu/PassManager"
+tar -C "$B/s1" -czf "$B/PassManager-0.3.0-universal-apple-darwin.tar.gz" PassManager-0.3.0-universal-apple-darwin
+tar -C "$B/s2" -czf "$B/PassManager-0.3.0-aarch64-unknown-linux-gnu.tar.gz" PassManager-0.3.0-aarch64-unknown-linux-gnu
+printf 'zip' > "$B/PassManager-0.3.0-x86_64-pc-windows-msvc.zip"
+(cd "$B" && sha256sum PassManager-0.3.0-universal-apple-darwin.tar.gz > SHA256SUMS && printf '%064d  PassManager-0.3.0-aarch64-unknown-linux-gnu.tar.gz\n' 0 >> SHA256SUMS)
+printf 'AGENT_BUNDLE=%s\n' "$B" >> "$SITE"
 if DRY_RUN=1 ROOT="$R2" PATH="$F:$PATH" bash "$PKG/install-server.sh" --site-file "$SITE" < /dev/null > "$T/out3.txt" 2>&1; then
   ok "无 token 时跳过证书申请"
 else
@@ -125,6 +137,11 @@ check "没有 token 文件" '[ ! -f "$R2/var/lib/passmanager-dryrun/data/cf-toke
 check "站点文件：域名、网段、端口生效" 'grep -q "ip saddr { 192.0.2.0/24, 198.51.100.0/25 } tcp dport { 22, 8444, 8443 }" "$R2/etc/nftables.d/passmanager.nft" && grep -q "\"pm2.example.com\"" "$R2/var/lib/passmanager-dryrun/data/install.json"'
 check "站点文件不会被当作脚本执行" '[ ! -e "$T/pwned" ]'
 check "没有配置 TPM 套接字" '! grep -q "tpm_socket" "$R2/var/lib/passmanager-dryrun/data/install.json"'
+AB="$R2/var/lib/passmanager-dryrun/data/agent-bin"
+check "发布包：校验通过的 macOS 程序已解出" '[ "$(cat "$AB/PassManager-universal-apple-darwin")" = mac-client ]'
+check "发布包：校验不一致的跳过并警告" '[ ! -e "$AB/PassManager-aarch64-unknown-linux-gnu" ] && grep -q "跳过 PassManager-0.3.0-aarch64-unknown-linux-gnu.tar.gz" "$T/out3.txt"'
+check "发布包：Windows 包与未知文件忽略" '[ "$(find "$AB" -type f | wc -l)" = 2 ]'
+check "--agent-bundle 不是目录时拒绝" '! DRY_RUN=1 ROOT="$T/r5" PATH="$F:$PATH" bash "$PKG/install-server.sh" --domain pm.example.com --lan-cidr 198.51.100.0/24 --agent-bundle "$T/nope" < /dev/null > /dev/null 2>&1'
 
 echo "== 参数校验"
 for a in "--domain pm.example.com" "--lan-cidr 198.51.100.0/24" "--domain pm.example.com --lan-cidr 198.51.100.0/24;rm" "--domain a/b --lan-cidr 198.51.100.0/24" "--domain pm.example.com --lan-cidr 198.51.100.0/24 --web-port x" "--domain pm.example.com --lan-cidr 198.51.100.0/24 --tpm-socket rel.sock" "--site-file /nonexistent" "--bogus"; do
@@ -154,7 +171,7 @@ check "不是注册码的参数" '! DRY_RUN=1 ROOT="$T/au" PATH="$F:$PATH" bash 
 
 if command -v shellcheck >/dev/null; then
   echo "== shellcheck"
-  check "shellcheck 通过" 'shellcheck "$SRC/scripts/install-server.sh" "$SRC/scripts/install-agent.sh" "$0"'
+  check "shellcheck 通过" 'shellcheck "$SRC/scripts/install-server.sh" "$SRC/scripts/install-agent.sh" "$SRC/scripts/package-lan.sh" "$0"'
 fi
 
 echo

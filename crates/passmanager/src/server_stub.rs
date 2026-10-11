@@ -15,6 +15,12 @@ pub fn init(_: InitOpts) -> ExitCode {
 pub fn login() -> ExitCode {
     linux_only()
 }
+pub fn agent_setup(_: &str, _: &str) -> ExitCode {
+    linux_only()
+}
+pub fn layout() -> pm_platform::paths::Layout {
+    pm_platform::paths::Layout::system()
+}
 pub fn token_add(_: &str) -> ExitCode {
     linux_only()
 }

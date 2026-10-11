@@ -325,10 +325,12 @@ v2 文件头 = v1 的字段 + 模式字节（device-only）；文件头哈希仍
 | 服务器（root） | `passmanager token add <标签>` / `list` / `revoke <id>` | 注册码与令牌 |
 | 服务器（root） | `passmanager status` / `lock` / `unlock` / `reseal` | 状态、锁定、解锁、L2 → L3 |
 | 服务器（root） | `passmanager import --name <名称> [--domain …] [--kind ssh-key] [--fields a,b] [--replace]` | 从标准输入导入密钥 |
-| Agent 机器 | `passmanager enroll 'pm-enroll://…'` | 接入服务器；之后 MCP / CLI 用法不变 |
+| 服务器（root） | `passmanager agent-setup [--label 名称] [--lang zh]` | 一次性注册码 + 给 AI Agent 的整段文字 |
+| Agent 机器 | `passmanager enroll 'pm-enroll://…' [--no-instructions]` | 接入服务器；配置 MCP 与使用规则 |
+| Agent 机器 | `passmanager unenroll` / `agent-instructions` | 移除配置 / 打印使用规则 |
 | Agent 机器 | `passmanager ssh-agent [--socket 路径]` | OpenSSH agent 桥（Unix） |
 | Agent 机器 | `passmanager git-proxy [--listen 127.0.0.1:端口]` | git 凭据注入代理 |
-| 两端 | `scripts/install-server.sh`、`scripts/install-agent.sh` | 一键安装（`DRY_RUN=1` 用于测试） |
+| 服务器 | `scripts/install-server.sh` | 服务器一键安装（`DRY_RUN=1` 用于测试） |
 
 ### 10.7 条目：多字段密钥与 SSH 私钥
 
@@ -355,3 +357,21 @@ v2 文件头 = v1 的字段 + 模式字节（device-only）；文件头哈希仍
 与 `POST …/git-upload-pack|git-receive-pack`；丢弃客户端的 `Authorization` / `Cookie`，只转发少量白名单请求头，加上
 `Authorization: Basic base64(用户名:PAT)`；拒绝重定向；非 pack 响应脱敏；pack 流中一旦出现令牌原文即中止。自签证书的上游与 HTTPS 条目一样按指纹固定。
 审计日志记录条目、主机、服务、状态与字节数。
+
+### 10.10 Agent 一键接入
+
+`passmanager agent-setup` 生成一个普通的注册码，并打印一段给 AI Agent 的文字。除了这个注册码（10 分钟、只能用一次、服务端只在内存里
+保存 SHA-256），文字里没有任何秘密。
+
+- 网页端口上的 `GET /a/<注册码>` 返回为该注册码生成的 POSIX sh 脚本：内嵌完整的 `pm-enroll://…#<指纹>` 与
+  `/var/lib/passmanager/agent-bin/` 中每个客户端程序的 SHA-256（由安装脚本复制；请求时从不联网下载）。脚本与程序都经过与网页相同的
+  纯后量子 TLS；SHA-256 校验防止下载损坏或被替换，`enroll` 仍固定内层服务端公钥指纹，所以篡改的程序或脚本只能来自服务器本身。
+- 获取 `/a/<注册码>` 或程序不消耗注册码，`enroll` 才消耗。未知或过期的注册码返回 404，不说明原因；只接受 GET/HEAD；按来源限速
+  （10 分钟内 30 次请求、10 次未知注册码 → 锁定 15 分钟）；每次访问都记审计（注册码 ID、获取的内容、来源地址）；与所有网页请求一样，
+  网段检查在 TLS 握手之前。
+- 回退：TLS 不支持 X25519MLKEM768 的客户端根本连不上（有意如此）。这时文字让 Agent 按运行中的服务器的发布标签与提交从源码构建客户端
+  （构建时嵌入：CI 的 `GITHUB_*`、`PASSMANAGER_RELEASE_TAG`/`PASSMANAGER_RELEASE_COMMIT`，或位于标签 `v<版本>` 的干净检出），
+  `git rev-parse HEAD` 不一致时拒绝。开发构建只给出说明，不给无法核对的固定值。
+- `enroll` 把使用规则写入检测到的 Agent 的全局指令文件（Claude Code `~/.claude/CLAUDE.md`、Codex `~/.codex/AGENTS.md`、
+  Gemini CLI `~/.gemini/GEMINI.md`、Windsurf `global_rules.md`）中 `<!-- passmanager:begin -->` 与 `<!-- passmanager:end -->` 之间：
+  原地更新、不重复，原内容保存为 `*.passmanager.bak`，标记损坏时拒绝修改，`unenroll` / `uninstall` 时移除。

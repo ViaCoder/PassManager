@@ -4,6 +4,19 @@
 
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.3.0] - 未发布
+
+### 新增
+
+- **Agent 一键接入**：`passmanager agent-setup [--label 名称] [--lang zh]`（服务器上的 root；网页"Agent 令牌"页也可以）生成一次性注册码，并打印一段给 AI Agent 的文字：命令 `curl --proto =https --tlsv1.3 -fsSL https://<域名>/a/<注册码> | sh`（服务器生成的 POSIX sh 引导脚本：从服务器安装匹配的客户端、校验 SHA-256、注册并配置 MCP）、固定到服务器发布标签与提交的源码构建回退（用于不支持 ML-KEM TLS 的客户端与 Windows；开发构建只给出说明），以及使用规则。获取脚本不消耗注册码；未知或过期的注册码返回 404；`/a/` 只接受 GET/HEAD，限速、记审计并受网段限制。
+- **Agent 使用规则**：`passmanager agent-instructions [--lang zh]`；`enroll` 把它们幂等地写入检测到的 Agent（Claude Code、Codex、Gemini CLI、Windsurf）的全局指令文件中 `<!-- passmanager:begin -->` 与 `<!-- passmanager:end -->` 之间并保留备份（`--no-instructions` 跳过）；`passmanager unenroll` 与 `uninstall` 移除。
+- `passmanager unenroll`：从 Agent 机器上移除远程配置、MCP 项与使用规则。
+- `install-server.sh --agent-bundle 目录`：从发布包为其他平台提供客户端程序（按 `SHA256SUMS` 校验）。
+
+### 变更
+
+- 工作区版本 0.3.0。`passmanager token add` 仍然可用，但文档中的方式是 `agent-setup`；网页令牌页显示接入说明。
+
 ## [0.2.0] - 2026-10-11
 
 ### 新增

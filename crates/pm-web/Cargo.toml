@@ -19,7 +19,8 @@ axum = "0.8"
 minijinja = { version = "3", features = ["serde", "urlencode"] }
 hyper = { version = "1", features = ["server", "http1", "http2"] }
 hyper-util = { version = "0.1", features = ["tokio", "server-auto", "http1", "http2", "service"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time", "sync"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time", "sync", "fs"] }
+tokio-util = { version = "0.7", features = ["io"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["aws_lc_rs"] }
 rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std", "tls12"] }
 

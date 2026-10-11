@@ -71,11 +71,16 @@ the domain and the allowed client CIDRs must be given at install time.
 # server (root; Debian 13 or another systemd ≥ 250 distribution)
 ./install-server.sh --domain pm.example.com --lan-cidr 198.51.100.0/24 < cloudflare-token
 passmanager import --name github --domain api.github.com < token.txt     # secrets come from stdin, never echoed
-passmanager token add laptop                                               # prints a one-time pm-enroll://… code
-# agent machine
-PassManager enroll 'pm-enroll://pm.example.com:8443/…#…'
-PassManager list
+passmanager agent-setup --label laptop                                     # prints one block of text for an AI agent
 ```
+
+Give the printed block to the AI agent on the machine that should use PassManager. It contains a one-time enrollment code
+(10 minutes, single use) and tells the agent to run one command —
+`curl --proto =https --tlsv1.3 -fsSL https://pm.example.com/a/<code> | sh` — which installs the client (SHA-256 verified),
+enrolls it, configures the MCP server for the detected agents (Claude Code, Codex, Cursor, Gemini CLI, VS Code, Windsurf) and
+adds the usage rules to their global instruction files (`~/.claude/CLAUDE.md`, `~/.codex/AGENTS.md`, …). If the agent's curl
+cannot do post-quantum TLS, the block tells it to build the client from the pinned release source and run `enroll` instead.
+`passmanager agent-instructions` prints the rules; `passmanager unenroll` removes everything again.
 
 What else 0.2.0 adds on top of `http` / `ssh` / `scp`:
 

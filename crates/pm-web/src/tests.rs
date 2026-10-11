@@ -108,9 +108,26 @@ impl Backend for Mock {
                         Resp::err("BAD_REQUEST", "令牌不存在")
                     }
                 }
-                Req::EnrollCreate { label } => {
-                    Resp::ok(EnrollView { id: "e1".into(), label, url: "pm-enroll://pm.test:8443/CODE#FPR".into(), expires_in_secs: 600 })
+                Req::AgentSetup { label, lang } => {
+                    let lang = pm_proto::agent_text::Lang::parse(&lang).unwrap();
+                    let b = pm_proto::agent_text::BuildInfo { version: "0.3.0".into(), ..Default::default() };
+                    let url = format!("pm-enroll://pm.test:8443/{BOOT_CODE}#FPR");
+                    let text = pm_proto::agent_text::setup_text(lang, "https://pm.test", BOOT_CODE, &url, &b, 10);
+                    Resp::ok(pm_proto::AgentSetupView { id: "e1".into(), label, text, expires_in_secs: 600 })
                 }
+                Req::EnrollPeek { code, .. } => {
+                    if code == BOOT_CODE {
+                        Resp::ok(pm_proto::EnrollPeekView { url: format!("pm-enroll://pm.test:8443/{BOOT_CODE}#FPR") })
+                    } else {
+                        Resp::err("NOT_FOUND", "not found")
+                    }
+                }
+                Req::EnrollCreate { label } => Resp::ok(pm_proto::EnrollView {
+                    id: "e1".into(),
+                    label,
+                    url: "pm-enroll://pm.test:8443/CODE#FPR".into(),
+                    expires_in_secs: 600,
+                }),
                 Req::Enrollments => Resp::ok(vec![PendingEnrollView { id: "e1".into(), label: "x".into(), expires_in_secs: 500 }]),
                 Req::EnrollCancel { .. } => Resp::ok("cancelled"),
                 Req::Pins => Resp::ok(Vec::<PinView>::new()),
@@ -154,9 +171,29 @@ impl Backend for Mock {
     }
 }
 
+/// 测试用的有效注册码（43 个 base64url 字符）。
+const BOOT_CODE: &str = "Abcdefghijklmnopqrstuvwxyz0123456789-_ABCDE";
+
+/// 测试用的 Agent 程序目录（两个假程序）。
+fn agent_bin_dir() -> std::path::PathBuf {
+    static D: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+    D.get_or_init(|| {
+        let d = std::env::temp_dir().join(format!("pm-web-bins-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(d.join("PassManager-x86_64-unknown-linux-gnu"), b"fake-linux-client").unwrap();
+        std::fs::write(d.join("PassManager-universal-apple-darwin"), b"fake-mac-client").unwrap();
+        d
+    })
+    .clone()
+}
+
 fn state() -> (St, Arc<Mock>) {
     let mock = Arc::new(Mock::default());
-    let st = AppState::new(mock.clone(), LoginLinks::new(), WebConfig { domain: "pm.test".into(), port: 443 });
+    let st = AppState::new(
+        mock.clone(),
+        LoginLinks::new(),
+        WebConfig { domain: "pm.test".into(), port: 443, agent_bin_dir: Some(agent_bin_dir()) },
+    );
     (st, mock)
 }
 
@@ -484,9 +521,13 @@ async fn tokens_show_enroll_command_and_revoke() {
     let (cookie, csrf) = login(&st).await;
     let r = send(&st, Method::POST, "/tokens", Some(&cookie), Some(&format!("csrf={csrf}&label=laptop")), &[]).await;
     assert_eq!(r.status, StatusCode::OK);
-    // HTML 转义后（浏览器显示为原文）：passmanager enroll 'pm-enroll://pm.test:8443/CODE#FPR'
-    assert!(r.body.contains("passmanager enroll 'pm-enroll:&#x2f;&#x2f;pm.test:8443&#x2f;CODE#FPR'"), "{}", r.body);
-    assert!(r.body.contains("install-agent.sh"));
+    // 接入说明：一行命令（HTML 转义后浏览器显示为原文）与给 AI 的规则；没有其他安装方式。
+    assert!(r.body.contains("curl --proto =https --tlsv1.3 -fsSL https:&#x2f;&#x2f;pm.test&#x2f;a&#x2f;"), "{}", r.body);
+    assert!(r.body.contains("PassManager agent setup") && r.body.contains("MCP tools"));
+    assert_eq!(r.body.matches(BOOT_CODE).count(), 1, "开发构建：只有一行命令里有注册码");
+    assert!(!r.body.contains("install-agent.sh") && !r.body.contains("irm "));
+    let r = send(&st, Method::POST, "/tokens", Some(&cookie), Some(&format!("csrf={csrf}&label=laptop&lang=zh")), &[]).await;
+    assert!(r.body.contains("PassManager 接入说明") && r.body.contains("MCP 工具"));
     let r = send(&st, Method::POST, "/tokens/ab12cd34/revoke", Some(&cookie), Some(&format!("csrf={csrf}")), &[]).await;
     assert_eq!(r.status, StatusCode::SEE_OTHER);
     let r = send(&st, Method::POST, "/tokens/nope/revoke", Some(&cookie), Some(&format!("csrf={csrf}")), &[]).await;
@@ -500,7 +541,7 @@ async fn tokens_show_enroll_command_and_revoke() {
     let r = send(&st, Method::POST, "/pins/trust", Some(&cookie), Some(&format!("csrf={csrf}&pattern=db1.example.com")), &[]).await;
     assert_eq!(r.status, StatusCode::SEE_OTHER);
     let log = mock.log.lock().unwrap().join("\n");
-    assert!(log.contains("EnrollCreate") && log.contains("RevokeToken") && log.contains("SetSettings { auto_lock_hours: 6 }"));
+    assert!(log.contains("AgentSetup") && log.contains("RevokeToken") && log.contains("SetSettings { auto_lock_hours: 6 }"));
     // done 参数只映射到固定文字，不反射输入。
     let r = send(&st, Method::GET, "/tokens?done=%3Cscript%3E", Some(&cookie), None, &[]).await;
     assert!(!r.body.contains("<script") && !r.body.contains("&lt;script"));
@@ -611,7 +652,7 @@ fn every_template_escapes_injected_values() {
     let base = serde_json::json!({
         "csrf": P, "conn": {"group": P, "suite": P, "peer": P}, "flash": P, "flash_kind": P, "heading": P, "message": P, "token": P,
         "st": status.clone(), "entries": [entry.clone(), key_entry], "form": {"name": P, "domains": P, "note": P, "self_signed": true, "auto_accept_host_key": true, "kind": P, "fields": [P, P], "new_rows": [2, 3], "host_keys": P, "ops": [P]}, "public_key": P,
-        "original": P, "enroll": {"label": P, "url": P, "minutes": 10},
+        "original": P, "enroll": {"label": P, "url": P, "text": P, "minutes": 10},
         "tokens": [{"id": P, "label": P, "created": 0, "last_used": 0}], "pending": [{"id": P, "label": P, "expires_in_secs": 70,
             "kind": P, "host_port": P, "old_fingerprint": P, "new_fingerprint": P, "seen_at": 0}],
         "pins": [{"kind": P, "host_port": P, "algo": P, "fingerprint": P, "first_seen": 0}],
@@ -646,4 +687,63 @@ fn every_template_escapes_injected_values() {
         assert!(!out.contains("<svg"), "{name}");
     }
     let _ = p;
+}
+
+async fn boot(st: &St, method: Method, uri: &str) -> (StatusCode, HeaderMap, Vec<u8>) {
+    let b = axum::http::Request::builder().method(method).uri(uri).header("host", "pm.test");
+    let r = router(st.clone()).oneshot(b.body(Body::empty()).unwrap()).await.unwrap();
+    let (s, h) = (r.status(), r.headers().clone());
+    (s, h, r.into_body().collect().await.unwrap().to_bytes().to_vec())
+}
+
+/// 一键接入：/a/<注册码> 返回脚本（内嵌服务器上已有程序的 SHA-256 与 pm-enroll URL），/a/<注册码>/bin/<目标> 返回程序；
+/// 只接受 GET / HEAD；未知或格式错误的注册码、未知目标 → 404（不说明原因）；限速。
+#[tokio::test]
+async fn bootstrap_routes() {
+    let (st, mock) = state();
+    let (s, h, body) = boot(&st, Method::GET, &format!("/a/{BOOT_CODE}")).await;
+    assert_eq!(s, StatusCode::OK);
+    assert!(h.get("content-type").unwrap().to_str().unwrap().starts_with("text/plain"));
+    let script = String::from_utf8(body).unwrap();
+    assert!(script.contains(&format!("PM_BASE='https://pm.test/a/{BOOT_CODE}'")));
+    assert!(script.contains(&format!("PM_ENROLL='pm-enroll://pm.test:8443/{BOOT_CODE}#FPR'")));
+    assert!(script.contains(&format!("x86_64-unknown-linux-gnu) sum={} ;;", hex::encode(pm_crypto::sha256(b"fake-linux-client")))));
+    assert!(script.contains(&format!("universal-apple-darwin) sum={} ;;", hex::encode(pm_crypto::sha256(b"fake-mac-client")))));
+    assert!(!script.contains("aarch64-unknown-linux-gnu) sum="));
+    if std::process::Command::new("shellcheck").arg("--version").output().is_ok_and(|o| o.status.success()) {
+        let f = agent_bin_dir().join("bootstrap.sh");
+        std::fs::write(&f, &script).unwrap();
+        let o = std::process::Command::new("shellcheck").arg("-s").arg("sh").arg(&f).output().unwrap();
+        assert!(o.status.success(), "shellcheck: {}", String::from_utf8_lossy(&o.stdout));
+    }
+    let (s, _, body) = boot(&st, Method::HEAD, &format!("/a/{BOOT_CODE}")).await;
+    assert_eq!((s, body.len()), (StatusCode::OK, 0));
+    assert_eq!(boot(&st, Method::POST, &format!("/a/{BOOT_CODE}")).await.0, StatusCode::METHOD_NOT_ALLOWED);
+    let (s, h, body) = boot(&st, Method::GET, &format!("/a/{BOOT_CODE}/bin/x86_64-unknown-linux-gnu")).await;
+    assert_eq!((s, body.as_slice()), (StatusCode::OK, &b"fake-linux-client"[..]));
+    assert_eq!(h.get("content-length").unwrap(), "17");
+    assert_eq!(boot(&st, Method::GET, &format!("/a/{BOOT_CODE}/bin/aarch64-unknown-linux-gnu")).await.0, StatusCode::NOT_FOUND);
+    assert_eq!(boot(&st, Method::GET, &format!("/a/{BOOT_CODE}/bin/..%2f..%2fetc%2fpasswd")).await.0, StatusCode::NOT_FOUND);
+    let unknown = "Z".repeat(43);
+    let (s, _, body) = boot(&st, Method::GET, &format!("/a/{unknown}")).await;
+    assert_eq!((s, body.as_slice()), (StatusCode::NOT_FOUND, &b"not found\n"[..]), "不说明原因");
+    assert_eq!(boot(&st, Method::GET, &format!("/a/{unknown}/bin/x86_64-unknown-linux-gnu")).await.0, StatusCode::NOT_FOUND);
+    assert_eq!(boot(&st, Method::GET, "/a/short").await.0, StatusCode::NOT_FOUND);
+    let log = mock.log.lock().unwrap().join("\n");
+    assert!(log.contains("EnrollPeek") && !log.contains("EnrollConsume"), "只查询，不消耗");
+    // 无效注册码达到上限后，该来源被限速（有效注册码也一样）。
+    for _ in 0..10 {
+        boot(&st, Method::GET, &format!("/a/{unknown}")).await;
+    }
+    assert_eq!(boot(&st, Method::GET, &format!("/a/{BOOT_CODE}")).await.0, StatusCode::TOO_MANY_REQUESTS);
+    // 访问次数上限。
+    let (st2, _) = state();
+    let mut last = StatusCode::OK;
+    for _ in 0..31 {
+        last = boot(&st2, Method::GET, &format!("/a/{BOOT_CODE}")).await.0;
+    }
+    assert_eq!(last, StatusCode::TOO_MANY_REQUESTS);
+    // 没有配置程序目录：一律 404。
+    let st3 = AppState::new(mock.clone(), LoginLinks::new(), WebConfig { domain: "pm.test".into(), port: 443, agent_bin_dir: None });
+    assert_eq!(boot(&st3, Method::GET, &format!("/a/{BOOT_CODE}")).await.0, StatusCode::NOT_FOUND);
 }

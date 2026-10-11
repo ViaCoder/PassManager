@@ -8,6 +8,7 @@
 //! - 局域网在线版（服务器，root）：`passmanager init|login|token|status|lock|unlock|reseal`；
 //!   Agent 端：`passmanager enroll <注册码>`，之后 MCP / CLI 用法不变。
 
+mod agent_instructions;
 mod cli;
 mod git_proxy;
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
@@ -254,6 +255,36 @@ enum Cmd {
         #[arg(long = "host-key")]
         host_keys: Vec<String>,
     },
+    /// [服务器，root] 为一台 Agent 机器生成接入说明（含一次性注册码），整段交给那台机器上的 AI Agent
+    #[command(after_help = "\
+打印一段给 AI Agent 的文字：一行安装命令（curl … | sh：安装客户端、注册、配置 MCP 与使用规则）、
+TLS 握手失败时从固定的发布源码构建客户端的步骤，以及使用规则。注册码 10 分钟内有效、只能使用一次。
+
+示例：
+  ssh root@server passmanager agent-setup --label laptop
+  ssh root@server passmanager agent-setup --label build-box --lang zh")]
+    AgentSetup {
+        /// 标签（例如机器名或 Agent 名），默认 agent
+        #[arg(long, default_value = "agent")]
+        label: String,
+        /// 说明语言：en（默认）或 zh
+        #[arg(long, default_value = "en")]
+        lang: String,
+    },
+    /// 打印给 AI Agent 的 PassManager 使用规则（enroll 时会写入 Agent 的全局指令文件）
+    AgentInstructions {
+        /// en（默认）或 zh
+        #[arg(long, default_value = "en")]
+        lang: String,
+    },
+    /// [Agent 机器] 取消注册：删除远程配置与令牌、移除 MCP 配置与写入的使用规则
+    Unenroll,
+    /// 内部：一键接入用的 Agent 程序目录（安装脚本使用）
+    #[command(hide = true)]
+    AgentBinDir,
+    /// 构建信息：版本、发布标签与提交（只有从发布标签构建时才有后两项）
+    #[command(hide = true)]
+    BuildInfo,
     /// [服务器，root] 管理 Agent 令牌
     #[command(
         subcommand,
@@ -280,9 +311,12 @@ enum Cmd {
     Enroll {
         /// 注册码（pm-enroll://主机:端口/注册码#指纹）
         code: String,
-        /// 不写入 Agent 的 MCP 配置
+        /// 不写入 Agent 的 MCP 配置（也不写使用规则）
         #[arg(long)]
         no_mcp: bool,
+        /// 不把使用规则写入 Agent 的全局指令文件（CLAUDE.md、AGENTS.md 等）
+        #[arg(long)]
+        no_instructions: bool,
         /// 测试：直接连接的 IPv4:端口
         #[arg(long, hide = true)]
         connect_addr: Option<std::net::SocketAddr>,
@@ -429,8 +463,29 @@ fn main() -> ExitCode {
         Some(Cmd::Status) => server::status(),
         Some(Cmd::Lock) => server::lock(false),
         Some(Cmd::Reseal) => server::reseal(),
-        Some(Cmd::Enroll { code, no_mcp, connect_addr, ca_file }) => {
-            remote::enroll_cmd(&code, remote::EnrollOpts { no_mcp, connect_addr, ca_file })
+        Some(Cmd::Enroll { code, no_mcp, no_instructions, connect_addr, ca_file }) => {
+            remote::enroll_cmd(&code, remote::EnrollOpts { no_mcp, no_instructions, connect_addr, ca_file })
+        }
+        Some(Cmd::AgentSetup { label, lang }) => server::agent_setup(&label, &lang),
+        Some(Cmd::AgentInstructions { lang }) => match pm_proto::agent_text::Lang::parse(&lang) {
+            Ok(l) => {
+                print!("{}", pm_proto::agent_text::instruction_block(l));
+                ExitCode::SUCCESS
+            }
+            Err(e) => install::fail(e),
+        },
+        Some(Cmd::Unenroll) => remote::unenroll(),
+        Some(Cmd::BuildInfo) => {
+            let b = pm_service::build_info();
+            match b.pinned() {
+                Some((tag, commit)) => println!("version {}\ntag {tag}\ncommit {commit}", b.version),
+                None => println!("version {}\ntag none (development build)\ncommit none", b.version),
+            }
+            ExitCode::SUCCESS
+        }
+        Some(Cmd::AgentBinDir) => {
+            println!("{}", server::layout().data_dir.join("agent-bin").display());
+            ExitCode::SUCCESS
         }
         Some(Cmd::ImportCert { chain, key }) => server::import_cert(&chain, &key),
         Some(Cmd::GitProxy { listen, hosts }) => git_proxy::run(listen, hosts),
