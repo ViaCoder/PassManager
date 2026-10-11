@@ -4,6 +4,14 @@
 
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.3.3] - 2026-10-11
+
+### 修复
+
+- **没有附加组的 root 访问 swtpm 套接字**：`service-prepare`（systemd 以 `ExecStartPre=+…` 运行，即没有任何附加组的 root）看不到只能经组权限访问的 swtpm 套接字（例如非特权 LXC 里 `0750` 目录中的 `nobody:tss 0660` 套接字，未映射的属主让 root 没有 DAC 豁免），一直等待（"TPM 没有出现"）并无限重启。现在以 root 运行时，在任何 TPM 访问之前（service-prepare、reseal、init/status 的检测）先加入套接字所在目录与套接字的组（以及 tss），`systemd-creds` 子进程随之继承。从不修改文件权限。
+- 等待时要求套接字能连接上，并报告实际的失败原因：不存在（ENOENT）、没有权限（EACCES——作为权限问题报告，而不是"TPM 没有出现"）或拒绝连接（swtpm 没有在监听）。
+- `install-server.sh`：套接字及其目录只对某个组开放时，把这些组加入服务的 `SupplementaryGroups`（服务用套接字取 TPM 随机数）；`server-unit --tpm-group` 接受经过校验的空格分隔组名列表。
+
 ## [0.3.2] - 2026-10-11
 
 ### 修复

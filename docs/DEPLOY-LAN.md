@@ -116,6 +116,10 @@ the config directory (0600) so other local programs cannot borrow the proxy.
 
 `/dev/tpmrm0` is auto-detected. A software TPM exposed as a swtpm Unix socket can be configured with `--tpm-socket <path>`.
 Then run `./install-server.sh --site-file site.local.env --skip-acme` (libraries, tss group) and `passmanager reseal`.
+If the socket and its directory are only group-accessible (for example `nobody:tss 0660` in a `0750` directory), PassManager joins
+those groups when running as root (also in `ExecStartPre=+`, which starts without supplementary groups) and the installer adds them
+to the service's `SupplementaryGroups`; permissions are never changed. `journalctl -u passmanager` tells ENOENT, EACCES and
+ECONNREFUSED apart if the TPM still cannot be reached.
 Losing or clearing the TPM state, or moving to another host, makes the vault permanently unreadable — there is no recovery.
 
 ## 5. Failures

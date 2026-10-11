@@ -4,6 +4,14 @@ English | [简体中文](CHANGELOG.zh-CN.md)
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.3.3] - 2026-10-11
+
+### Fixed
+
+- **swtpm socket access from root without supplementary groups**: `service-prepare` (run by systemd as `ExecStartPre=+…`, i.e. root without supplementary groups) could not see a swtpm socket that is only accessible through its group (for example `nobody:tss 0660` in a `0750` directory in an unprivileged LXC, where root has no DAC override for the unmapped owner) and kept waiting ("TPM did not appear"), restarting forever. When running as root, PassManager now joins the group of the socket's directory and of the socket (and `tss`) before any TPM access — service-prepare, reseal, init/status probes — and `systemd-creds` children inherit them. File permissions are never changed.
+- The wait now requires the socket to accept a connection and reports what actually failed: missing (ENOENT), permission denied (EACCES — reported as a permission problem, not as a missing TPM) or connection refused (swtpm not listening).
+- `install-server.sh` adds the socket's and its directory's group to the service's `SupplementaryGroups` when they are only group-accessible (the service uses the socket for TPM randomness); `server-unit --tpm-group` accepts a space-separated list of validated group names.
+
 ## [0.3.2] - 2026-10-11
 
 ### Fixed

@@ -54,6 +54,7 @@ cp "$SRC/scripts/install-server.sh" "$SRC/scripts/install-agent.sh" "$PKG/"
 SOCK="$T/swtpm/tpm.sock"
 mkdir -p "$(dirname "$SOCK")"
 python3 -I -c "import socket,sys; s=socket.socket(socket.AF_UNIX); s.bind(sys.argv[1])" "$SOCK"
+chmod 0666 "$SOCK"   # 对所有人开放：服务账户不需要额外的组（组限制的情况见后面单独的检查）
 
 export PASSMANAGER_TPM_SOCKET=/nonexistent/tpm.sock PASSMANAGER_TPM_DEVICE=/nonexistent/tpmrm0
 TOKEN="cf-Secret-Token-Do-Not-Leak-123"
@@ -147,6 +148,21 @@ check "发布包：校验通过的 macOS 程序已解出" '[ "$(cat "$AB/PassMan
 # 与服务器架构无关：aarch64 包要么因校验不一致被跳过，要么（aarch64 服务器上）让位给本机程序；内容都不会被安装。
 check "发布包：校验不一致的跳过并警告" '! grep -q arm-client "$AB"/* && grep -Eq "跳过 PassManager-0.3.0-aarch64-unknown-linux-gnu.tar.gz|PassManager-0.3.0-aarch64-unknown-linux-gnu.tar.gz：使用本机程序" "$T/out3.txt"'
 check "发布包：Windows 包与未知文件忽略" '[ ! -e "$AB/PassManager-x86_64-pc-windows-msvc" ] && [ -z "$(find "$AB" -type f ! -name PassManager-x86_64-unknown-linux-gnu ! -name PassManager-aarch64-unknown-linux-gnu ! -name PassManager-universal-apple-darwin)" ]'
+
+echo "== swtpm 套接字只对某个组开放：服务账户加入该组（不修改套接字权限）"
+GS="$T/gsock/tpm.sock"
+mkdir -p "$(dirname "$GS")"
+python3 -I -c "import socket,sys; s=socket.socket(socket.AF_UNIX); s.bind(sys.argv[1])" "$GS"
+chmod 0750 "$(dirname "$GS")"; chmod 0660 "$GS"
+GRP="$(stat -c %G "$GS")"
+if DRY_RUN=1 ROOT="$T/root-g" PATH="$F:$PATH" bash "$PKG/install-server.sh" --domain pm.example.com --lan-cidr 198.51.100.0/24 --skip-acme --tpm-socket "$GS" < /dev/null > "$T/out-g.txt" 2>&1; then
+  check "单元：SupplementaryGroups 包含 tss 与套接字的组" 'grep -qx "SupplementaryGroups=tss $GRP" "$T/root-g/etc/systemd/system/passmanager.service"'
+  check "套接字与目录的权限没有被修改" '[ "$(stat -c %a "$GS")" = 660 ] && [ "$(stat -c %a "$(dirname "$GS")")" = 750 ]'
+else
+  bad "组限制的套接字：安装失败"; cat "$T/out-g.txt"
+fi
+check "server-unit 拒绝无效的组名" '! "$PKG/PassManager" server-unit --tpm-group "tss
+ExecStart=/bin/sh" > /dev/null 2>&1'
 
 echo "== 一键接入的程序目录：按服务器架构（模拟 uname -m）"
 # 本机程序总是提供且不被发布包覆盖；其他目标来自校验通过的发布包；校验不一致的从不安装。

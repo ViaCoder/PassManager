@@ -497,9 +497,9 @@ pub fn reseal_with(l: &Layout, systemctl: &dyn Fn(&[&str]) -> Result<(), String>
     if info.seal_method == METHOD_TPM && kind == CredKind::HostTpm2 {
         return Ok("已经是 L3（TPM + 主机密钥），无需操作。".into());
     }
-    let Some(tpm) = sl::discover_tpm() else {
-        return Err("没有发现 TPM：需要 /dev/tpmrm0，或用 passmanager init --tpm-socket <路径> 配置 swtpm 套接字。".into());
-    };
+    let tpm = sl::wait_for_tpm(Duration::ZERO, Duration::ZERO).map_err(|m| {
+        format!("没有发现 TPM（{}）：需要 /dev/tpmrm0，或用 passmanager init --tpm-socket <路径> 配置 swtpm 套接字。", m.describe())
+    })?;
     let dk = sl::decrypt_from(&cred).map_err(|e| format!("无法解开现有的设备密钥：{e}"))?;
     let mut new = cred.as_os_str().to_owned();
     new.push(".new");
@@ -539,6 +539,15 @@ pub fn prepare(l: &Layout, info: &InstallInfo) -> Result<(), u8> {
     prepare_with(l, info, TPM_WAIT)
 }
 
+/// service-prepare 等不到 TPM 时的说明：区分权限问题（EACCES）、不存在（ENOENT）与拒绝连接（ECONNREFUSED）。
+pub fn tpm_wait_message(m: &sl::TpmMissing, waited: Duration) -> String {
+    if m.permission_denied() {
+        format!("{} 秒内无法访问 TPM：{}。这是权限问题，不是 TPM 没有出现；稍后重试", waited.as_secs(), m.describe())
+    } else {
+        format!("TPM 在 {} 秒内不可用：{}，稍后重试", waited.as_secs(), m.describe())
+    }
+}
+
 pub fn prepare_with(l: &Layout, info: &InstallInfo, tpm_wait: Duration) -> Result<(), u8> {
     let cfg = info.server.as_ref().ok_or(EXIT_CONFIG)?;
     sl::set_tpm_socket(cfg.tpm_socket.clone().map(Into::into));
@@ -556,9 +565,9 @@ pub fn prepare_with(l: &Layout, info: &InstallInfo, tpm_wait: Duration) -> Resul
     let tpm = info.seal_method == METHOD_TPM;
     if tpm {
         match sl::wait_for_tpm(tpm_wait, Duration::from_millis(100)) {
-            Some(t) => eprintln!("[PassManager] TPM: {}", t.describe()),
-            None => {
-                eprintln!("[PassManager] TPM 在 {} 秒内没有出现（swtpm 套接字或 /dev/tpmrm0），稍后重试", tpm_wait.as_secs());
+            Ok(t) => eprintln!("[PassManager] TPM: {}", t.describe()),
+            Err(m) => {
+                eprintln!("[PassManager] {}", tpm_wait_message(&m, tpm_wait));
                 return Err(EXIT_TRANSIENT);
             }
         }
@@ -596,8 +605,26 @@ pub fn prepare_with(l: &Layout, info: &InstallInfo, tpm_wait: Duration) -> Resul
     }
 }
 
+/// 空格分隔的组名列表（每个名字：字母或下划线开头，只含字母、数字、`_`、`-`，最长 32）。
+pub fn valid_group_list(s: &str) -> bool {
+    let names: Vec<&str> = s.split(' ').collect();
+    !names.is_empty()
+        && names.iter().all(|n| {
+            !n.is_empty()
+                && n.len() <= 32
+                && n.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
+                && n.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+        })
+}
+
 /// 输出服务器模式的 systemd 单元 / tmpfiles.d（系统布局；有 install.json 时使用其中的配置）。
 pub fn print_unit(tpm_group: Option<&str>, tmpfiles: bool) -> ExitCode {
+    // 可以是空格分隔的多个组名（例如 "tss swtpm"）；只接受合法的组名，防止向单元文件注入其他配置。
+    if let Some(g) = tpm_group
+        && !valid_group_list(g)
+    {
+        return fail(format!("无效的组名：{g}"));
+    }
     let l = Layout::system();
     let info = InstallInfo::load(&l).ok().filter(|i| i.server.is_some()).unwrap_or_else(|| InstallInfo {
         mode: Mode::System,
@@ -642,6 +669,14 @@ pub fn import_cert(chain: &Path, key: &Path) -> ExitCode {
 mod tests {
     use super::*;
     use pm_platform::seal::linux::SystemdCredsSealer;
+
+    #[test]
+    fn unit_group_names_are_validated() {
+        assert!(valid_group_list("tss") && valid_group_list("tss swtpm") && valid_group_list("_x-1"));
+        for bad in ["", "tss  x", "tss\nExecStart=/bin/sh", "1abc", "a;b", "tss ", &"g".repeat(33)] {
+            assert!(!valid_group_list(bad), "{bad:?}");
+        }
+    }
 
     #[test]
     fn exit_codes_and_wait_bound() {
@@ -749,6 +784,28 @@ mod tests {
         assert_eq!(prepare_with(&l, &info3, Duration::from_millis(300)), Err(EXIT_TRANSIENT));
         assert!(t0.elapsed() >= Duration::from_millis(300) && t0.elapsed() < Duration::from_secs(5));
         assert!(!l.key_handoff_path().exists());
+        let m = sl::wait_for_tpm(Duration::from_millis(50), Duration::from_millis(10)).unwrap_err();
+        let msg = tpm_wait_message(&m, Duration::from_secs(60));
+        assert!(msg.contains("ENOENT") && msg.contains("不可用") && !msg.contains("权限问题"), "{msg}");
+        // 套接字在，但所在目录只对某个组开放、本进程不在组里（模拟没有附加组的 root）：报告权限问题而不是"没有出现"。
+        if !nix::unistd::geteuid().is_root() {
+            use std::os::unix::fs::PermissionsExt;
+            let locked = dir.path().join("locked");
+            std::fs::create_dir(&locked).unwrap();
+            let s2 = locked.join("tpm.sock");
+            let _l2 = std::os::unix::net::UnixListener::bind(&s2).unwrap();
+            std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+            unsafe { std::env::set_var("PASSMANAGER_TPM_SOCKET", &s2) };
+            assert_eq!(prepare_with(&l, &info3, Duration::from_millis(200)), Err(EXIT_TRANSIENT));
+            let m = sl::wait_for_tpm(Duration::from_millis(50), Duration::from_millis(10)).unwrap_err();
+            let msg = tpm_wait_message(&m, Duration::from_secs(60));
+            assert!(m.permission_denied() && msg.contains("EACCES") && msg.contains("权限问题"), "{msg}");
+            // 连接被拒绝（swtpm 没有在监听）也单独说明。
+            std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+            drop(_l2);
+            let m = sl::wait_for_tpm(Duration::from_millis(50), Duration::from_millis(10)).unwrap_err();
+            assert!(tpm_wait_message(&m, Duration::from_secs(60)).contains("ECONNREFUSED"));
+        }
         unsafe {
             for k in ["PASSMANAGER_SYSTEMD_CREDS", "PASSMANAGER_TPM_SOCKET", "PASSMANAGER_TPM_DEVICE", "FAKE_EXPECT_TPM2_DEVICE"] {
                 std::env::remove_var(k);

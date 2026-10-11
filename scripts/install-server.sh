@@ -150,6 +150,20 @@ if getent group tss >/dev/null 2>&1; then
   # systemd-creds（root，在 ExecStartPre 里）访问 TPM（/dev/tpmrm0 或 swtpm 套接字，通常属于 tss 组）。
   usermod -aG tss root
 fi
+# swtpm 套接字及其所在目录只对某个组开放时（例如 nobody:tss 0660 / 0750），服务账户也需要那个组
+# （服务进程用套接字取 TPM 随机数）。只加入组，从不修改宿主机提供的文件权限。
+if [ -n "$TPM_SOCKET" ]; then
+  for p in "$(dirname "$TPM_SOCKET")" "$TPM_SOCKET"; do
+    st="$(stat -c '%a %G' "$p" 2>/dev/null || true)"
+    [ -n "$st" ] || continue
+    mode="${st%% *}"; grp="${st#* }"
+    o=$(( 8#$mode % 8 )); g=$(( (8#$mode / 8) % 8 ))
+    if [ -d "$p" ]; then need=$(( (o & 1) == 0 && (g & 1) == 1 )); else need=$(( (o & 6) != 6 && (g & 6) == 6 )); fi
+    [ "$need" = 1 ] || continue
+    case "$grp" in ""|root|nogroup|UNKNOWN) continue ;; esac
+    case " $TPM_GROUP " in *" $grp "*) ;; *) TPM_GROUP="${TPM_GROUP:+$TPM_GROUP }$grp" ;; esac
+  done
+fi
 if { [ -n "$TPM_SOCKET" ] && [ -S "$TPM_SOCKET" ]; } || [ -e /dev/tpmrm0 ]; then
   missing=""
   for pair in libtss2-esys.so.0:libtss2-esys-3.0.2-0t64 libtss2-rc.so.0:libtss2-rc0t64 libtss2-mu.so.0:libtss2-mu-4.0.1-0t64 \

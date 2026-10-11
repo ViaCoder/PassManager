@@ -132,7 +132,10 @@ git clone https://github.com/owner/repo.git
 ## 4. TPM（L3）
 
 TPM 自动检测 `/dev/tpmrm0`。如果宿主机以 swtpm Unix 套接字的形式给容器提供软件 TPM，用 `--tpm-socket <路径>` 配置
-（例如 `/run/swtpm/tpm.sock`；需要 tss2 的 swtpm TCTI 运行库，脚本会安装）。之后：
+（例如 `/run/swtpm/tpm.sock`；需要 tss2 的 swtpm TCTI 运行库，脚本会安装）。套接字与所在目录只对某个组开放时
+（例如 `0750` 目录里的 `nobody:tss 0660`），PassManager 以 root 运行时（包括没有附加组的 `ExecStartPre=+`）会加入这些组，
+安装脚本也把它们加入服务的 `SupplementaryGroups`；从不修改权限。仍然无法访问时，`journalctl -u passmanager` 会区分
+ENOENT、EACCES 与 ECONNREFUSED。之后：
 
 ```sh
 ./install-server.sh --site-file site.local.env --skip-acme   # 补装运行库、root 加入 tss（证书配置不变）
