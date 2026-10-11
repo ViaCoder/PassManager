@@ -4,6 +4,13 @@
 
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.3.2] - 2026-10-11
+
+### 修复
+
+- `install-server.sh --agent-bundle`：服务器自身的程序总是作为它自己的目标提供（例如 arm64 服务器上的 `aarch64-unknown-linux-gnu`），发布包里同一目标的程序不再覆盖它，Agent 拿到的版本与服务器完全一致。与 `SHA256SUMS` 不一致的包仍然跳过并警告。此前本机目标的发布包会覆盖服务器自身的程序。
+- 安装脚本测试假定主机是 x86_64（在 arm64 的 CI 运行器上失败）；现在在任何机器上都按每种模拟的 `uname -m`（`x86_64`、`amd64`、`aarch64`、`arm64` 与一种未知架构）运行发布包逻辑。
+
 ## [0.3.1] - 2026-10-11
 
 ### 修复

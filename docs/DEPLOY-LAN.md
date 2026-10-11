@@ -61,8 +61,8 @@ accepted from the configured CIDRs. `passmanager unenroll` removes the configura
 revoke the token in the web UI or with `passmanager token revoke <id>`.
 
 The installer copies its own binary into `/var/lib/passmanager/agent-bin/`; for other platforms pass
-`--agent-bundle <dir>` with the release archives (`PassManager-<version>-<target>.tar.gz`, optionally `SHA256SUMS`). The server
-never downloads anything at request time.
+`--agent-bundle <dir>` with the release archives (`PassManager-<version>-<target>.tar.gz`, optionally `SHA256SUMS`); an archive for
+the server's own target never replaces the server's binary. The server never downloads anything at request time.
 
 ### 3.1 Importing secrets (server, root)
 

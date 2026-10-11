@@ -117,14 +117,19 @@ R2="$T/root2"
 : > "$LOG"
 SITE="$T/site.local.env"
 printf '# 本地站点配置\nDOMAIN=pm2.example.com\nLAN_CIDRS="192.0.2.0/24 198.51.100.0/25"\nWEB_PORT=8444\nSERVER_HOST=203.0.113.9   # 与安装无关的键被忽略\n$(touch %s/pwned)\n' "$T" > "$SITE"
-# 发布包目录：macOS 包校验通过；aarch64 包与 SHA256SUMS 不一致；Windows 包与未知文件忽略。
-B="$T/bundle"; mkdir -p "$B/s1/PassManager-0.3.0-universal-apple-darwin" "$B/s2/PassManager-0.3.0-aarch64-unknown-linux-gnu"
-printf 'mac-client' > "$B/s1/PassManager-0.3.0-universal-apple-darwin/PassManager"
-printf 'arm-client' > "$B/s2/PassManager-0.3.0-aarch64-unknown-linux-gnu/PassManager"
-tar -C "$B/s1" -czf "$B/PassManager-0.3.0-universal-apple-darwin.tar.gz" PassManager-0.3.0-universal-apple-darwin
-tar -C "$B/s2" -czf "$B/PassManager-0.3.0-aarch64-unknown-linux-gnu.tar.gz" PassManager-0.3.0-aarch64-unknown-linux-gnu
+# 发布包目录：x86_64 Linux 与 macOS 包校验通过；aarch64 Linux 包与 SHA256SUMS 不一致；Windows 包与未知文件忽略。
+B="$T/bundle"
+mkpkg() { # 目标 内容
+  mkdir -p "$B/s/PassManager-0.3.0-$1"
+  printf '%s' "$2" > "$B/s/PassManager-0.3.0-$1/PassManager"
+  tar -C "$B/s" -czf "$B/PassManager-0.3.0-$1.tar.gz" "PassManager-0.3.0-$1"
+}
+mkpkg universal-apple-darwin mac-client
+mkpkg x86_64-unknown-linux-gnu x86-client
+mkpkg aarch64-unknown-linux-gnu arm-client
 printf 'zip' > "$B/PassManager-0.3.0-x86_64-pc-windows-msvc.zip"
-(cd "$B" && sha256sum PassManager-0.3.0-universal-apple-darwin.tar.gz > SHA256SUMS && printf '%064d  PassManager-0.3.0-aarch64-unknown-linux-gnu.tar.gz\n' 0 >> SHA256SUMS)
+(cd "$B" && sha256sum PassManager-0.3.0-universal-apple-darwin.tar.gz PassManager-0.3.0-x86_64-unknown-linux-gnu.tar.gz > SHA256SUMS \
+  && printf '%064d  PassManager-0.3.0-aarch64-unknown-linux-gnu.tar.gz\n' 0 >> SHA256SUMS)
 printf 'AGENT_BUNDLE=%s\n' "$B" >> "$SITE"
 if DRY_RUN=1 ROOT="$R2" PATH="$F:$PATH" bash "$PKG/install-server.sh" --site-file "$SITE" < /dev/null > "$T/out3.txt" 2>&1; then
   ok "无 token 时跳过证书申请"
@@ -139,8 +144,37 @@ check "站点文件不会被当作脚本执行" '[ ! -e "$T/pwned" ]'
 check "没有配置 TPM 套接字" '! grep -q "tpm_socket" "$R2/var/lib/passmanager-dryrun/data/install.json"'
 AB="$R2/var/lib/passmanager-dryrun/data/agent-bin"
 check "发布包：校验通过的 macOS 程序已解出" '[ "$(cat "$AB/PassManager-universal-apple-darwin")" = mac-client ]'
-check "发布包：校验不一致的跳过并警告" '[ ! -e "$AB/PassManager-aarch64-unknown-linux-gnu" ] && grep -q "跳过 PassManager-0.3.0-aarch64-unknown-linux-gnu.tar.gz" "$T/out3.txt"'
-check "发布包：Windows 包与未知文件忽略" '[ "$(find "$AB" -type f | wc -l)" = 2 ]'
+# 与服务器架构无关：aarch64 包要么因校验不一致被跳过，要么（aarch64 服务器上）让位给本机程序；内容都不会被安装。
+check "发布包：校验不一致的跳过并警告" '! grep -q arm-client "$AB"/* && grep -Eq "跳过 PassManager-0.3.0-aarch64-unknown-linux-gnu.tar.gz|PassManager-0.3.0-aarch64-unknown-linux-gnu.tar.gz：使用本机程序" "$T/out3.txt"'
+check "发布包：Windows 包与未知文件忽略" '[ ! -e "$AB/PassManager-x86_64-pc-windows-msvc" ] && [ -z "$(find "$AB" -type f ! -name PassManager-x86_64-unknown-linux-gnu ! -name PassManager-aarch64-unknown-linux-gnu ! -name PassManager-universal-apple-darwin)" ]'
+
+echo "== 一键接入的程序目录：按服务器架构（模拟 uname -m）"
+# 本机程序总是提供且不被发布包覆盖；其他目标来自校验通过的发布包；校验不一致的从不安装。
+REAL_UNAME="$(command -v uname)"
+for arch in x86_64 amd64 aarch64 arm64 riscv64; do
+  case "$arch" in
+    x86_64|amd64) native=x86_64-unknown-linux-gnu ;;
+    aarch64|arm64) native=aarch64-unknown-linux-gnu ;;
+    *) native="" ;;
+  esac
+  RA="$T/root-arch-$arch"
+  printf '#!/bin/sh\n[ "$1" = -m ] && { echo %s; exit 0; }\nexec %s "$@"\n' "$arch" "$REAL_UNAME" > "$F/uname"
+  chmod +x "$F/uname"
+  if DRY_RUN=1 ROOT="$RA" PATH="$F:$PATH" bash "$PKG/install-server.sh" --domain pm.example.com --lan-cidr 198.51.100.0/24 --skip-acme --agent-bundle "$B" < /dev/null > "$T/out-$arch.txt" 2>&1; then
+    A="$RA/var/lib/passmanager-dryrun/data/agent-bin"
+    if [ -n "$native" ]; then
+      check "$arch：本机程序 = 正在安装的程序（发布包不覆盖）" 'cmp -s "$A/PassManager-$native" "$BIN"'
+    else
+      check "$arch：不认识的架构不提供本机程序" '! cmp -s "$A/PassManager-x86_64-unknown-linux-gnu" "$BIN" && ! cmp -s "$A/PassManager-aarch64-unknown-linux-gnu" "$BIN"'
+    fi
+    check "$arch：校验不一致的 aarch64 包从不安装" '! grep -q arm-client "$A"/* && { grep -q "跳过 PassManager-0.3.0-aarch64-unknown-linux-gnu.tar.gz" "$T/out-$arch.txt" || [ "$native" = aarch64-unknown-linux-gnu ]; }'
+    check "$arch：x86_64 包只在不是本机目标时安装" 'if [ "$native" = x86_64-unknown-linux-gnu ]; then cmp -s "$A/PassManager-x86_64-unknown-linux-gnu" "$BIN"; else [ "$(cat "$A/PassManager-x86_64-unknown-linux-gnu")" = x86-client ]; fi'
+    check "$arch：macOS 包已解出" '[ "$(cat "$A/PassManager-universal-apple-darwin")" = mac-client ]'
+  else
+    bad "$arch：安装失败"; cat "$T/out-$arch.txt"
+  fi
+done
+rm -f "$F/uname"
 check "--agent-bundle 不是目录时拒绝" '! DRY_RUN=1 ROOT="$T/r5" PATH="$F:$PATH" bash "$PKG/install-server.sh" --domain pm.example.com --lan-cidr 198.51.100.0/24 --agent-bundle "$T/nope" < /dev/null > /dev/null 2>&1'
 
 echo "== 参数校验"

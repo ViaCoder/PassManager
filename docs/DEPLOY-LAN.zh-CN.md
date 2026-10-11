@@ -83,7 +83,7 @@ MCP 配置（不含令牌），并把使用规则写入它们的全局指令文�
 令牌请在网页"Agent 令牌"页或用 `passmanager token revoke <ID>` 吊销。
 
 安装脚本把自身的程序复制到 `/var/lib/passmanager/agent-bin/`；其他平台用 `--agent-bundle <目录>` 提供发布包
-（`PassManager-<版本>-<目标>.tar.gz`，可附 `SHA256SUMS`）。服务器在请求时从不联网下载。
+（`PassManager-<版本>-<目标>.tar.gz`，可附 `SHA256SUMS`）；与服务器同一目标的发布包不会替换服务器自身的程序。服务器在请求时从不联网下载。
 
 ### 3.1 导入密钥（服务器，root）
 

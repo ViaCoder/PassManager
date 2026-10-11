@@ -271,10 +271,13 @@ fi
 say "一键接入用的 Agent 程序"
 AGENT_BIN_DIR="$("$PM" agent-bin-dir)"
 install -d -m 0755 "$AGENT_BIN_DIR"
+# 本机程序与服务器版本完全一致，总是提供它；发布包里同一目标的程序不会覆盖它。
 case "$(uname -m)" in
-  x86_64|amd64) install -m 0644 "$BIN_SRC" "$AGENT_BIN_DIR/PassManager-x86_64-unknown-linux-gnu" ;;
-  aarch64|arm64) install -m 0644 "$BIN_SRC" "$AGENT_BIN_DIR/PassManager-aarch64-unknown-linux-gnu" ;;
+  x86_64|amd64) NATIVE_T="x86_64-unknown-linux-gnu" ;;
+  aarch64|arm64) NATIVE_T="aarch64-unknown-linux-gnu" ;;
+  *) NATIVE_T="" ;;
 esac
+[ -n "$NATIVE_T" ] && install -m 0644 "$BIN_SRC" "$AGENT_BIN_DIR/PassManager-$NATIVE_T"
 if [ -n "$AGENT_BUNDLE" ]; then
   for f in "$AGENT_BUNDLE"/PassManager-*.tar.gz; do
     [ -e "$f" ] || continue
@@ -284,6 +287,10 @@ if [ -n "$AGENT_BUNDLE" ]; then
       case "$name" in *"-$k.tar.gz") t="$k" ;; esac
     done
     [ -n "$t" ] || continue
+    if [ "$t" = "$NATIVE_T" ]; then
+      echo "   $name：使用本机程序（与服务器版本一致），不用发布包里的"
+      continue
+    fi
     if [ -f "$AGENT_BUNDLE/SHA256SUMS" ]; then
       if ! (cd "$AGENT_BUNDLE" && grep -E "[[:space:]]\*?$name\$" SHA256SUMS | sha256sum -c --status - 2>/dev/null); then
         warn "跳过 $name：与 SHA256SUMS 不一致或没有记录"

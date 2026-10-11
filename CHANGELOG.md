@@ -4,6 +4,13 @@ English | [简体中文](CHANGELOG.zh-CN.md)
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.3.2] - 2026-10-11
+
+### Fixed
+
+- `install-server.sh --agent-bundle`: the server's own binary now always serves its own target (for example `aarch64-unknown-linux-gnu` on arm64 servers) and a release archive for the same target no longer replaces it, so agents get exactly the server's version. Archives that do not match `SHA256SUMS` are still skipped with a warning. Previously an archive for the native target could overwrite the server's binary.
+- The installer tests assumed an x86_64 host (they failed on arm64 CI runners); they now run the bundle logic for every simulated `uname -m` (`x86_64`, `amd64`, `aarch64`, `arm64`, and an unknown architecture) on any machine.
+
 ## [0.3.1] - 2026-10-11
 
 ### Fixed
