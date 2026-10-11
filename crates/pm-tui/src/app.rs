@@ -825,6 +825,7 @@ impl App {
                         note: f.note.value().trim().to_string(),
                         self_signed: f.self_signed,
                         auto_accept_host_key: f.auto_accept,
+                        ..Default::default()
                     };
                     if f.original.is_none() && input.secret.is_none() {
                         f.error = Some("密钥不能为空".into());

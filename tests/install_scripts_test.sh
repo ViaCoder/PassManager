@@ -1,0 +1,161 @@
+#!/usr/bin/env bash
+# 检查项以单引号字符串交给 eval 延后求值（SC2016），其中用到的变量由 eval 读取（SC2034）。
+# shellcheck disable=SC2016,SC2034
+# 安装脚本测试（DRY_RUN：所有文件写到临时目录，系统命令由替身记录调用）。
+# 用法：tests/install_scripts_test.sh <PassManager 可执行文件>
+set -euo pipefail
+
+BIN="$(cd "$(dirname "$1")" && pwd)/$(basename "$1")"
+SRC="$(cd "$(dirname "$0")/.." && pwd)"
+T="$(mktemp -d /tmp/pm-scripts.XXXXXX)"
+trap 'rm -rf "$T"' EXIT
+fails=0
+ok() { printf '  ok   %s\n' "$1"; }
+bad() { printf '  FAIL %s\n' "$1"; fails=$((fails + 1)); }
+check() { if eval "$2"; then ok "$1"; else bad "$1"; fi; }
+
+# ---- 替身 ----
+F="$T/fakes"; mkdir -p "$F"
+LOG="$T/calls.log"
+for c in systemctl useradd usermod apt-get; do
+  printf '#!/bin/sh\necho "%s $*" >> "%s"\n' "$c" "$LOG" > "$F/$c"
+done
+cat > "$F/sysctl" <<EOF
+#!/bin/sh
+echo "sysctl \$*" >> "$LOG"
+[ "\${FAKE_SYSCTL_FAIL:-0}" = 1 ] && { echo "sysctl: permission denied on key 'net.ipv6.conf.all.disable_ipv6'" >&2; exit 255; }
+exit 0
+EOF
+cat > "$F/nft" <<EOF
+#!/bin/sh
+echo "nft \$*" >> "$LOG"
+[ "\${FAKE_NFT_FAIL:-0}" = 1 ] && { echo "Operation not permitted" >&2; exit 1; }
+exit 0
+EOF
+cat > "$F/ldconfig" <<EOF
+#!/bin/sh
+echo "ldconfig \$*" >> "$LOG"
+[ "\${FAKE_LIBS:-0}" = 1 ] && printf '\tlibtss2-esys.so.0\n\tlibtss2-rc.so.0\n\tlibtss2-mu.so.0\n\tlibtss2-tcti-swtpm.so.0\n\tlibtss2-tcti-device.so.0\n'
+exit 0
+EOF
+cat > "$F/getent" <<EOF
+#!/bin/sh
+case "\$1 \$2" in
+  "group tss") echo "tss:x:996:"; exit 0 ;;
+  "passwd passmanager") [ "\${FAKE_USER_EXISTS:-0}" = 1 ] && { echo "passmanager:x:998:998::/nonexistent:/usr/sbin/nologin"; exit 0; }; exit 2 ;;
+esac
+exit 2
+EOF
+chmod +x "$F"/*
+
+PKG="$T/pkg"; mkdir -p "$PKG"
+cp "$BIN" "$PKG/PassManager"
+cp "$SRC/scripts/install-server.sh" "$SRC/scripts/install-agent.sh" "$PKG/"
+SOCK="$T/swtpm/tpm.sock"
+mkdir -p "$(dirname "$SOCK")"
+python3 -I -c "import socket,sys; s=socket.socket(socket.AF_UNIX); s.bind(sys.argv[1])" "$SOCK"
+
+export PASSMANAGER_TPM_SOCKET=/nonexistent/tpm.sock PASSMANAGER_TPM_DEVICE=/nonexistent/tpmrm0
+TOKEN="cf-Secret-Token-Do-Not-Leak-123"
+
+echo "== install-server.sh"
+R="$T/root"
+OUT="$T/out1.txt"
+SITE_ARGS=(--domain pm.example.com --lan-cidr 198.51.100.0/24 --lan-cidr 203.0.113.0/24)
+if printf '%s\n' "$TOKEN" | DRY_RUN=1 ROOT="$R" PATH="$F:$PATH" bash "$PKG/install-server.sh" "${SITE_ARGS[@]}" --tpm-socket "$SOCK" > "$OUT" 2>&1; then
+  ok "首次安装成功"
+else
+  bad "首次安装失败"; cat "$OUT"
+fi
+check "程序已安装" '[ -x "$R/usr/local/bin/PassManager" ] && [ "$(readlink "$R/usr/local/bin/passmanager")" = PassManager ]'
+check "创建服务账户" 'grep -q "^useradd --system --user-group --home-dir /nonexistent --no-create-home --shell /usr/sbin/nologin passmanager$" "$LOG"'
+check "root 加入 tss 组" 'grep -q "^usermod -aG tss root$" "$LOG"'
+check "有 swtpm 套接字时安装 TPM 运行库" 'grep -q "^apt-get install -y --no-install-recommends.*libtss2-tcti-swtpm0t64" "$LOG"'
+S="$R/etc/sysctl.d/99-disable-ipv6.conf"
+check "sysctl 配置" 'grep -qx "net.ipv6.conf.all.disable_ipv6 = 1" "$S" && grep -qx "net.ipv6.conf.default.disable_ipv6 = 1" "$S" && grep -qx "net.ipv6.conf.lo.disable_ipv6 = 1" "$S"'
+check "sysctl 已应用" 'grep -q "^sysctl -p $S$" "$LOG"'
+N="$R/etc/nftables.d/passmanager.nft"
+check "nft：只放行给定网段的 22/443/8443" 'grep -q "ip saddr { 198.51.100.0/24, 203.0.113.0/24 } tcp dport { 22, 443, 8443 } ct state new accept" "$N"'
+check "nft：默认丢弃、丢弃 IPv6" 'grep -q "policy drop;" "$N" && grep -q "meta nfproto ipv6 drop" "$N"'
+check "nft：没有其他放行端口" '[ "$(grep -c "dport" "$N")" = 1 ]'
+check "nft：先检查再加载、持久化" 'grep -q "^nft -c -f $N$" "$LOG" && grep -q "^nft -f $N$" "$LOG" && grep -q "^systemctl enable nftables.service$" "$LOG"'
+check "nftables.conf 包含 include" '[ "$(grep -c "^include \"/etc/nftables.d/\*.nft\"" "$R/etc/nftables.conf")" = 1 ]'
+U="$R/etc/systemd/system/passmanager.service"
+check "单元：加固、重试、78 不重启、tss 组" 'grep -qx "RestartPreventExitStatus=78" "$U" && grep -qx "Restart=on-failure" "$U" && grep -qx "StartLimitBurst=10" "$U" && grep -qx "SupplementaryGroups=tss" "$U" && grep -qx "Wants=network-online.target" "$U" && grep -qx "ProtectSystem=strict" "$U" && grep -qx "CapabilityBoundingSet=CAP_NET_BIND_SERVICE" "$U"'
+if command -v systemd-analyze >/dev/null; then
+  sed 's#/usr/local/bin/PassManager#/bin/true#' "$U" > "$T/passmanager.service"
+  check "单元通过 systemd-analyze verify" '! systemd-analyze verify --man=no "$T/passmanager.service" 2>&1 | grep -Eq "Unknown key|Failed to parse|Invalid|unknown"'
+fi
+check "tmpfiles" 'grep -q "^d /run/passmanager-key 0700 passmanager passmanager -$" "$R/etc/tmpfiles.d/passmanager.conf"'
+check "daemon-reload" 'grep -q "^systemctl daemon-reload$" "$LOG"'
+D="$R/var/lib/passmanager-dryrun/data"
+check "init：无口令库、内层密钥、封存的 Cloudflare token" '[ -f "$D/vault.pmv" ] && [ -f "$D/server-keys.pub" ] && [ -f "$D/cf-token.sealed" ]'
+check "init：配置来自参数（域名、两个网段、套接字）" 'grep -q "\"pm.example.com\"" "$D/install.json" && grep -q "203.0.113.0/24" "$D/install.json" && grep -qF "$SOCK" "$D/install.json"'
+check "Cloudflare token 没有出现在任何文件或输出里" '! grep -rqF "$TOKEN" "$R" && ! grep -qF "$TOKEN" "$OUT"'
+
+echo "== 重复运行（幂等）、已有的 sysctl 文件、权限受限的容器"
+: > "$LOG"
+printf '# 手工配置\nnet.ipv6.conf.all.disable_ipv6=1\nnet.ipv6.conf.default.disable_ipv6=1\n' > "$S"
+before_keys="$(sha256sum "$D/server-keys.pub")"
+if printf '%s\n' "$TOKEN" | FAKE_SYSCTL_FAIL=1 FAKE_NFT_FAIL=1 FAKE_USER_EXISTS=1 FAKE_LIBS=1 DRY_RUN=1 ROOT="$R" PATH="$F:$PATH" bash "$PKG/install-server.sh" "${SITE_ARGS[@]}" --tpm-socket "$SOCK" > "$T/out2.txt" 2>&1; then
+  ok "sysctl / nft 被拒绝时继续并给出警告"
+else
+  bad "第二次运行失败"; cat "$T/out2.txt"
+fi
+check "已关闭 IPv6 的手工文件保持不变" 'grep -q "^# 手工配置" "$S"'
+check "提示非特权 LXC" 'grep -q "非特权 LXC" "$T/out2.txt" && grep -q "nftables 规则加载失败" "$T/out2.txt"'
+check "账户已存在时不再创建" '! grep -q "^useradd" "$LOG"'
+check "运行库齐全时不调用 apt-get" '! grep -q "^apt-get" "$LOG"'
+check "include 不重复" '[ "$(grep -c "^include" "$R/etc/nftables.conf")" = 1 ]'
+check "内层密钥保持不变（Agent 的指纹继续有效）" '[ "$(sha256sum "$D/server-keys.pub")" = "$before_keys" ]'
+
+echo "== 站点配置文件、没有 TPM、没有 token：L2 + 跳过证书"
+R2="$T/root2"
+: > "$LOG"
+SITE="$T/site.local.env"
+printf '# 本地站点配置\nDOMAIN=pm2.example.com\nLAN_CIDRS="192.0.2.0/24 198.51.100.0/25"\nWEB_PORT=8444\nSERVER_HOST=203.0.113.9   # 与安装无关的键被忽略\n$(touch %s/pwned)\n' "$T" > "$SITE"
+if DRY_RUN=1 ROOT="$R2" PATH="$F:$PATH" bash "$PKG/install-server.sh" --site-file "$SITE" < /dev/null > "$T/out3.txt" 2>&1; then
+  ok "无 token 时跳过证书申请"
+else
+  bad "无 token 运行失败"; cat "$T/out3.txt"
+fi
+check "提示 reseal" 'grep -q "passmanager reseal" "$T/out3.txt"'
+check "没有 TPM 时不安装运行库" '! grep -q "^apt-get" "$LOG"'
+check "没有 token 文件" '[ ! -f "$R2/var/lib/passmanager-dryrun/data/cf-token.sealed" ]'
+check "站点文件：域名、网段、端口生效" 'grep -q "ip saddr { 192.0.2.0/24, 198.51.100.0/25 } tcp dport { 22, 8444, 8443 }" "$R2/etc/nftables.d/passmanager.nft" && grep -q "\"pm2.example.com\"" "$R2/var/lib/passmanager-dryrun/data/install.json"'
+check "站点文件不会被当作脚本执行" '[ ! -e "$T/pwned" ]'
+check "没有配置 TPM 套接字" '! grep -q "tpm_socket" "$R2/var/lib/passmanager-dryrun/data/install.json"'
+
+echo "== 参数校验"
+for a in "--domain pm.example.com" "--lan-cidr 198.51.100.0/24" "--domain pm.example.com --lan-cidr 198.51.100.0/24;rm" "--domain a/b --lan-cidr 198.51.100.0/24" "--domain pm.example.com --lan-cidr 198.51.100.0/24 --web-port x" "--domain pm.example.com --lan-cidr 198.51.100.0/24 --tpm-socket rel.sock" "--site-file /nonexistent" "--bogus"; do
+  # shellcheck disable=SC2086
+  if DRY_RUN=1 ROOT="$T/r3" PATH="$F:$PATH" bash "$PKG/install-server.sh" $a < /dev/null > /dev/null 2>&1; then bad "拒绝 $a"; else ok "拒绝 $a"; fi
+done
+check "DRY_RUN 没有测试替身时拒绝（不执行任何系统命令、不写文件）" '! DRY_RUN=1 ROOT="$T/r4" bash "$PKG/install-server.sh" --domain pm.example.com --lan-cidr 198.51.100.0/24 --skip-acme < /dev/null > "$T/out4.txt" 2>&1 && grep -q "测试替身" "$T/out4.txt" && [ ! -e "$T/r4/usr" ]'
+check "--help" 'bash "$PKG/install-server.sh" --help | grep -q "DRY_RUN"'
+check "非 DRY_RUN 且不是 root 时拒绝" '[ "$(id -u)" = 0 ] || ! bash "$PKG/install-server.sh" --skip-acme < /dev/null > /dev/null 2>&1'
+
+echo "== install-agent.sh"
+AP="$T/agentpkg"; mkdir -p "$AP"
+cp "$SRC/scripts/install-agent.sh" "$AP/"
+printf '#!/bin/sh\necho "PassManager $*" >> "%s"\n' "$LOG" > "$AP/PassManager"; chmod +x "$AP/PassManager"
+printf '#!/bin/sh\n[ "$1" = -u ] && { echo "${FAKE_UID:-1000}"; exit 0; }\necho "uid=${FAKE_UID:-1000}"\n' > "$F/id"
+printf '#!/bin/sh\necho "sudo $*" >> "%s"\n' "$LOG" > "$F/sudo"
+chmod +x "$F/id" "$F/sudo"
+CODE='pm-enroll://pm.example.com:8443/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA#BBBB'
+: > "$LOG"
+check "root（sudo）：装到 /usr/local/bin，以 SUDO_USER 注册" 'FAKE_UID=0 SUDO_USER=alice DRY_RUN=1 ROOT="$T/ar" PATH="$F:$PATH" bash "$AP/install-agent.sh" "$CODE" >/dev/null && grep -qxF "sudo -u alice -H $T/ar/usr/local/bin/PassManager enroll $CODE" "$LOG" && [ -x "$T/ar/usr/local/bin/PassManager" ]'
+check "root 但没有 SUDO_USER：拒绝（Agent 不能以 root 运行）" '! FAKE_UID=0 DRY_RUN=1 ROOT="$T/ar" PATH="$F:$PATH" env -u SUDO_USER bash "$AP/install-agent.sh" "$CODE" >/dev/null 2>&1'
+: > "$LOG"
+check "普通用户：装到 ~/.local/bin 并注册（--no-mcp 透传）" 'FAKE_UID=1000 HOME="$T/home" DRY_RUN=1 ROOT="$T/au" PATH="$F:$PATH" bash "$AP/install-agent.sh" --no-mcp "$CODE" >/dev/null && grep -qxF "PassManager enroll --no-mcp $CODE" "$LOG" && [ -L "$T/au$T/home/.local/bin/passmanager" ]'
+check "DRY_RUN 没有测试替身时拒绝（install-agent.sh）" '! FAKE_UID=1000 HOME="$T/home" DRY_RUN=1 ROOT="$T/an" bash "$AP/install-agent.sh" "$CODE" > "$T/out5.txt" 2>&1 && grep -q "测试替身" "$T/out5.txt" && [ ! -e "$T/an" ]'
+check "缺少注册码" '! DRY_RUN=1 ROOT="$T/au" PATH="$F:$PATH" bash "$AP/install-agent.sh" >/dev/null 2>&1'
+check "不是注册码的参数" '! DRY_RUN=1 ROOT="$T/au" PATH="$F:$PATH" bash "$AP/install-agent.sh" "https://evil" >/dev/null 2>&1'
+
+if command -v shellcheck >/dev/null; then
+  echo "== shellcheck"
+  check "shellcheck 通过" 'shellcheck "$SRC/scripts/install-server.sh" "$SRC/scripts/install-agent.sh" "$0"'
+fi
+
+echo
+if [ "$fails" -eq 0 ]; then echo "全部通过"; else echo "$fails 项失败"; exit 1; fi

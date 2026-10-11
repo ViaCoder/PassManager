@@ -421,6 +421,7 @@ pub fn harden_cmd(check_only: bool, fix: bool, yes: bool) -> ExitCode {
 /// 服务入口。
 pub fn service(user: bool) -> ExitCode {
     let layout = if user || std::env::var_os("PASSMANAGER_HOME").is_some() { Layout::user() } else { Layout::system() };
+    let server_mode = InstallInfo::load(&layout).ok().is_some_and(|i| i.server.is_some());
     #[cfg(windows)]
     if layout.mode == Mode::System {
         return windows::run_service();
@@ -431,7 +432,12 @@ pub fn service(user: bool) -> ExitCode {
     }
     match pm_service::run(layout) {
         Ok(()) => ExitCode::SUCCESS,
-        Err(e) => fail(e),
+        // 服务器模式：配置错误以 78 退出（systemd 不再重启），暂时性故障以 75 退出（有限次重试）。
+        Err(e) if server_mode => {
+            eprintln!("错误：{}", e.message);
+            ExitCode::from(if e.config { pm_platform::service_files::EXIT_CONFIG } else { pm_platform::service_files::EXIT_TRANSIENT })
+        }
+        Err(e) => fail(e.message),
     }
 }
 
@@ -442,6 +448,18 @@ pub fn service_prepare() -> ExitCode {
         Ok(i) => i,
         Err(e) => return fail(format!("读取安装信息失败：{e}")),
     };
+    // 服务器模式：运行目录、密钥交接、有限次等待 TPM（暂时性失败以 75 退出，由 systemd 重试）。
+    #[cfg(target_os = "linux")]
+    if info.server.is_some() {
+        if let Err(code) = crate::server::prepare(&layout, &info) {
+            return ExitCode::from(code);
+        }
+        let report = harden::check(&Ctx { layout: &layout, info: &info });
+        if let Err(e) = report.store(&layout) {
+            eprintln!("保存检查报告失败：{e}");
+        }
+        return ExitCode::SUCCESS;
+    }
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;

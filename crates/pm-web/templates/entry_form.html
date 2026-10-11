@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+{% block body %}
+<h1>{% if original %}编辑条目 <code>{{ original }}</code>{% else %}新增条目{% endif %}</h1>
+<form method="post" action="{% if original %}/entries/{{ original | urlencode }}{% else %}/entries{% endif %}" class="card" autocomplete="off">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <label>引用名（可留空，按第一个域名自动生成）<input name="name" maxlength="64" value="{{ form.name }}"></label>
+  <label>域名（每行一个；<code>*.example.com</code> 匹配所有子域名但不含 <code>example.com</code> 本身；网段如 <code>198.51.100.0/24</code> 只匹配直接用 IP 访问的目标；可写 <code>host:端口</code>；多个条目都匹配时用最具体的；留空则保存为"未绑定域名"，Agent 暂时不能使用）<textarea name="domains">{{ form.domains }}</textarea></label>
+  <label>类型
+    <select name="kind">
+      <option value="password" {% if form.kind == "password" %}selected{% endif %}>口令 / 令牌（单个值，可多行）</option>
+      <option value="ssh-key" {% if form.kind == "ssh-key" %}selected{% endif %}>SSH 私钥（OpenSSH，未加密）</option>
+      <option value="fields" {% if form.kind == "fields" %}selected{% endif %}>多字段（例如 username / password）</option>
+    </select>
+  </label>
+  {% if public_key %}<p class="muted">公钥指纹：<code>{{ public_key }}</code></p>{% endif %}
+  <label>SSH 私钥：允许 ssh-agent 桥签名的主机密钥指纹（每行一个 <code>SHA256:…</code>，可用 <code>ssh-keygen -lf</code> 查看；指纹库里与域名匹配的主机也允许）<textarea name="host_keys" spellcheck="false">{{ form.host_keys }}</textarea></label>
+  <fieldset>
+    <legend>单个值（类型为口令或 SSH 私钥时使用）</legend>
+    <label>密钥{% if original %}（留空表示不修改）{% endif %}<textarea name="secret" spellcheck="false"></textarea></label>
+  </fieldset>
+  <fieldset>
+    <legend>字段（类型为多字段时使用；值只能写入，留空表示保留原值）</legend>
+    {% for name in form.fields %}
+    <div class="row">
+      <label>字段名 <input name="field_name_{{ loop.index0 }}" value="{{ name }}" maxlength="64"></label>
+      <label>新值 <input type="password" name="field_value_{{ loop.index0 }}" autocomplete="new-password"></label>
+      <label><input type="checkbox" name="field_remove_{{ loop.index0 }}" value="1">删除</label>
+    </div>
+    {% endfor %}
+    {% for i in form.new_rows %}
+    <div class="row">
+      <label>新字段名 <input name="field_name_{{ i }}" maxlength="64"></label>
+      <label>值 <input type="password" name="field_value_{{ i }}" autocomplete="new-password"></label>
+    </div>
+    {% endfor %}
+  </fieldset>
+  <fieldset>
+    <legend>用途（全不选表示不限）</legend>
+    <label><input type="checkbox" name="op_http" value="1" {% if "http" in form.ops %}checked{% endif %}>HTTP 请求</label>
+    <label><input type="checkbox" name="op_ssh" value="1" {% if "ssh" in form.ops %}checked{% endif %}>SSH / SCP / ssh-agent</label>
+    <label><input type="checkbox" name="op_git" value="1" {% if "git" in form.ops %}checked{% endif %}>git 代理</label>
+  </fieldset>
+  <label>说明 <input name="note" maxlength="200" value="{{ form.note }}"></label>
+  <label><input type="checkbox" name="self_signed" value="1" {% if form.self_signed %}checked{% endif %}>自签证书（首次连接时记录证书指纹）</label>
+  <label><input type="checkbox" name="auto_accept_host_key" value="1" {% if form.auto_accept_host_key %}checked{% endif %}>主机密钥变更时自动接受（仅私钥条目）</label>
+  <button>保存</button>
+</form>
+{% endblock %}

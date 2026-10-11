@@ -17,6 +17,11 @@ pm-platform = { path = "../pm-platform" }
 pm-proto = { path = "../pm-proto" }
 pm-service = { path = "../pm-service" }
 pm-tui = { path = "../pm-tui" }
+pm-net = { path = "../pm-net" }
+pm-web = { path = "../pm-web" }
+rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std", "tls12"] }
+toml_edit = "0.23"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time", "sync"] }
 serde.workspace = true
 serde_json.workspace = true
 zeroize.workspace = true
@@ -34,6 +39,7 @@ libc = "0.2"
 windows-service = "0.8"
 
 [dev-dependencies]
+pm-platform = { path = "../pm-platform", features = ["test-hooks"] }
 tempfile = "3"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time", "sync"] }
 russh = "0.64"

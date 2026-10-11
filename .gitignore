@@ -4,3 +4,10 @@
 /ci-logs
 __pycache__/
 /.claude/
+/vendor
+# 本地站点配置与部署笔记（含真实域名 / 网段，绝不提交）
+/deploy/*.local.*
+*.local.env
+# 本地离线构建：指向 vendor/ 的 cargo 配置（CI 正常从 crates.io 获取依赖）
+/.cargo/config.toml
+/.intentionally-empty-file.o

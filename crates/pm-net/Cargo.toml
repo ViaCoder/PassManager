@@ -1,0 +1,32 @@
+[package]
+name = "pm-net"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license-file.workspace = true
+description = "PassManager network layer: post-quantum TLS policy, ACME (DNS-01 via Cloudflare), the inner ML-KEM + McEliece agent channel"
+
+[dependencies]
+pm-crypto = { path = "../pm-crypto" }
+serde.workspace = true
+serde_json.workspace = true
+zeroize.workspace = true
+thiserror.workspace = true
+hex.workspace = true
+base64.workspace = true
+rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std", "tls12"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["aws_lc_rs"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time", "sync"] }
+instant-acme = "0.8"
+rcgen = "0.14"
+x509-parser = "0.18"
+reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
+webpki-root-certs = "1"
+tempfile = { version = "3", optional = true }
+
+[dev-dependencies]
+tempfile = "3"
+axum = "0.8"
+
+[features]
+test-hooks = ["dep:tempfile"]

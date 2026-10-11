@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% block body %}
+<h1>安全状态</h1>
+<div class="card">
+  <dl class="kv">
+    <dt>设备密钥封存</dt><dd>L{{ sec.level }}：{{ sec.description }}</dd>
+    {% if sec.l1_reason %}<dt>L1 原因</dt><dd class="bad-text">{{ sec.l1_reason }}</dd>{% endif %}
+    <dt>TPM</dt><dd>{% if st.tpm_device %}已发现（/dev/tpmrm0 或配置的 swtpm 套接字）{% else %}没有（有可用的 TPM 后运行 passmanager reseal 升级到 L3）{% endif %}</dd>
+    <dt>TPM 随机数源</dt><dd>{{ st.tpm_rng }}</dd>
+    <dt>密码库模式</dt><dd>{{ st.vault_mode }}</dd>
+    <dt>内层通道公钥指纹（SHA-384）</dt><dd><code>{{ st.server_key_fingerprint }}</code></dd>
+    {% if st.vault_recovered_from_backup %}<dt>恢复</dt><dd class="bad-text">主库文件损坏，已从 .bak 恢复（下次保存时修复）</dd>{% endif %}
+  </dl>
+</div>
+<p>安全检查：{% if st.ready %}<span class="ok-text">全部通过</span>{% else %}<span class="bad-text">未通过，密码库保持锁定</span>{% endif %}</p>
+{% if sec.runtime_issues %}
+<h2>运行时问题</h2>
+<ul>{% for i in sec.runtime_issues %}<li class="bad-text">{{ i }}</li>{% endfor %}</ul>
+{% endif %}
+<h2>检查项</h2>
+{% if sec.report.skipped %}<p class="muted">{{ sec.report.skipped }}</p>{% endif %}
+<div class="table-wrap"><table class="list small">
+  <tr><th>项目</th><th>结果</th><th>说明</th></tr>
+  {% for f in sec.report.findings %}
+  <tr><td>{{ f.title }}</td><td>{% if f.ok %}<span class="ok-text">通过</span>{% else %}<span class="bad-text">未通过</span>{% endif %}</td><td>{{ f.detail }}{% if f.steps %}<br>{{ f.steps }}{% endif %}</td></tr>
+  {% endfor %}
+</table></div>
+<h2>说明</h2>
+<p class="muted">无口令模式：拿到服务器的 root（没有 TPM 时还包括磁盘镜像或备份）就等于拿到密码库。L3（TPM）可以防止磁盘镜像与备份被带走解密，但防不住正在运行的系统里的 root。没有任何恢复途径。</p>
+{% endblock %}

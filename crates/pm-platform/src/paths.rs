@@ -158,6 +158,181 @@ impl Layout {
     pub fn backup_dir(&self) -> PathBuf {
         self.data_dir.join("hardening-backup")
     }
+
+    /// 服务器模式：启动前由 root（`ExecStartPre=+… service-prepare`）解封出的设备密钥，
+    /// 服务读取后立即删除。非特权 LXC 不支持 `LoadCredentialEncrypted=`，所以用这个等价方式。
+    pub fn key_handoff_dir(&self) -> PathBuf {
+        match self.mode {
+            Mode::System if cfg!(target_os = "linux") => PathBuf::from("/run/passmanager-key"),
+            _ => self.run_dir.join("key"),
+        }
+    }
+
+    pub fn key_handoff_path(&self) -> PathBuf {
+        self.key_handoff_dir().join("device.key")
+    }
+
+    /// 服务器模式的 TLS 证书目录。
+    pub fn tls_dir(&self) -> PathBuf {
+        self.data_dir.join("tls")
+    }
+}
+
+/// Agent 端（远程模式）的配置目录：`remote.toml`、令牌文件、缓存的服务端公钥。
+/// `PASSMANAGER_CONFIG_DIR` 可覆盖（测试用）。
+pub fn client_config_dir() -> PathBuf {
+    if let Some(d) = std::env::var_os("PASSMANAGER_CONFIG_DIR").filter(|d| !d.is_empty()) {
+        return PathBuf::from(d);
+    }
+    #[cfg(windows)]
+    {
+        std::env::var_os("APPDATA").map(PathBuf::from).unwrap_or_else(|| home().join("AppData").join("Roaming")).join(APP)
+    }
+    #[cfg(not(windows))]
+    {
+        std::env::var_os("XDG_CONFIG_HOME")
+            .filter(|d| !d.is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home().join(".config"))
+            .join("passmanager")
+    }
+}
+
+/// 局域网在线版（服务器模式）的配置。写在 root 所有的 install.json 里，服务只读。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServerConfig {
+    /// 证书与 Host 校验使用的域名（安装时必须指定，例如 `pm.example.com`）。没有默认值。
+    pub domain: String,
+    /// 网页管理端口（443）。
+    #[serde(default = "default_web_port")]
+    pub web_port: u16,
+    /// Agent 通道端口（8443）。
+    #[serde(default = "default_agent_port")]
+    pub agent_port: u16,
+    /// 监听地址（只支持 IPv4）。
+    #[serde(default = "default_bind")]
+    pub bind: String,
+    /// 允许连接的来源网段（IPv4 CIDR，安装时必须指定）。没有默认值：为空时服务拒绝启动网络监听。
+    #[serde(default)]
+    pub lan: Vec<String>,
+    /// ACME 目录 URL；为空表示不自动申请证书（只用 `import-cert` 导入的证书）。
+    #[serde(default)]
+    pub acme_directory: String,
+    /// 测试用：ACME 服务器的自签根证书（Pebble）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acme_root_pem: Option<PathBuf>,
+    /// DNS-01 写 TXT 记录的方式：`cloudflare`（默认）或 `challtest:<url>`（Pebble 测试）。
+    #[serde(default = "default_dns")]
+    pub dns: String,
+    /// 剩余有效期少于多少天时续期。
+    #[serde(default = "default_renew_days")]
+    pub renew_days: u32,
+    /// 可选：swtpm 的 Unix 数据套接字（例如宿主机为容器提供的软件 TPM）。配置且存在时优先于 /dev/tpmrm0；
+    /// 不配置时只自动检测 /dev/tpmrm0。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tpm_socket: Option<String>,
+}
+
+pub const LETS_ENCRYPT: &str = "https://acme-v02.api.letsencrypt.org/directory";
+
+fn default_web_port() -> u16 {
+    443
+}
+fn default_agent_port() -> u16 {
+    8443
+}
+fn default_bind() -> String {
+    "0.0.0.0".into()
+}
+fn default_dns() -> String {
+    "cloudflare".into()
+}
+fn default_renew_days() -> u32 {
+    30
+}
+
+/// 默认值只包含与站点无关的项；域名与允许的网段为空，必须在安装时指定（否则 `validate` 失败）。
+impl Default for ServerConfig {
+    fn default() -> Self {
+        Self {
+            domain: String::new(),
+            web_port: default_web_port(),
+            agent_port: default_agent_port(),
+            bind: default_bind(),
+            lan: Vec::new(),
+            acme_directory: LETS_ENCRYPT.into(),
+            acme_root_pem: None,
+            dns: default_dns(),
+            renew_days: default_renew_days(),
+            tpm_socket: None,
+        }
+    }
+}
+
+impl ServerConfig {
+    /// 校验配置（服务启动时失败即视为配置错误，退出码 78）。
+    pub fn validate(&self) -> Result<(), String> {
+        let d = &self.domain;
+        if d.is_empty() {
+            return Err("没有配置域名（passmanager init --domain <域名>）".into());
+        }
+        if d.len() > 253
+            || d.len() > 253
+            || !d.split('.').all(|l| !l.is_empty() && l.len() <= 63 && l.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-'))
+            || !d.contains('.')
+        {
+            return Err(format!("域名无效：{d}"));
+        }
+        if self.web_port == 0 || self.agent_port == 0 || self.web_port == self.agent_port {
+            return Err("端口无效（网页与 Agent 端口必须不同且非 0）".into());
+        }
+        if self.bind.parse::<std::net::Ipv4Addr>().is_err() {
+            return Err(format!("监听地址必须是 IPv4：{}", self.bind));
+        }
+        if self.lan.is_empty() {
+            return Err("没有配置允许访问的网段，拒绝启动网络监听（passmanager init --lan-cidr <CIDR>，可重复）".into());
+        }
+        for c in &self.lan {
+            parse_cidr(c)?;
+        }
+        if let Some(t) = &self.tpm_socket
+            && (!t.starts_with('/') || t.contains(['\n', ' ']))
+        {
+            return Err(format!("TPM 套接字路径必须是绝对路径：{t}"));
+        }
+        if !(self.dns == "cloudflare" || self.dns.starts_with("challtest:")) {
+            return Err(format!("未知的 DNS 方式：{}", self.dns));
+        }
+        Ok(())
+    }
+}
+
+/// 解析 IPv4 CIDR（`a.b.c.d/n`，或单个地址视为 /32）。
+pub fn parse_cidr(s: &str) -> Result<(std::net::Ipv4Addr, u8), String> {
+    let (ip, len) = match s.split_once('/') {
+        Some((ip, len)) => (ip, len.parse::<u8>().map_err(|_| format!("网段无效：{s}"))?),
+        None => (s, 32),
+    };
+    let ip: std::net::Ipv4Addr = ip.parse().map_err(|_| format!("网段无效（只支持 IPv4）：{s}"))?;
+    if len > 32 {
+        return Err(format!("网段无效：{s}"));
+    }
+    Ok((ip, len))
+}
+
+/// 来源地址是否在允许的网段内。IPv6 一律拒绝（IPv4 映射地址按 IPv4 处理）。
+pub fn ip_allowed(ip: std::net::IpAddr, lan: &[String]) -> bool {
+    let v4 = match ip {
+        std::net::IpAddr::V4(v4) => v4,
+        std::net::IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+            Some(v4) => v4,
+            None => return false,
+        },
+    };
+    lan.iter().filter_map(|c| parse_cidr(c).ok()).any(|(net, len)| {
+        let mask = if len == 0 { 0 } else { u32::MAX << (32 - len) };
+        u32::from(v4) & mask == u32::from(net) & mask
+    })
 }
 
 /// FNV-1a 64 位哈希（只用于派生管道名，不涉及安全）。
@@ -182,6 +357,9 @@ pub struct InstallInfo {
     pub seal_method: String,
     pub seal_level: u8,
     pub binary: String,
+    /// 局域网在线版（服务器模式）。None 表示原来的单机模式。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server: Option<ServerConfig>,
 }
 
 impl InstallInfo {
@@ -193,12 +371,124 @@ impl InstallInfo {
     pub fn store(&self, layout: &Layout) -> std::io::Result<()> {
         std::fs::create_dir_all(&layout.data_dir)?;
         let s = serde_json::to_string_pretty(self).map_err(std::io::Error::other)?;
-        std::fs::write(layout.install_info_path(), s)?;
+        write_atomic(&layout.install_info_path(), s.as_bytes(), 0o644)
+    }
+}
+
+/// 原子写入：临时文件 → fsync → rename → fsync 目录（断电后要么是旧内容，要么是新内容）。
+pub fn write_atomic(path: &std::path::Path, data: &[u8], #[allow(unused_variables)] mode: u32) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(".tmp");
+    let tmp = PathBuf::from(tmp);
+    {
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(mode);
+        }
+        let mut f = opts.open(&tmp)?;
+        f.write_all(data)?;
+        f.sync_all()?;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(mode))?;
+    }
+    std::fs::rename(&tmp, path)?;
+    #[cfg(unix)]
+    if let Some(dir) = path.parent()
+        && let Ok(d) = std::fs::File::open(dir)
+    {
+        let _ = d.sync_all();
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn server_config_defaults_and_validation() {
+        // 默认值不含任何站点信息：域名与网段为空，校验失败（服务拒绝启动网络监听）。
+        let d = ServerConfig::default();
+        assert_eq!((d.domain.as_str(), d.web_port, d.agent_port, d.lan.len(), d.tpm_socket.as_deref()), ("", 443, 8443, 0, None));
+        assert!(d.validate().unwrap_err().contains("域名"));
+        assert!(ServerConfig { domain: "pm.example.com".into(), ..d.clone() }.validate().unwrap_err().contains("网段"));
+        let c = ServerConfig { domain: "pm.example.com".into(), lan: vec!["198.51.100.0/24".into()], ..Default::default() };
+        c.validate().unwrap();
+        // 旧的 install.json（没有 server 字段）仍能读取。
+        let old = r#"{"mode":"system","client_user":"a","service_user":"passmanager","seal_method":"file","seal_level":1,"binary":"/x"}"#;
+        let i: InstallInfo = serde_json::from_str(old).unwrap();
+        assert!(i.server.is_none());
+        assert!(!serde_json::to_string(&i).unwrap().contains("server"));
+        // 只写了域名的配置：其余用默认值补全，但没有网段时校验失败。
+        let i: InstallInfo = serde_json::from_str(&old.replace("}", r#","server":{"domain":"pm.example.com"}}"#)).unwrap();
+        let s = i.server.unwrap();
+        assert!(s.lan.is_empty() && s.tpm_socket.is_none());
+        assert_eq!(s.dns, "cloudflare");
+        assert!(s.validate().is_err());
+        for bad in [
+            ServerConfig { domain: "".into(), ..c.clone() },
+            ServerConfig { domain: "nodot".into(), ..c.clone() },
+            ServerConfig { domain: "a..b".into(), ..c.clone() },
+            ServerConfig { domain: "a b.c".into(), ..c.clone() },
+            ServerConfig { web_port: 8443, ..c.clone() },
+            ServerConfig { agent_port: 0, ..c.clone() },
+            ServerConfig { bind: "::".into(), ..c.clone() },
+            ServerConfig { lan: vec![], ..c.clone() },
+            ServerConfig { lan: vec!["198.51.100.0/33".into()], ..c.clone() },
+            ServerConfig { lan: vec!["fd00::/8".into()], ..c.clone() },
+            ServerConfig { dns: "route53".into(), ..c.clone() },
+            ServerConfig { tpm_socket: Some("tpm.sock".into()), ..c.clone() },
+            ServerConfig { tpm_socket: Some("/a b".into()), ..c.clone() },
+        ] {
+            assert!(bad.validate().is_err(), "{bad:?}");
+        }
+        ServerConfig { tpm_socket: Some("/run/swtpm/tpm.sock".into()), ..c }.validate().unwrap();
+    }
+
+    #[test]
+    fn lan_matching_is_ipv4_only_with_exact_boundaries() {
+        let lan = vec!["198.51.100.0/24".to_string()];
+        let ip = |s: &str| s.parse::<std::net::IpAddr>().unwrap();
+        for ok in ["198.51.100.0", "198.51.100.1", "198.51.100.55", "198.51.100.255", "::ffff:198.51.100.9"] {
+            assert!(ip_allowed(ip(ok), &lan), "{ok}");
+        }
+        for bad in
+            ["198.51.99.255", "203.0.113.0", "203.0.113.7", "127.0.0.1", "8.8.8.8", "::1", "fe80::1", "2001:db8::1", "::ffff:203.0.113.1"]
+        {
+            assert!(!ip_allowed(ip(bad), &lan), "{bad}");
+        }
+        assert!(ip_allowed(ip("127.0.0.1"), &["127.0.0.0/8".into()]));
+        assert!(ip_allowed(ip("192.0.2.3"), &["192.0.2.3".into()]));
+        assert!(!ip_allowed(ip("192.0.2.4"), &["192.0.2.3".into()]));
+        assert!(ip_allowed(ip("1.2.3.4"), &["0.0.0.0/0".into()]));
+        assert!(ip_allowed(ip("198.51.100.9"), &["203.0.113.0/24".into(), "198.51.100.0/24".into()]), "多个网段");
+        assert!(!ip_allowed(ip("198.51.100.1"), &["garbage".into()]), "无效网段不匹配任何地址");
+        assert!(!ip_allowed(ip("198.51.100.1"), &[]));
+    }
+
+    #[test]
+    fn atomic_write_replaces_and_sets_mode() {
+        let dir = std::env::temp_dir().join(format!("pm-aw-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("install.json");
+        write_atomic(&p, b"one", 0o644).unwrap();
+        // 残留的半写临时文件不影响下一次写入。
+        std::fs::write(dir.join("install.json.tmp"), b"half").unwrap();
+        write_atomic(&p, b"two", 0o644).unwrap();
+        assert_eq!(std::fs::read(&p).unwrap(), b"two");
+        assert!(!dir.join("install.json.tmp").exists());
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(layout.install_info_path(), std::fs::Permissions::from_mode(0o644))?;
+            assert_eq!(std::fs::metadata(&p).unwrap().permissions().mode() & 0o777, 0o644);
         }
-        Ok(())
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

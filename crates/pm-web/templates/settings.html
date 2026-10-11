@@ -1,0 +1,9 @@
+{% extends "base.html" %}
+{% block body %}
+<h1>设置</h1>
+<form method="post" action="/settings" class="card">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <label>空闲多少小时后自动锁定（0 = 不自动锁定；锁定后在"状态"页或用 root 命令解锁）<input name="auto_lock_hours" type="number" min="0" max="720" value="{{ settings.auto_lock_hours }}"></label>
+  <button>保存</button>
+</form>
+{% endblock %}

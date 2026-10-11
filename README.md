@@ -60,6 +60,41 @@ On the "Agent 接入" (Agents) tab, select your agent and press Enter to connect
 - If a host has several stored secrets, pick one by the reference name shown in the list: `{{name}}` in HTTP, `name/user@host` for SSH/SCP.
 - The CLI reads the token from the `PASSMANAGER_TOKEN` environment variable and prints JSON. Errors that need the user tell the agent exactly what to ask for, e.g. `LOCKED: Ask the user to run: PassManager unlock`.
 
+## LAN server (online edition)
+
+Since 0.2.0 one Linux server on your LAN can hold the vault for agents on other machines (Linux, macOS, Windows).
+Agents talk to it over TLS 1.3 with hybrid post-quantum key exchange plus an inner ML-KEM-1024 + Classic McEliece layer;
+the server has a password-free web admin UI (one-time login links printed by root). There are no site defaults:
+the domain and the allowed client CIDRs must be given at install time.
+
+```sh
+# server (root; Debian 13 or another systemd ≥ 250 distribution)
+./install-server.sh --domain pm.example.com --lan-cidr 198.51.100.0/24 < cloudflare-token
+passmanager import --name github --domain api.github.com < token.txt     # secrets come from stdin, never echoed
+passmanager token add laptop                                               # prints a one-time pm-enroll://… code
+# agent machine
+PassManager enroll 'pm-enroll://pm.example.com:8443/…#…'
+PassManager list
+```
+
+What else 0.2.0 adds on top of `http` / `ssh` / `scp`:
+
+- **Multi-field entries**: `passmanager import --name mail --fields username,password` (one value per line). Use `{{mail.username}}`,
+  `{{mail.password}}`, or `{{password}}` when only one entry matches the host; `{{secret}}` keeps meaning the single value of a
+  single-value entry. `sudo` uses the `password` field. Agents only ever see field *names*.
+- **SSH keys**: `--kind ssh-key` stores an unencrypted OpenSSH/PEM private key (ECDSA P-384, Ed25519, RSA). Only the public
+  fingerprint is shown. Public-key login is used for key entries and works with hardened sshd profiles
+  (`mlkem768x25519-sha256` / `ecdh-sha2-nistp384`, `aes256-gcm@openssh.com`, `hmac-sha2-512-etm@openssh.com`, `AuthenticationMethods publickey`).
+- **`PassManager ssh-agent`** (agent machine): an OpenSSH agent socket so plain `ssh`, `scp` and `git` can use keys stored on the
+  server. Keys never leave the server; it only signs `publickey` userauth requests bound (OpenSSH ≥ 8.9 `session-bind`) to a host key
+  that belongs to the entry, rate-limited and audited.
+- **`PassManager git-proxy`** (agent machine): a loopback git smart-HTTP proxy. With
+  `git config --global url."http://127.0.0.1:7878/<token>/https/github.com/".insteadOf "https://github.com/"` (the command prints the
+  exact line) git clones and pushes through the server, which adds the stored token (`Authorization: Basic x-access-token:<PAT>`).
+  The agent machine never receives the token; only HTTPS, only the entry's domains, no redirects.
+
+Full walkthrough: [docs/DEPLOY-LAN.md](docs/DEPLOY-LAN.md). Design: [docs/DESIGN.md](docs/DESIGN.md) §10.
+
 ## Uninstall
 
 ```sh

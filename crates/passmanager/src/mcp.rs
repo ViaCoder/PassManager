@@ -1,7 +1,8 @@
 //! MCP 服务器（stdio，JSON-RPC 2.0，按行分隔）。
 //!
 //! 只提供 5 个工具，参数扁平、描述简短，小模型也能正确调用。
-//! 本进程不持有任何密钥：每次调用都用 `PASSMANAGER_TOKEN` 连接本地服务。
+//! 本进程不持有任何密钥：每次调用都用 `PASSMANAGER_TOKEN` 连接本地服务；
+//! 注册过远程服务器（`passmanager enroll`）时改为经双层加密通道连接服务器，用法不变。
 
 use std::io::{BufRead, Write};
 
@@ -74,6 +75,10 @@ fn need(args: &Value, k: &str) -> Result<String, ApiError> {
 }
 
 pub fn connect() -> Result<Client, ApiError> {
+    // 远程模式（passmanager enroll 之后）：经双层加密通道连接局域网里的服务器。
+    if let Some(r) = crate::remote::connect_if_configured() {
+        return r;
+    }
     let token = std::env::var(ENV_TOKEN).unwrap_or_default();
     if token.is_empty() {
         return Err(ApiError::new(

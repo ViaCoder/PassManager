@@ -27,7 +27,31 @@ pub enum Hello {
     Password { v: u32, password: String },
     /// 首次设置口令（仅当库尚不存在时有效；系统模式下仅接受 root/管理员）。
     Setup { v: u32, password: String },
+    /// 服务器模式的 root 管理会话（`passmanager login|token|status|lock`）：只在本地 socket 上、
+    /// 且对端 uid 为 0 时接受；经网络一律静默拒绝。
+    Root { v: u32 },
+    /// 服务器模式的 Agent 注册：一次性注册码换取访问令牌。只在网络通道（双层加密）上接受。
+    Enroll {
+        v: u32,
+        code: String,
+        #[serde(default)]
+        host: String,
+    },
 }
+
+/// 多字段条目的一个字段。`value` 为 None 或空串表示保留原值（编辑时）。
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+pub struct FieldInput {
+    pub name: String,
+    #[serde(default)]
+    pub value: Option<String>,
+}
+
+pub const KIND_PASSWORD: &str = "password";
+pub const KIND_SSH_KEY: &str = "ssh-key";
+pub const KIND_FIELDS: &str = "fields";
+/// 没有绑定域名的条目在列表与网页中的标注。
+pub const UNBOUND: &str = "未绑定域名";
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub struct EntryInput {
@@ -43,6 +67,18 @@ pub struct EntryInput {
     pub self_signed: bool,
     #[serde(default)]
     pub auto_accept_host_key: bool,
+    /// 多字段条目：按顺序给出全部字段（未列出的字段被删除）。None 表示不改变条目的字段结构。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fields: Option<Vec<FieldInput>>,
+    /// 声明的类型（`password` / `ssh-key`）。`ssh-key` 时服务端校验私钥能被解析（不接受加密私钥）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    /// SSH 私钥条目：允许 ssh-agent 桥签名的主机密钥指纹（`SHA256:…`）。None 表示不改。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_keys: Option<Vec<String>>,
+    /// 允许的用途（`http` / `ssh` / `git`，空表示不限）。None 表示不改。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ops: Option<Vec<String>>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -76,6 +112,24 @@ pub enum Request {
     },
     Lock,
     Status,
+    /// ssh-agent 桥：可用于签名的公钥（SSH 私钥条目）。
+    AgentKeys,
+    /// ssh-agent 桥：代为签名（只签与 `binding` 同一会话的 publickey 认证请求）。返回签名（base64）。
+    AgentSign {
+        key: String,
+        data: String,
+        #[serde(default)]
+        flags: u32,
+        #[serde(default)]
+        binding: Option<AgentBinding>,
+    },
+    /// git 凭据注入代理（流式）：见 `Client::git_proxy`。
+    GitProxy {
+        method: String,
+        url: String,
+        #[serde(default)]
+        headers: Vec<(String, String)>,
+    },
     // ---- 管理类（口令会话） ----
     Entries,
     AddEntry {
@@ -113,6 +167,23 @@ pub enum Request {
         new: String,
     },
     Security,
+    // ---- 服务器模式（局域网在线版） ----
+    /// 解锁无口令库（管理会话）。
+    Unlock,
+    /// 新建一次性注册码（10 分钟有效、只能用一次），返回 [`EnrollView`]。
+    EnrollCreate {
+        label: String,
+    },
+    /// 尚未使用的注册码。
+    Enrollments,
+    /// 作废一个尚未使用的注册码。
+    EnrollCancel {
+        id: String,
+    },
+    /// 生成网页的一次性登录链接（只限 root 会话），返回 URL 字符串。
+    LoginLink,
+    /// 服务器状态（封存等级、证书、监听端口、令牌数量），返回 [`ServerStatusView`]。
+    ServerStatus,
 }
 
 impl Request {
@@ -127,6 +198,9 @@ impl Request {
                 | Request::Download { .. }
                 | Request::Lock
                 | Request::Status
+                | Request::AgentKeys
+                | Request::AgentSign { .. }
+                | Request::GitProxy { .. }
         )
     }
 }
@@ -159,6 +233,15 @@ pub struct CredentialView {
     pub name: String,
     pub domains: Vec<String>,
     pub note: String,
+    /// 多字段条目的字段名（只有名字，没有值）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fields: Vec<String>,
+    /// 没有绑定任何域名：在网页里添加域名之前 Agent 无法使用。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    /// 限定的用途（为空表示不限）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ops: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -171,6 +254,48 @@ pub struct EntryView {
     pub private_key: bool,
     pub created: u64,
     pub updated: u64,
+    /// `password` / `ssh-key` / `fields`。
+    #[serde(default)]
+    pub kind: String,
+    /// 多字段条目的字段名。
+    #[serde(default)]
+    pub fields: Vec<String>,
+    /// SSH 私钥条目的公钥指纹（`算法 SHA256:…`），其他条目为 None。
+    #[serde(default)]
+    pub public_key: Option<String>,
+    /// 允许 ssh-agent 桥签名的主机密钥指纹。
+    #[serde(default)]
+    pub host_keys: Vec<String>,
+    /// 限定的用途（为空表示不限）。
+    #[serde(default)]
+    pub ops: Vec<String>,
+}
+
+/// git 代理的响应头（经白名单过滤）。
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct GitHead {
+    pub status: u16,
+    pub headers: Vec<(String, String)>,
+}
+
+/// git 代理的帧大小（请求体与响应体都按这个大小分帧）。
+pub const GIT_CHUNK: usize = 64 * 1024;
+
+/// ssh-agent 桥：OpenSSH 的 `session-bind@openssh.com` 绑定信息（base64）。
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+pub struct AgentBinding {
+    pub host_key: String,
+    pub session_id: String,
+    pub signature: String,
+    pub forwarding: bool,
+}
+
+/// ssh-agent 桥列出的公钥。
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct AgentKeyView {
+    /// 公钥（SSH 线上格式，base64）。
+    pub blob: String,
+    pub comment: String,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -256,6 +381,49 @@ pub struct SecurityView {
     pub runtime_issues: Vec<String>,
 }
 
+/// 新建的注册码。`url` 只显示这一次。
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct EnrollView {
+    pub id: String,
+    pub label: String,
+    pub url: String,
+    pub expires_in_secs: u64,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct PendingEnrollView {
+    pub id: String,
+    pub label: String,
+    pub expires_in_secs: u64,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+pub struct ServerStatusView {
+    pub domain: String,
+    pub web_port: u16,
+    pub agent_port: u16,
+    pub lan: Vec<String>,
+    pub locked: bool,
+    pub initialized: bool,
+    pub vault_mode: String,
+    pub level: u8,
+    pub seal_method: String,
+    pub tpm_device: bool,
+    pub tpm_rng: String,
+    pub cert_not_after: Option<i64>,
+    pub cert_error: Option<String>,
+    pub tokens: usize,
+    pub pending_enrollments: usize,
+    pub server_key_fingerprint: String,
+    pub vault_recovered_from_backup: bool,
+    /// 安全检查是否全部通过（不通过时库保持锁定，Agent 得到 NOT_READY）。
+    #[serde(default)]
+    pub ready: bool,
+    /// 未通过的检查项与运行时问题（部署时排查用）。
+    #[serde(default)]
+    pub issues: Vec<String>,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct SettingsView {
     pub auto_lock_hours: u32,
@@ -306,6 +474,14 @@ pub struct Client {
     stream: Box<dyn Rw>,
 }
 
+/// 注册握手的回复。
+#[derive(Deserialize)]
+struct EnrollAck {
+    ok: bool,
+    #[serde(default)]
+    token: String,
+}
+
 fn open_stream(path: &Path) -> std::io::Result<Box<dyn Rw>> {
     #[cfg(unix)]
     {
@@ -335,12 +511,37 @@ impl Client {
     }
 
     pub fn connect_at(path: &Path, hello: &Hello) -> Result<Self, ApiError> {
-        let mut stream = open_stream(path).map_err(|_| {
+        let stream = open_stream(path).map_err(|_| {
             ApiError::new(
                 "NOT_RUNNING",
                 "PassManager service is not running or not installed. Ask the user to run: sudo PassManager install",
             )
         })?;
+        Self::handshake(stream, hello)
+    }
+
+    /// 在任意已建立的流上握手（远程模式：双层加密的网络流）。
+    pub fn connect_stream<S: Read + Write + Send + 'static>(stream: S, hello: &Hello) -> Result<Self, ApiError> {
+        Self::handshake(Box::new(stream), hello)
+    }
+
+    /// 注册：用一次性注册码换取访问令牌（只返回这一次）。
+    pub fn enroll_stream<S: Read + Write + Send + 'static>(stream: S, code: &str, host: &str) -> Result<String, ApiError> {
+        let mut stream: Box<dyn Rw> = Box::new(stream);
+        let hello = Hello::Enroll { v: PROTO_V, code: code.into(), host: host.into() };
+        let hello_bytes = serde_json::to_vec(&hello).map_err(|e| ApiError::new("INTERNAL", e.to_string()))?;
+        let ack = write_frame(&mut stream, &hello_bytes).and_then(|_| read_frame(&mut stream));
+        let fail = || {
+            ApiError::new(
+                "ENROLL_FAILED",
+                "注册码无效、已使用或已过期（有效期 10 分钟，只能使用一次）。请在服务器上重新运行：passmanager token add <标签>",
+            )
+        };
+        let ack: EnrollAck = serde_json::from_slice(&ack.map_err(|_| fail())?).map_err(|_| fail())?;
+        if ack.ok && ack.token.starts_with(TOKEN_PREFIX) { Ok(ack.token) } else { Err(fail()) }
+    }
+
+    fn handshake(mut stream: Box<dyn Rw>, hello: &Hello) -> Result<Self, ApiError> {
         let hello_bytes = serde_json::to_vec(hello).map_err(|e| ApiError::new("INTERNAL", e.to_string()))?;
         let ack = write_frame(&mut stream, &hello_bytes).and_then(|_| read_frame(&mut stream));
         match ack {
@@ -355,6 +556,11 @@ impl Client {
                     "口令错误、尝试过于频繁，或服务未就绪（尚未初始化 / 设备密钥无法解封）。口令确认无误时请查看服务日志，或运行 sudo PassManager harden --check。",
                 ),
                 Hello::Setup { .. } => ApiError::new("AUTH_FAILED", "无法完成初始化（库已存在，或需要以管理员身份运行）。"),
+                Hello::Root { .. } => ApiError::new(
+                    "AUTH_FAILED",
+                    "服务拒绝了 root 管理会话：需要以 root 在服务器本机运行，且服务处于服务器模式（passmanager init）。",
+                ),
+                Hello::Enroll { .. } => ApiError::new("ENROLL_FAILED", "注册失败。"),
             }),
         }
     }
@@ -371,9 +577,119 @@ impl Client {
         }
     }
 
+    /// git 代理（流式）：发送请求 → 等服务端确认 → 发送请求体（分帧，空帧结束）→ 收到响应头 → 把响应体写入 `out`。
+    pub fn git_proxy(
+        &mut self,
+        req: &Request,
+        body: &mut dyn Read,
+        on_head: &mut dyn FnMut(&GitHead) -> std::io::Result<()>,
+        out: &mut dyn Write,
+    ) -> Result<(), ApiError> {
+        let dis = |e: std::io::Error| ApiError::new("DISCONNECTED", e.to_string());
+        let bytes = serde_json::to_vec(req).map_err(|e| ApiError::new("INTERNAL", e.to_string()))?;
+        write_frame(&mut self.stream, &bytes).map_err(dis)?;
+        let first: Response =
+            serde_json::from_slice(&read_frame(&mut self.stream).map_err(dis)?).map_err(|e| ApiError::new("INTERNAL", e.to_string()))?;
+        if !first.ok {
+            return Err(ApiError::new(first.code.as_deref().unwrap_or("ERROR"), first.message.unwrap_or_default()));
+        }
+        let mut buf = vec![0u8; GIT_CHUNK];
+        loop {
+            let n = body.read(&mut buf).map_err(|e| ApiError::new("BAD_REQUEST", format!("reading request body: {e}")))?;
+            if n == 0 {
+                break;
+            }
+            write_frame(&mut self.stream, &buf[..n]).map_err(dis)?;
+        }
+        write_frame(&mut self.stream, &[]).map_err(dis)?;
+        let head: Response =
+            serde_json::from_slice(&read_frame(&mut self.stream).map_err(dis)?).map_err(|e| ApiError::new("INTERNAL", e.to_string()))?;
+        if !head.ok {
+            return Err(ApiError::new(head.code.as_deref().unwrap_or("ERROR"), head.message.unwrap_or_default()));
+        }
+        let head: GitHead = serde_json::from_value(head.data.unwrap_or_default()).map_err(|e| ApiError::new("INTERNAL", e.to_string()))?;
+        on_head(&head).map_err(dis)?;
+        loop {
+            let f = read_frame(&mut self.stream).map_err(dis)?;
+            if f.is_empty() {
+                return Ok(());
+            }
+            out.write_all(&f).map_err(dis)?;
+        }
+    }
+
     /// 调用并反序列化为具体类型。
     pub fn call_as<T: for<'de> Deserialize<'de>>(&mut self, req: &Request) -> Result<T, ApiError> {
         let v = self.call(req)?;
         serde_json::from_value(v).map_err(|e| ApiError::new("INTERNAL", e.to_string()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hello_wire_format() {
+        assert_eq!(serde_json::to_string(&Hello::Root { v: 1 }).unwrap(), r#"{"auth":"root","v":1}"#);
+        let e: Hello = serde_json::from_str(r#"{"auth":"enroll","v":1,"code":"abc"}"#).unwrap();
+        assert!(matches!(e, Hello::Enroll { ref code, ref host, .. } if code == "abc" && host.is_empty()));
+        let t: Hello = serde_json::from_str(r#"{"auth":"token","v":1,"token":"pm_x"}"#).unwrap();
+        assert!(matches!(t, Hello::Token { .. }));
+        assert!(serde_json::from_str::<Hello>(r#"{"auth":"admin","v":1}"#).is_err());
+    }
+
+    #[test]
+    fn server_requests_are_not_usage_operations() {
+        for r in [
+            Request::Unlock,
+            Request::EnrollCreate { label: "x".into() },
+            Request::Enrollments,
+            Request::EnrollCancel { id: "x".into() },
+            Request::LoginLink,
+            Request::ServerStatus,
+        ] {
+            assert!(!r.is_usage(), "{r:?}");
+        }
+        let r: Request = serde_json::from_str(r#"{"op":"login_link"}"#).unwrap();
+        assert!(matches!(r, Request::LoginLink));
+    }
+
+    /// 内存中的双向管道，模拟服务端行为。
+    struct Pipe {
+        input: std::io::Cursor<Vec<u8>>,
+        output: Vec<u8>,
+    }
+    impl Read for Pipe {
+        fn read(&mut self, b: &mut [u8]) -> std::io::Result<usize> {
+            self.input.read(b)
+        }
+    }
+    impl Write for Pipe {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            self.output.write(b)
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn framed(json: &str) -> Vec<u8> {
+        let mut v = (json.len() as u32).to_be_bytes().to_vec();
+        v.extend_from_slice(json.as_bytes());
+        v
+    }
+
+    #[test]
+    fn enroll_ack_parsing() {
+        let ok = Pipe { input: std::io::Cursor::new(framed(r#"{"ok":true,"token":"pm_abc"}"#)), output: vec![] };
+        assert_eq!(Client::enroll_stream(ok, "code", "pm.example.com").unwrap(), "pm_abc");
+        for bad in [r#"{"ok":true}"#, r#"{"ok":true,"token":"nope"}"#, r#"{"ok":false,"token":"pm_x"}"#, "garbage"] {
+            let p = Pipe { input: std::io::Cursor::new(framed(bad)), output: vec![] };
+            assert_eq!(Client::enroll_stream(p, "code", "h").unwrap_err().code, "ENROLL_FAILED", "{bad}");
+        }
+        // 服务端静默断开（读到 EOF）。
+        let p = Pipe { input: std::io::Cursor::new(vec![]), output: vec![] };
+        assert!(Client::enroll_stream(p, "code", "h").is_err());
     }
 }

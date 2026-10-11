@@ -1,8 +1,11 @@
 //! 密钥层级与双层加密。
 //!
 //! ```text
+//! 口令模式（v1）：
 //! IKM   = Argon2id(NFKC(password), salt) ‖ device_key
 //! KEK_A = HKDF(salt=vault_id, IKM, "pm/v1/kek/A");  KEK_B = HKDF(..., "pm/v1/kek/B")
+//! 无口令模式（v2，服务器在线版）：不运行 Argon2，IKM 只有设备密钥，info 带模式标记：
+//! KEK_A = HKDF(salt=vault_id, device_key, "pm/v2/kek/A" ‖ "device-only" ‖ salt);  KEK_B 同理（"pm/v2/kek/B"）
 //! wrap_A = AES-256-GCM(KEK_A, VK_A ‖ dk_mlkem)
 //! wrap_B = ChaCha20-Poly1305(KEK_B, VK_B ‖ sk_mceliece)
 //!
@@ -40,6 +43,17 @@ pub fn derive_keks(
     ikm[..32].copy_from_slice(pw_key.as_ref());
     ikm[32..].copy_from_slice(device_key);
     Ok(Keks { a: derive32(vault_id, ikm.as_ref(), &[b"pm/v1/kek/A"])?, b: derive32(vault_id, ikm.as_ref(), &[b"pm/v1/kek/B"])? })
+}
+
+/// 无口令模式的模式标记（写入 HKDF info；文件头里另有模式字段，二者共同防止降级）。
+pub const DEVICE_ONLY_TAG: &[u8] = b"device-only";
+
+/// 无口令模式：只由设备密钥派生两把 KEK（不运行 Argon2，适合 1 GiB 内存的服务器）。
+pub fn derive_keks_device_only(device_key: &[u8; 32], vault_id: &[u8; 16], salt: &[u8]) -> Result<Keks, CryptoError> {
+    Ok(Keks {
+        a: derive32(vault_id, device_key, &[b"pm/v2/kek/A", DEVICE_ONLY_TAG, salt])?,
+        b: derive32(vault_id, device_key, &[b"pm/v2/kek/B", DEVICE_ONLY_TAG, salt])?,
+    })
 }
 
 /// 设备密钥校验值：HKDF(device_key, "pm/v1/kcv")[..16]。设备密钥有 256 bit 熵，不构成预言机。
@@ -226,5 +240,27 @@ mod tests {
         let wrong_dev = derive_keks("correct horse", b"saltsaltsaltsalt", TEST_PARAMS, &[1u8; 32], &vault_id).unwrap();
         assert!(VaultKeys::unwrap(&wrong_dev, &vault_id, &wa, &wb, keys.mlkem_public(), keys.mceliece_public()).is_err());
         assert_ne!(key_check_value(&device_key, &vault_id).unwrap(), key_check_value(&[1u8; 32], &vault_id).unwrap());
+    }
+
+    /// 无口令模式：只有设备密钥能解开；与口令模式的 KEK 互不相同（模式标记不同），口令模式的包裹打不开。
+    #[test]
+    fn device_only_keks_are_separate_from_password_keks() {
+        let (keys, pw_keks, vault_id, device_key) = setup();
+        let salt = [5u8; 32];
+        let dk = derive_keks_device_only(&device_key, &vault_id, &salt).unwrap();
+        let (wa, wb) = keys.wrap(&dk, &vault_id).unwrap();
+        let again = derive_keks_device_only(&device_key, &vault_id, &salt).unwrap();
+        assert!(VaultKeys::unwrap(&again, &vault_id, &wa, &wb, keys.mlkem_public(), keys.mceliece_public()).is_ok());
+        for wrong in [
+            derive_keks_device_only(&[1u8; 32], &vault_id, &salt).unwrap(),
+            derive_keks_device_only(&device_key, &[8u8; 16], &salt).unwrap(),
+            derive_keks_device_only(&device_key, &vault_id, &[6u8; 32]).unwrap(),
+            pw_keks,
+        ] {
+            assert!(VaultKeys::unwrap(&wrong, &vault_id, &wa, &wb, keys.mlkem_public(), keys.mceliece_public()).is_err());
+        }
+        // 用空口令走口令模式（攻击者把文件头改成 v1）得到的 KEK 也打不开。
+        let empty = derive_keks("", &salt, TEST_PARAMS, &device_key, &vault_id).unwrap();
+        assert!(VaultKeys::unwrap(&empty, &vault_id, &wa, &wb, keys.mlkem_public(), keys.mceliece_public()).is_err());
     }
 }

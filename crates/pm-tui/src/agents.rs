@@ -120,15 +120,24 @@ impl Adapter {
 
     /// 写入 MCP 配置。
     pub fn connect(&self, bin: &str, token: &str) -> Result<String, String> {
+        self.connect_with(bin, Some(token))
+    }
+
+    /// 写入 MCP 配置；`token` 为 None 时不写环境变量（远程模式：令牌保存在本人可读的令牌文件里，
+    /// 不出现在各家 Agent 的配置文件中）。
+    pub fn connect_with(&self, bin: &str, token: Option<&str>) -> Result<String, String> {
         if let Some(cli) = self.cli
             && in_path(cli)
             && self.id == "claude"
         {
             let _ = Command::new(cli).args(["mcp", "remove", "--scope", "user", SERVER_KEY]).output();
-            let out = Command::new(cli)
-                .args(["mcp", "add", "--scope", "user", SERVER_KEY, "-e", &format!("{}={token}", pm_proto::ENV_TOKEN), "--", bin, "mcp"])
-                .output()
-                .map_err(|e| e.to_string())?;
+            let mut args: Vec<String> = ["mcp", "add", "--scope", "user", SERVER_KEY].iter().map(|s| s.to_string()).collect();
+            if let Some(t) = token {
+                args.push("-e".into());
+                args.push(format!("{}={t}", pm_proto::ENV_TOKEN));
+            }
+            args.extend(["--".to_string(), bin.to_string(), "mcp".to_string()]);
+            let out = Command::new(cli).args(&args).output().map_err(|e| e.to_string())?;
             if out.status.success() {
                 return Ok("已通过 claude mcp add 接入".into());
             }
@@ -154,7 +163,10 @@ impl Adapter {
                 if !v.is_object() {
                     return Err(format!("{} 不是 JSON 对象", path.display()));
                 }
-                let mut server = json!({ "command": bin, "args": ["mcp"], "env": { pm_proto::ENV_TOKEN: token } });
+                let mut server = json!({ "command": bin, "args": ["mcp"] });
+                if let Some(t) = token {
+                    server["env"] = json!({ pm_proto::ENV_TOKEN: t });
+                }
                 if stdio_type {
                     server["type"] = json!("stdio");
                 }
@@ -174,9 +186,11 @@ impl Adapter {
                 let mut args = toml_edit::Array::new();
                 args.push("mcp");
                 t["args"] = toml_edit::value(args);
-                let mut env = toml_edit::InlineTable::new();
-                env.insert(pm_proto::ENV_TOKEN, token.into());
-                t["env"] = toml_edit::value(env);
+                if let Some(token) = token {
+                    let mut env = toml_edit::InlineTable::new();
+                    env.insert(pm_proto::ENV_TOKEN, token.into());
+                    t["env"] = toml_edit::value(env);
+                }
                 if !doc.contains_key(key) {
                     let mut parent = toml_edit::Table::new();
                     parent.set_implicit(true);
@@ -270,6 +284,17 @@ mod tests {
         assert!(codex.configured());
         codex.disconnect().unwrap();
         assert!(!codex.configured());
+
+        // 远程模式：不写令牌（令牌在本人可读的令牌文件里），其余配置照常合并。
+        cursor.connect_with("/usr/local/bin/PassManager", None).unwrap();
+        let v: Value = serde_json::from_str(&std::fs::read_to_string(dir.join(".cursor/mcp.json")).unwrap()).unwrap();
+        assert_eq!(v["mcpServers"]["passmanager"]["command"], "/usr/local/bin/PassManager");
+        assert_eq!(v["mcpServers"]["passmanager"]["args"][0], "mcp");
+        assert!(v["mcpServers"]["passmanager"].get("env").is_none());
+        assert_eq!(v["mcpServers"]["other"]["command"], "x");
+        codex.connect_with("/usr/local/bin/PassManager", None).unwrap();
+        let t = std::fs::read_to_string(dir.join(".codex/config.toml")).unwrap();
+        assert!(t.contains("[mcp_servers.passmanager]") && !t.contains("PASSMANAGER_TOKEN") && t.contains("model = \"o3\""));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

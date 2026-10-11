@@ -138,7 +138,8 @@ pub fn check(ctx: &Ctx) -> Report {
     }
     #[cfg(target_os = "linux")]
     {
-        r.findings = linux::check(ctx);
+        // 服务器模式（局域网在线版）：没有本机 Agent，管理员就是 root；只检查服务账户与文件权限。
+        r.findings = if ctx.info.server.is_some() { linux::check_server(ctx) } else { linux::check(ctx) };
     }
     #[cfg(target_os = "macos")]
     {

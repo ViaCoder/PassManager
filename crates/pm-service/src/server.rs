@@ -1,4 +1,5 @@
-//! 本地 IPC：Unix socket / Windows 命名管道。不监听任何 TCP 端口。
+//! 本地 IPC：Unix socket / Windows 命名管道；服务器模式下另有网络通道（见 `online`），
+//! 网络连接经双层加密后同样交给这里的 `handle_conn`。
 //!
 //! 每条连接的第一帧必须是握手；失败时随机延迟后直接断开，不返回任何内容（防探测）。
 
@@ -18,6 +19,8 @@ pub(crate) struct Peer {
     pub elevated: bool,
     /// 是否为允许的用户（系统模式下：安装用户或 root/管理员）。
     pub allowed: bool,
+    /// 来自网络（服务器模式的 Agent 通道）：只接受令牌与注册握手。
+    pub network: bool,
 }
 
 async fn read_frame<S: AsyncRead + Unpin>(s: &mut S, max: usize) -> std::io::Result<Vec<u8>> {
@@ -47,7 +50,7 @@ async fn silent_reject() {
     tokio::time::sleep(Duration::from_millis(200 + jitter[0] as u64 * 3)).await;
 }
 
-pub(crate) async fn handle_conn<S: AsyncRead + AsyncWrite + Unpin>(shared: Arc<Shared>, mut s: S, peer: Peer) {
+pub(crate) async fn handle_conn<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(shared: Arc<Shared>, mut s: S, peer: Peer) {
     if !peer.allowed {
         silent_reject().await;
         return;
@@ -56,14 +59,31 @@ pub(crate) async fn handle_conn<S: AsyncRead + AsyncWrite + Unpin>(shared: Arc<S
         Ok(Ok(b)) => serde_json::from_slice::<Hello>(&b).ok(),
         _ => None,
     };
+    let server_mode = shared.online.is_some();
     let session = match hello {
         Some(Hello::Token { v, token }) if v == PROTO_V && token_allowed(&shared, &peer) && shared.verify_token(&token) => {
             Some(Session::Agent)
         }
+        // 网络上只接受令牌与注册；口令、首次设置、root 会话一律静默拒绝。
+        Some(Hello::Password { .. } | Hello::Setup { .. } | Hello::Root { .. }) if peer.network => None,
+        // 服务器模式没有口令（无口令库由 root 的 `passmanager init` 创建）。
+        Some(Hello::Password { .. } | Hello::Setup { .. }) if server_mode => None,
         Some(Hello::Password { v, password }) if v == PROTO_V => shared.password_login(password).await,
         Some(Hello::Setup { v, password }) if v == PROTO_V && (shared.layout.mode == Mode::User || peer.elevated) => {
             shared.setup(password).await
         }
+        // root 管理会话：只在本地 socket、对端为 root（用户模式下为同一用户，本来就没有隔离）。
+        Some(Hello::Root { v }) if v == PROTO_V && server_mode && (peer.elevated || shared.layout.mode == Mode::User) => {
+            Some(Session::Root)
+        }
+        Some(Hello::Enroll { v, code, .. }) if v == PROTO_V && peer.network => match shared.enroll(&code) {
+            Some(token) => {
+                let ack = serde_json::json!({"ok": true, "token": token.as_str()});
+                let _ = write_frame(&mut s, ack.to_string().as_bytes()).await;
+                return;
+            }
+            None => None,
+        },
         _ => None,
     };
     let Some(session) = session else {
@@ -79,6 +99,18 @@ pub(crate) async fn handle_conn<S: AsyncRead + AsyncWrite + Unpin>(shared: Arc<S
             Err(_) => break,
         };
         let resp = match serde_json::from_slice::<Request>(&frame) {
+            // git 代理是流式的：这条连接交给代理处理，结束后关闭。
+            Ok(Request::GitProxy { method, url, headers }) => match shared.git_prepare(&session, &method, &url).await {
+                Ok((svc, u, plan)) => {
+                    if write_frame(&mut s, &serde_json::to_vec(&Response::ok("continue")).unwrap_or_default()).await.is_err() {
+                        return;
+                    }
+                    let out = crate::git::proxy(s, method, u, headers, svc, plan).await;
+                    shared.git_finish(&url, out).await;
+                    return;
+                }
+                Err(e) => Response::err(&e.code, e.message),
+            },
             Ok(req) => shared.dispatch(&session, req).await,
             Err(e) => Response::err("BAD_REQUEST", format!("invalid request: {e}")),
         };
@@ -146,7 +178,7 @@ pub(crate) async fn serve(shared: Arc<Shared>) -> Result<(), String> {
                     Mode::System => uid == 0 || client_uid.is_none_or(|c| c == uid),
                     Mode::User => uid == my_uid,
                 };
-                let peer = Peer { elevated: uid == 0, allowed };
+                let peer = Peer { elevated: uid == 0, allowed, network: false };
                 tokio::spawn(handle_conn(shared.clone(), stream, peer));
             }
         }
@@ -191,7 +223,7 @@ pub(crate) async fn serve(shared: Arc<Shared>) -> Result<(), String> {
                 let info = pipe_client(HANDLE(connected.as_raw_handle()));
                 let (elevated, sid) = info.unwrap_or((true, String::new()));
                 let allowed = shared.layout.mode == Mode::User || sid == client || elevated;
-                tokio::spawn(handle_conn(shared.clone(), connected, Peer { elevated, allowed }));
+                tokio::spawn(handle_conn(shared.clone(), connected, Peer { elevated, allowed, network: false }));
             }
         }
     }

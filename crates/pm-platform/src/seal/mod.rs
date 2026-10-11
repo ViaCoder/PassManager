@@ -90,6 +90,9 @@ pub fn level_label(level: u8) -> &'static str {
     }
 }
 
+/// TPM 资源管理器设备（容器里由宿主机透传）。
+pub const TPM_DEVICE: &str = "/dev/tpmrm0";
+
 pub const L1_WARNING: &str = "L1：设备密钥仅受文件权限保护";
 
 pub(crate) fn key_from_bytes(b: &[u8]) -> io::Result<Zeroizing<[u8; 32]>> {

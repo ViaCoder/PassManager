@@ -136,6 +136,7 @@ pub fn install(client: &str) -> Result<(Layout, InstallInfo, Option<String>), St
         seal_method: method,
         seal_level: sealer.level(),
         binary: BIN.into(),
+        server: None,
     };
     info.store(&layout).map_err(|e| e.to_string())?;
     chown_mode(&layout.install_info_path(), 0, 0, 0o644)?;

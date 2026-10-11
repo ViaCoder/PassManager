@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+{% block body %}
+<h1>主机指纹</h1>
+{% if pending %}
+<h2>指纹已变更（已阻止发送凭据）</h2>
+<div class="table-wrap"><table class="list">
+  <tr><th>类型</th><th>主机</th><th>原指纹</th><th>新指纹</th><th>时间</th></tr>
+  {% for p in pending %}
+  <tr><td>{{ p.kind }}</td><td><code>{{ p.host_port }}</code></td><td><code>{{ p.old_fingerprint }}</code></td><td><code>{{ p.new_fingerprint }}</code></td><td>{{ p.seen_at | datetime }}</td></tr>
+  {% endfor %}
+</table></div>
+{% endif %}
+<form method="post" action="/pins/trust" class="card">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <label>信任新指纹：主机名（清除该主机所有端口）、<code>*.domain</code>，或 <code>host:port</code><input name="pattern" required maxlength="253"></label>
+  <button>清除记录并在下次连接时重新记录</button>
+</form>
+<h2>已记录的指纹</h2>
+<div class="table-wrap"><table class="list small">
+  <tr><th>类型</th><th>主机</th><th>算法</th><th>指纹</th><th>首次记录</th></tr>
+  {% for p in pins %}
+  <tr><td>{{ p.kind }}</td><td><code>{{ p.host_port }}</code></td><td>{{ p.algo }}</td><td><code>{{ p.fingerprint }}</code></td><td>{{ p.first_seen | datetime }}</td></tr>
+  {% else %}
+  <tr><td colspan="5" class="muted">没有。</td></tr>
+  {% endfor %}
+</table></div>
+{% endblock %}

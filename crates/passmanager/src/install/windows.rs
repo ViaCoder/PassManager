@@ -101,6 +101,7 @@ pub fn install(opts: &InstallOpts) -> ExitCode {
         seal_method: sealer.method().into(),
         seal_level: sealer.level(),
         binary: dst.display().to_string(),
+        server: None,
     };
     if let Err(e) = info.store(&layout) {
         return fail(e.to_string());

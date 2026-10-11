@@ -385,6 +385,7 @@ fn end_to_end() {
                 note: format!("{name} note"),
                 self_signed,
                 auto_accept_host_key: false,
+                ..Default::default()
             },
         })
     };

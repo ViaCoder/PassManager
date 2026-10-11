@@ -1,0 +1,264 @@
+#!/usr/bin/env bash
+# PassManager 局域网在线版：服务器一键安装（在服务器上以 root 运行，可重复执行）。
+#
+# 用法：
+#   ./install-server.sh --domain pm.example.com --lan-cidr 198.51.100.0/24 < cf-token
+#        Cloudflare API token 从标准输入读入（第一行，不回显、不落盘明文）
+#   ./install-server.sh --domain pm.example.com --lan-cidr 198.51.100.0/24 --skip-acme
+#        不申请证书（之后用 passmanager import-cert 导入）
+#   ./install-server.sh --site-file site.local.env < cf-token
+#        从本地站点配置文件读取参数（KEY=VALUE；只认下面列出的键，不会当作脚本执行）
+#
+# 选项（域名与网段没有默认值，必须给出）：
+#   --domain NAME        服务域名（证书与 Host 校验）                       站点文件键 DOMAIN
+#   --lan-cidr CIDR      允许访问的 IPv4 网段，可重复                      站点文件键 LAN_CIDRS（空格分隔）
+#   --web-port N         网页端口（默认 443）                              站点文件键 WEB_PORT
+#   --agent-port N       Agent 端口（默认 8443）                           站点文件键 AGENT_PORT
+#   --tpm-socket PATH    可选：swtpm 的 Unix 数据套接字；不给时只自动检测 /dev/tpmrm0   站点文件键 TPM_SOCKET
+#   --site-file FILE     读取站点配置文件（命令行参数优先）
+#   --skip-acme          不申请 Let's Encrypt 证书
+#   -h, --help           显示帮助
+#
+# 做的事情：
+#   1. 安装 /usr/local/bin/PassManager（以及小写别名 passmanager）；
+#   2. 专用系统账户 passmanager（不可登录）；root 加入 tss 组；发现 TPM 时安装 tss2 运行库；
+#   3. /etc/sysctl.d/99-disable-ipv6.conf（all/default/lo 关闭 IPv6）并立即应用；
+#   4. nftables：独立的 inet passmanager 表，只允许给定网段访问 22 与网页 / Agent 端口，丢弃其余入站与全部 IPv6；
+#   5. systemd 单元（加固沙箱、network-online、有限次重试、78 不重启）；
+#   6. passmanager init：设备密钥（有 TPM 用 L3，否则 L2）、内层通道密钥、无口令密码库、证书，启动服务。
+#
+# 测试：DRY_RUN=1 ROOT=<目录>：所有文件写到 $ROOT 下，系统命令（systemctl、nft、sysctl、useradd、usermod、
+# apt-get、ldconfig）由 PATH 里的替身提供，passmanager init 以测试布局运行且不申请证书、不启动服务。
+set -euo pipefail
+
+DOMAIN=""
+LANS=()
+WEB_PORT=""
+AGENT_PORT=""
+SKIP_ACME=0
+TPM_SOCKET=""
+SITE_FILE=""
+DRY_RUN="${DRY_RUN:-0}"
+ROOT="${ROOT:-}"
+HERE="$(cd "$(dirname "$0")" && pwd)"
+
+usage() { sed -n '2,/^set -euo/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'; }
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --domain) DOMAIN="${2:?--domain 需要参数}"; shift 2 ;;
+    --lan-cidr|--lan) LANS+=("${2:?--lan-cidr 需要参数}"); shift 2 ;;
+    --web-port) WEB_PORT="${2:?--web-port 需要参数}"; shift 2 ;;
+    --agent-port) AGENT_PORT="${2:?--agent-port 需要参数}"; shift 2 ;;
+    --tpm-socket) TPM_SOCKET="${2:?--tpm-socket 需要参数}"; shift 2 ;;
+    --site-file) SITE_FILE="${2:?--site-file 需要参数}"; shift 2 ;;
+    --skip-acme) SKIP_ACME=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "未知参数：$1（--help 查看用法）" >&2; exit 2 ;;
+  esac
+done
+
+# 站点配置文件：只解析已知的键（不 source，不执行任何内容）；命令行给出的值优先。
+if [ -n "$SITE_FILE" ]; then
+  [ -f "$SITE_FILE" ] || { echo "站点配置文件不存在：$SITE_FILE" >&2; exit 2; }
+  while IFS= read -r line || [ -n "$line" ]; do
+    line="${line%%#*}"
+    case "$line" in *=*) ;; *) continue ;; esac
+    key="$(printf '%s' "${line%%=*}" | tr -d '[:space:]')"
+    val="$(printf '%s' "${line#*=}" | sed -e 's/^[[:space:]"'"'"']*//' -e 's/[[:space:]"'"'"']*$//')"
+    case "$key" in
+      DOMAIN) [ -n "$DOMAIN" ] || DOMAIN="$val" ;;
+      LAN_CIDRS) if [ ${#LANS[@]} -eq 0 ]; then read -r -a LANS <<< "$val"; fi ;;
+      WEB_PORT) [ -n "$WEB_PORT" ] || WEB_PORT="$val" ;;
+      AGENT_PORT) [ -n "$AGENT_PORT" ] || AGENT_PORT="$val" ;;
+      TPM_SOCKET) [ -n "$TPM_SOCKET" ] || TPM_SOCKET="$val" ;;
+      "") ;;
+      *) ;;  # 其他键（例如部署用的主机地址）与安装无关，忽略
+    esac
+  done < "$SITE_FILE"
+fi
+
+WEB_PORT="${WEB_PORT:-443}"
+AGENT_PORT="${AGENT_PORT:-8443}"
+[ -n "$DOMAIN" ] || { echo "必须指定 --domain（没有默认值）" >&2; exit 2; }
+[ ${#LANS[@]} -gt 0 ] || { echo "必须至少指定一个 --lan-cidr（没有默认值；服务不会在没有网段限制时监听网络）" >&2; exit 2; }
+for c in "${LANS[@]}"; do
+  if ! printf '%s' "$c" | grep -Eq '^([0-9]{1,3}\.){3}[0-9]{1,3}(/[0-9]{1,2})?$'; then
+    echo "网段格式无效：$c" >&2; exit 2
+  fi
+done
+case "$DOMAIN" in
+  *[!a-zA-Z0-9.-]*|"") echo "域名格式无效：$DOMAIN" >&2; exit 2 ;;
+esac
+for p in "$WEB_PORT" "$AGENT_PORT"; do
+  case "$p" in ''|*[!0-9]*) echo "端口无效：$p" >&2; exit 2 ;; esac
+done
+case "$TPM_SOCKET" in
+  ""|/*) ;;
+  *) echo "--tpm-socket 必须是绝对路径" >&2; exit 2 ;;
+esac
+LAN_SET="$(IFS=,; printf '%s' "${LANS[*]}" | sed 's/,/, /g')"
+
+if [ "$DRY_RUN" = 1 ]; then
+  [ -n "$ROOT" ] || { echo "DRY_RUN=1 需要 ROOT=<目录>" >&2; exit 2; }
+  # 防止误用：DRY_RUN 下系统命令必须由 PATH 里的测试替身提供，不能是系统自带的命令。
+  for c in systemctl useradd usermod apt-get sysctl nft ldconfig; do
+    p="$(command -v "$c" 2>/dev/null || true)"
+    case "$p" in
+      "" | /usr/* | /bin/* | /sbin/* | /lib/* | /opt/*)
+        echo "DRY_RUN=1：$c 必须由 PATH 里的测试替身提供（找到：${p:-无}），拒绝执行" >&2; exit 2 ;;
+    esac
+  done
+  mkdir -p "$ROOT"
+else
+  ROOT=""
+  [ "$(id -u)" -eq 0 ] || { echo "需要 root：sudo $0" >&2; exit 1; }
+fi
+
+say() { printf '== %s\n' "$*"; }
+warn() { printf '\033[33m警告：%s\033[0m\n' "$*" >&2; }
+
+BIN_SRC="$HERE/PassManager"
+[ -x "$BIN_SRC" ] || BIN_SRC="$HERE/../PassManager"
+[ -x "$BIN_SRC" ] || { echo "找不到 PassManager 可执行文件（应与本脚本放在同一目录）" >&2; exit 1; }
+
+# ---- 1. 程序 ----
+say "安装程序"
+install -d -m 0755 "$ROOT/usr/local/bin"
+install -m 0755 "$BIN_SRC" "$ROOT/usr/local/bin/PassManager.new"
+mv -f "$ROOT/usr/local/bin/PassManager.new" "$ROOT/usr/local/bin/PassManager"
+ln -sfn PassManager "$ROOT/usr/local/bin/passmanager"
+PM="$ROOT/usr/local/bin/PassManager"
+
+# ---- 2. 账户与 TPM 运行库 ----
+say "服务账户与 TPM"
+if ! getent passwd passmanager >/dev/null 2>&1; then
+  useradd --system --user-group --home-dir /nonexistent --no-create-home --shell /usr/sbin/nologin passmanager
+fi
+TPM_GROUP=""
+if getent group tss >/dev/null 2>&1; then
+  TPM_GROUP="tss"
+  # systemd-creds（root，在 ExecStartPre 里）访问 TPM（/dev/tpmrm0 或 swtpm 套接字，通常属于 tss 组）。
+  usermod -aG tss root
+fi
+if { [ -n "$TPM_SOCKET" ] && [ -S "$TPM_SOCKET" ]; } || [ -e /dev/tpmrm0 ]; then
+  missing=""
+  for pair in libtss2-esys.so.0:libtss2-esys-3.0.2-0t64 libtss2-rc.so.0:libtss2-rc0t64 libtss2-mu.so.0:libtss2-mu-4.0.1-0t64 \
+              libtss2-tcti-swtpm.so.0:libtss2-tcti-swtpm0t64 libtss2-tcti-device.so.0:libtss2-tcti-device0t64; do
+    lib="${pair%%:*}"; pkg="${pair#*:}"
+    ldconfig -p | grep -q "$lib" || missing="$missing $pkg"
+  done
+  if [ -n "$missing" ]; then
+    say "安装 TPM 运行库：$missing"
+    # shellcheck disable=SC2086
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends $missing || warn "TPM 运行库安装失败，将使用 L2（主机密钥）封存"
+  fi
+else
+  echo "   没有发现 TPM（/dev/tpmrm0${TPM_SOCKET:+ 或 $TPM_SOCKET}）：使用 L2（主机密钥）。有可用的 TPM 后运行 passmanager reseal。"
+fi
+
+# ---- 3. 关闭 IPv6 ----
+say "关闭 IPv6"
+SYSCTL_FILE="$ROOT/etc/sysctl.d/99-disable-ipv6.conf"
+SYSCTL_WANT="# Managed by PassManager install-server.sh
+net.ipv6.conf.all.disable_ipv6 = 1
+net.ipv6.conf.default.disable_ipv6 = 1
+net.ipv6.conf.lo.disable_ipv6 = 1"
+install -d -m 0755 "$ROOT/etc/sysctl.d"
+if [ ! -f "$SYSCTL_FILE" ] || ! diff -q <(printf '%s\n' "$SYSCTL_WANT") "$SYSCTL_FILE" >/dev/null 2>&1; then
+  # 已有的配置（例如手工写的同名文件）只要已经关闭了 IPv6 就保留不动。
+  if [ -f "$SYSCTL_FILE" ] && grep -Eq '^[[:space:]]*net\.ipv6\.conf\.all\.disable_ipv6[[:space:]]*=[[:space:]]*1' "$SYSCTL_FILE" \
+     && grep -Eq '^[[:space:]]*net\.ipv6\.conf\.default\.disable_ipv6[[:space:]]*=[[:space:]]*1' "$SYSCTL_FILE"; then
+    echo "   $SYSCTL_FILE 已关闭 IPv6，保持不变"
+  else
+    printf '%s\n' "$SYSCTL_WANT" > "$SYSCTL_FILE"
+    chmod 0644 "$SYSCTL_FILE"
+  fi
+fi
+if ! sysctl -p "$SYSCTL_FILE" >/dev/null 2>&1; then
+  warn "无法应用 $SYSCTL_FILE（非特权 LXC 里可能没有权限）。请在宿主机上为容器关闭 IPv6，或确认已关闭：sysctl net.ipv6.conf.all.disable_ipv6"
+fi
+
+# ---- 4. nftables ----
+say "防火墙（只允许 $LAN_SET 访问 22/$WEB_PORT/$AGENT_PORT）"
+NFT_DIR="$ROOT/etc/nftables.d"
+NFT_FILE="$NFT_DIR/passmanager.nft"
+install -d -m 0755 "$NFT_DIR"
+cat > "$NFT_FILE" <<EOF
+# Managed by PassManager install-server.sh：只允许局域网访问 SSH、网页与 Agent 通道。
+table inet passmanager
+delete table inet passmanager
+table inet passmanager {
+	chain input {
+		type filter hook input priority filter - 1; policy drop;
+		iif "lo" accept
+		meta nfproto ipv6 drop
+		ct state invalid drop
+		ct state established,related accept
+		ip protocol icmp accept
+		ip saddr { $LAN_SET } tcp dport { 22, $WEB_PORT, $AGENT_PORT } ct state new accept
+	}
+}
+EOF
+chmod 0644 "$NFT_FILE"
+NFT_MAIN="$ROOT/etc/nftables.conf"
+if [ ! -f "$NFT_MAIN" ]; then
+  printf '#!/usr/sbin/nft -f\nflush ruleset\n' > "$NFT_MAIN"
+fi
+if ! grep -q '^include "/etc/nftables.d/\*.nft"' "$NFT_MAIN"; then
+  printf '\ninclude "/etc/nftables.d/*.nft"\n' >> "$NFT_MAIN"
+fi
+if nft -c -f "$NFT_FILE" && nft -f "$NFT_FILE"; then
+  systemctl enable nftables.service >/dev/null 2>&1 || warn "无法启用 nftables.service（重启后规则需要手动加载）"
+else
+  warn "nftables 规则加载失败（容器可能没有 CAP_NET_ADMIN）。应用内仍会拒绝 $LAN_SET 以外的来源。"
+fi
+
+# ---- 5. systemd 单元 ----
+say "systemd 单元"
+install -d -m 0755 "$ROOT/etc/systemd/system" "$ROOT/etc/tmpfiles.d"
+if [ -n "$TPM_GROUP" ]; then
+  "$PM" server-unit --tpm-group "$TPM_GROUP" > "$ROOT/etc/systemd/system/passmanager.service"
+else
+  "$PM" server-unit > "$ROOT/etc/systemd/system/passmanager.service"
+fi
+"$PM" server-unit --tmpfiles > "$ROOT/etc/tmpfiles.d/passmanager.conf"
+chmod 0644 "$ROOT/etc/systemd/system/passmanager.service" "$ROOT/etc/tmpfiles.d/passmanager.conf"
+systemctl daemon-reload
+
+# ---- 6. 初始化 ----
+say "初始化（设备密钥、内层通道密钥、无口令密码库、证书）"
+INIT_ARGS=(init --domain "$DOMAIN" --web-port "$WEB_PORT" --agent-port "$AGENT_PORT")
+for c in "${LANS[@]}"; do INIT_ARGS+=(--lan-cidr "$c"); done
+[ -n "$TPM_SOCKET" ] && INIT_ARGS+=(--tpm-socket "$TPM_SOCKET")
+NO_CERT="$SKIP_ACME"
+if [ "$DRY_RUN" = 1 ]; then
+  export PASSMANAGER_HOME="$ROOT/var/lib/passmanager-dryrun"
+  INIT_ARGS+=(--no-start)
+  NO_CERT=1   # 测试不访问 Let's Encrypt（token 仍按正常流程封存）
+fi
+TOKEN=""
+if [ "$SKIP_ACME" != 1 ]; then
+  if [ -t 0 ]; then
+    read -rsp "Cloudflare API token（Zone:DNS:Edit，输入不回显）：" TOKEN; echo
+  else
+    IFS= read -r TOKEN || true
+  fi
+  if [ -z "$TOKEN" ]; then
+    warn "没有提供 Cloudflare token：跳过证书申请（之后可重新运行本脚本，或 passmanager import-cert）"
+    NO_CERT=1
+  fi
+fi
+[ "$NO_CERT" = 1 ] && INIT_ARGS+=(--skip-acme)
+if [ -n "$TOKEN" ]; then
+  INIT_ARGS+=(--cf-token-stdin)
+  printf '%s\n' "$TOKEN" | "$PM" "${INIT_ARGS[@]}"
+  TOKEN=""
+else
+  "$PM" "${INIT_ARGS[@]}" </dev/null
+fi
+
+say "完成"
+echo "   状态：passmanager status"
+echo "   网页：passmanager login（输出 2 分钟有效的一次性链接）"
+echo "   Agent：passmanager token add <标签>，在 Agent 机器上运行 install-agent.sh '<注册码>'"

@@ -58,6 +58,39 @@ PassManager trust db1.example.com   # 主机重装或证书更换后信任新指
 - 同一主机保存了多个密钥时，用列表里的引用名指定：HTTP 中写 `{{引用名}}`，SSH/SCP 写 `引用名/user@host`。
 - CLI 从环境变量 `PASSMANAGER_TOKEN` 读取令牌，输出 JSON。需要用户操作的错误会直接给出命令，例如 `LOCKED: Ask the user to run: PassManager unlock`。
 
+## 局域网服务器（在线版）
+
+从 0.2.0 起，可以在局域网里用一台 Linux 服务器保存密钥库，供其他机器（Linux、macOS、Windows）上的 Agent 使用。
+Agent 与服务器之间是 TLS 1.3 混合后量子密钥交换，内层再叠加 ML-KEM-1024 + Classic McEliece；服务器提供无密码的网页管理界面
+（root 打印一次性登录链接）。没有站点默认值：域名与允许访问的网段必须在安装时给出。
+
+```sh
+# 服务器（root；Debian 13 或其他 systemd ≥ 250 的发行版）
+./install-server.sh --domain pm.example.com --lan-cidr 198.51.100.0/24 < cloudflare-token
+passmanager import --name github --domain api.github.com < token.txt     # 密钥从标准输入读入，不回显
+passmanager token add laptop                                               # 打印一次性的 pm-enroll://… 注册码
+# Agent 机器
+PassManager enroll 'pm-enroll://pm.example.com:8443/…#…'
+PassManager list
+```
+
+0.2.0 在 `http` / `ssh` / `scp` 之外新增：
+
+- **多字段条目**：`passmanager import --name mail --fields username,password`（每行一个值）。用 `{{mail.username}}`、
+  `{{mail.password}}`，或在只有一个条目匹配该主机时用 `{{password}}`；`{{secret}}` 仍然表示单值条目的值。
+  `sudo` 使用 `password` 字段。Agent 只能看到字段**名称**。
+- **SSH 私钥**：`--kind ssh-key` 保存未加密的 OpenSSH/PEM 私钥（ECDSA P-384、Ed25519、RSA），只显示公钥指纹。私钥条目用公钥登录，
+  兼容加固的 sshd 配置（`mlkem768x25519-sha256` / `ecdh-sha2-nistp384`、`aes256-gcm@openssh.com`、
+  `hmac-sha2-512-etm@openssh.com`、`AuthenticationMethods publickey`）。
+- **`PassManager ssh-agent`**（Agent 机器）：OpenSSH agent 套接字，让普通的 `ssh`、`scp`、`git` 使用服务器上的私钥。
+  私钥不离开服务器；服务器只为绑定到条目主机密钥（OpenSSH ≥ 8.9 的 `session-bind`）的 `publickey` 认证请求签名，限速并记审计。
+- **`PassManager git-proxy`**（Agent 机器）：只监听回环地址的 git smart-HTTP 代理。配置
+  `git config --global url."http://127.0.0.1:7878/<令牌>/https/github.com/".insteadOf "https://github.com/"`（命令会打印准确的一行）后，
+  git clone / push 经服务器转发，由服务器加上保存的令牌（`Authorization: Basic x-access-token:<PAT>`）。
+  Agent 机器拿不到令牌；只允许 HTTPS、只用于条目的域名、不跟随重定向。
+
+完整步骤：[docs/DEPLOY-LAN.zh-CN.md](docs/DEPLOY-LAN.zh-CN.md)。设计：[docs/DESIGN.zh-CN.md](docs/DESIGN.zh-CN.md) §10。
+
 ## 卸载
 
 ```sh

@@ -9,4 +9,4 @@ pub mod seal;
 pub mod service_files;
 pub mod tty;
 
-pub use paths::{InstallInfo, Layout, Mode};
+pub use paths::{InstallInfo, Layout, Mode, ServerConfig};

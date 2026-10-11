@@ -1,0 +1,36 @@
+# 发布前扫描的允许清单（scripts/release_scan.py）。每条：类型 路径glob 指纹|* 原因
+# 指纹是匹配内容 SHA-256 的前 16 个十六进制字符；扫描输出里只出现指纹，不出现内容。
+entropy	Cargo.lock	*	crates.io 包的 SHA-256 校验和
+entropy	.github/*	*	GitHub Actions 固定到提交哈希的 action 引用，以及 LLVM 安装包的 SHA-256 校验值
+entropy	.github/**/*	*	同上（子目录）
+entropy	crates/pm-crypto/src/selftest.rs	*	启动自检的已知答案测试向量（FIPS / RFC 公开测试向量）
+entropy	crates/pm-crypto/src/lib.rs	f5b7b1c0b9e3dd8c	SHA-384("abc") 公开测试向量
+entropy	crates/pm-crypto/src/lib.rs	5b7e461ebf64496e	RFC 4231 HMAC-SHA-384 测试向量
+entropy	crates/pm-platform/src/seal/linux.rs	*	systemd 凭据类型 ID（creds-util.h 中的公开常量）
+entropy	crates/passmanager/src/git_proxy.rs	3eb1bd439947eb76	单元测试里的假路径令牌（0123…）
+entropy	crates/passmanager/src/remote.rs	b107fe3d7088dc2b	文档注释中的算法名（ML-KEM 与 McEliece 之间用斜杠连接）
+entropy	crates/pm-service/src/online.rs	b107fe3d7088dc2b	文档注释中的算法名（ML-KEM 与 McEliece 之间用斜杠连接）
+entropy	crates/passmanager/tests/e2e.rs	bb95cde18f322515	0.1.0 原有端到端测试的假密钥
+entropy	crates/passmanager/tests/online_e2e.rs	f5f9e1d158cefad8	端到端测试的假密钥
+entropy	crates/passmanager/tests/git_proxy_e2e.rs	d3183b3626ae7ceb	端到端测试的假 PAT
+entropy	crates/pm-web/src/tests.rs	de91e3b4738ff443	网页测试的假密钥
+entropy	crates/pm-net/src/acme.rs	51a53b177855ef11	ASN.1 类型名（证书签名请求）
+entropy	crates/pm-tui/src/app.rs	7330a5f91e3b82ca	随机密码生成的字符表
+pem	crates/pm-crypto/src/devseal.rs	3021d90eb9437b2d	测试用的假 PEM 头（被封存的样例文本）
+pem	crates/pm-net/src/tls.rs	ddddb6cbd348658f	测试：格式错误的证书必须被拒绝（内容是 AAAA）
+pem	crates/pm-service/src/git.rs	03d104c669e3c7b6	测试：私钥条目不能当作 HTTPS 令牌（内容是 x）
+pem	crates/pm-service/src/redact.rs	03d104c669e3c7b6	脱敏测试的假私钥
+pem	crates/pm-web/src/tests.rs	03d104c669e3c7b6	网页测试的假私钥（内容是 fakekeymaterial）
+pem	crates/passmanager/tests/import_e2e.rs	932cb42f71e65cfa	导入测试的多行样例文本（BEGIN NOTE）
+ip	README.md	0546412d61ba57f1	0.1.0 原有文档：IP 精确匹配的示例
+ip	README.zh-CN.md	0546412d61ba57f1	同上
+ip	crates/pm-vault/src/domain.rs	0546412d61ba57f1	0.1.0 原有单元测试
+ip	crates/pm-vault/src/lib.rs	0546412d61ba57f1	0.1.0 原有单元测试
+ip	crates/passmanager/tests/e2e.rs	3ac237a6e0d73a89	0.1.0 原有端到端测试（不存在的主机）
+ip	scripts/release_scan.py	b0d56c1d28390f7e	扫描器自身的私有地址段定义
+ip	scripts/release_scan.py	4fb0798e0eb02d53	扫描器自身的私有地址段定义
+ip	scripts/release_scan.py	5da4236dba69f926	扫描器自身的私有地址段定义
+ip	scripts/release_scan.py	4b2228c26597aeca	扫描器自身的私有地址段定义
+ip	scripts/release_scan.py	da51cf1afeda313d	扫描器自身的私有地址段定义
+ip	scripts/release_scan.py	8e099943f7370d7e	扫描器自检用的样例地址（只存在于临时仓库）
+pem	crates/pm-service/src/http.rs	03d104c669e3c7b6	选择规则测试的假私钥（内容是 fake）

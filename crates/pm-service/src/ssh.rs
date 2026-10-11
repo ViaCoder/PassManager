@@ -1,8 +1,13 @@
 //! SSH 执行器（内置 russh，取代 sshpass）。
 //!
 //! - 首次连接记录主机密钥；之后主机密钥变化时**在认证之前**中止，不发送任何认证数据。
-//! - 认证：私钥条目用公钥认证；否则先试 password，再试 keyboard-interactive。
-//! - `sudo=true`：以 `sudo -k -S -p ''` 执行，从 stdin 提供密码。
+//! - 认证：同一主机同时匹配私钥条目与口令条目时，先用私钥（公钥认证，ecdsa-sha2-nistp384 / ed25519 / rsa 等）；
+//!   失败且服务器仍提供 password / keyboard-interactive 时，才用口令条目（先 password，再 keyboard-interactive）。
+//!   多字段条目使用名为 `password` 的字段。
+//! - `sudo=true`：只在有口令条目时生效，以 `sudo -k -S -p ''` 执行并从 stdin 提供该口令；只有私钥时 `sudo` 命令原样执行。
+//! - 算法偏好：密钥交换优先 mlkem768x25519-sha256（后量子混合），其次 ecdh-sha2-nistp384，再兼容 curve25519；
+//!   加密优先 aes256-gcm@openssh.com；主机密钥与公钥认证支持 ecdsa-sha2-nistp384。
+//!   （russh 不支持 sntrup761x25519-sha512，对只提供它与 nistp384 的旧主机会协商 ecdh-sha2-nistp384。）
 //! - 输出与下载内容全部脱敏。
 
 use std::sync::{Arc, Mutex};
@@ -72,20 +77,23 @@ pub struct Target {
     pub host: String,
     pub port: u16,
     pub user: String,
+    /// 私钥条目的私钥 PEM（先用它认证）。
+    pub key: Option<Zeroizing<String>>,
+    /// 口令条目的口令（多字段条目为 `password` 字段）；没有口令条目时为空。用于口令认证与 sudo。
     pub secret: Zeroizing<String>,
-    pub private_key: bool,
     pub auto_accept: bool,
 }
 
 impl Target {
-    pub fn from_entry(e: &Entry, host: &str, port: u16, user: &str) -> Self {
+    /// `key`：私钥条目；`pw`：口令条目（两者可以都有：先私钥，后口令）。
+    pub fn from_entries(key: Option<&Entry>, pw: Option<&Entry>, host: &str, port: u16, user: &str) -> Self {
         Self {
             host: host.to_string(),
             port,
             user: user.to_string(),
-            secret: e.secret.clone(),
-            private_key: e.is_private_key(),
-            auto_accept: e.auto_accept_host_key && e.is_private_key(),
+            key: key.map(|k| k.secret.clone()),
+            secret: Zeroizing::new(pw.and_then(|e| e.password()).unwrap_or("").to_string()),
+            auto_accept: key.is_some_and(|k| k.auto_accept_host_key),
         }
     }
 
@@ -130,7 +138,7 @@ pub enum Connected {
 pub async fn connect(t: &Target, expected_pin: Option<String>) -> Result<Connected, ApiErr> {
     let observed = Arc::new(Mutex::new(None));
     let checker = Checker { expected: expected_pin.clone(), accept_change: t.auto_accept, observed: observed.clone() };
-    let config = Arc::new(client::Config { inactivity_timeout: Some(Duration::from_secs(120)), ..Default::default() });
+    let config = Arc::new(client_config());
     let conn = tokio::time::timeout(CONNECT_TIMEOUT, client::connect(config, (t.host.as_str(), t.port), checker)).await;
     let mut handle = match conn {
         Err(_) => return Err(err("UPSTREAM_ERROR", format!("SSH connection to {} timed out", t.host_port()))),
@@ -146,25 +154,65 @@ pub async fn connect(t: &Target, expected_pin: Option<String>) -> Result<Connect
         }
         Ok(Ok(h)) => h,
     };
-    let authed = if t.private_key {
-        let key = russh::keys::decode_secret_key(&t.secret, None)
+    // 先私钥；失败后只有服务器仍提供口令方式时才回退到口令条目。
+    let mut authed = false;
+    let mut password_offered = true;
+    if let Some(pem) = &t.key {
+        let key = russh::keys::decode_secret_key(pem, None)
             .map_err(|_| err("BAD_CREDENTIAL", "the stored private key could not be parsed (encrypted keys are not supported)"))?;
         let hash = handle.best_supported_rsa_hash().await.ok().flatten().flatten();
-        handle
-            .authenticate_publickey(t.user.clone(), PrivateKeyWithHashAlg::new(Arc::new(key), hash))
-            .await
-            .map(|r| r.success())
-            .unwrap_or(false)
-    } else {
+        match handle.authenticate_publickey(t.user.clone(), PrivateKeyWithHashAlg::new(Arc::new(key), hash)).await {
+            Ok(client::AuthResult::Success) => authed = true,
+            Ok(client::AuthResult::Failure { remaining_methods, .. }) => {
+                password_offered =
+                    remaining_methods.iter().any(|m| matches!(m, russh::MethodKind::Password | russh::MethodKind::KeyboardInteractive));
+            }
+            Err(_) => password_offered = false,
+        }
+    }
+    if !authed && password_offered && !t.secret.is_empty() {
         let pw_ok = handle.authenticate_password(t.user.clone(), t.secret.to_string()).await.map(|r| r.success()).unwrap_or(false);
-        pw_ok || keyboard_interactive(&mut handle, &t.user, &t.secret).await
-    };
+        authed = pw_ok || keyboard_interactive(&mut handle, &t.user, &t.secret).await;
+    }
     if !authed {
         let _ = handle.disconnect(russh::Disconnect::ByApplication, "", "").await;
         return Err(err("AUTH_REJECTED", format!("SSH authentication as {} on {} was rejected", t.user, t.host_port())));
     }
     let obs = observed.lock().unwrap().clone();
     Ok(Connected::Session { handle, observed: obs })
+}
+
+/// 客户端算法偏好（见模块说明）。
+pub fn client_config() -> client::Config {
+    use std::borrow::Cow;
+    let mut preferred = russh::Preferred::DEFAULT.clone();
+    preferred.kex = Cow::Owned(vec![
+        russh::kex::MLKEM768X25519_SHA256,
+        russh::kex::ECDH_SHA2_NISTP384,
+        russh::kex::CURVE25519,
+        russh::kex::CURVE25519_PRE_RFC_8731,
+        russh::kex::ECDH_SHA2_NISTP521,
+        russh::kex::ECDH_SHA2_NISTP256,
+        russh::kex::DH_G16_SHA512,
+        russh::kex::DH_G14_SHA256,
+        russh::kex::EXTENSION_SUPPORT_AS_CLIENT,
+        russh::kex::EXTENSION_OPENSSH_STRICT_KEX_AS_CLIENT,
+    ]);
+    let mut ciphers = vec![russh::cipher::AES_256_GCM];
+    ciphers.extend(preferred.cipher.iter().filter(|c| **c != russh::cipher::AES_256_GCM).cloned());
+    preferred.cipher = Cow::Owned(ciphers);
+    let mut macs = vec![russh::mac::HMAC_SHA512_ETM];
+    macs.extend(preferred.mac.iter().filter(|m| **m != russh::mac::HMAC_SHA512_ETM).cloned());
+    preferred.mac = Cow::Owned(macs);
+    client::Config { inactivity_timeout: Some(Duration::from_secs(120)), preferred, ..Default::default() }
+}
+
+/// 解析 OpenSSH 私钥并返回公钥指纹（`算法 SHA256:…`）。加密的私钥不接受。错误信息不包含私钥内容。
+pub fn key_fingerprint(pem: &str) -> Result<String, String> {
+    let key = russh::keys::decode_secret_key(pem, None)
+        .map_err(|_| "无法解析 SSH 私钥（需要未加密的 OpenSSH / PEM 私钥；加密私钥请先用 ssh-keygen -p 去掉口令）".to_string())?;
+    let pubk = key.public_key();
+    Ok(format!("{} {}", pubk.algorithm(), pubk.fingerprint(HashAlg::Sha256)))
 }
 
 async fn keyboard_interactive(handle: &mut Handle<Checker>, user: &str, secret: &str) -> bool {

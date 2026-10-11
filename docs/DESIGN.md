@@ -82,6 +82,7 @@ out = HKDF-SHA512(salt = "pm/rng/v1" ‖ counter, ikm = getrandom(64) ‖ aws-lc
 - The output is secure as long as either source is sound. Both sources are read on every call and no state is cached, so it is fork-safe by construction.
 - Startup health tests: 4 KiB is sampled from each source and checked with the SP 800-90B repetition count test (cutoff 6) and adaptive proportion test (window 512, cutoff 20); all-zero/all-one output and identical output from both sources are rejected.
 - Continuous tests: every call compares the first 16 bytes of each source's output with its previous output, and the two sources with each other. Any failure is **fail-closed**: every later call returns an error.
+- Optional third source (server mode): the TPM (`TPM2_GetRandom` over `/dev/tpmrm0` or a configured swtpm socket) is mixed into the IKM when it passes a 1 KiB startup health test; any later failure disables only that source (§10.4).
 - liboqs randomness is routed to the combined RNG through `OQS_randombytes_custom_algorithm`; if the RNG fails inside that callback, the process aborts.
 - Startup self-tests (any failure refuses to run): known-answer tests for SHA-512 (FIPS 180-2), HKDF (RFC 5869), AES-256-GCM (GCM spec test case 14), ChaCha20-Poly1305 (RFC 8439 §2.8.2), and Argon2id (RFC 9106 §5.3); an ML-KEM round trip; liboqs availability; and a pairwise consistency test after each KEM key generation.
 
@@ -121,6 +122,7 @@ SealedPayload = { ct_mlkem, ct_mce, nonce_a, nonce_b, c2 }
 - The header's SHA-512 is associated data for both AEAD layers, so tampering with any field makes decryption fail; the seal level is recorded in the header and downgrades are rejected.
 - Hard KDF floors: memory ≥ 256 MiB, iterations ≥ 2. The default is 1 GiB / t=3 / p=4; memory is chosen from the machine's physical RAM, then iterations are increased until one run takes ≥ 1 second.
 - Atomic writes: write a temp file → fsync → keep the old file as `.bak` → rename → fsync the directory. If the main file is missing, `.bak` is read.
+- Version 2 headers (passwordless server mode) add a mode byte; see §10.3. Reads fall back to `.bak` only when the main file is missing or corrupt.
 - Changing the password only re-wraps `wrap_A` / `wrap_B`.
 
 ---
@@ -151,7 +153,7 @@ SealedPayload = { ct_mlkem, ct_mce, nonce_a, nonce_b, c2 }
 `secret + domains (+ optional note)`. Advanced options: self-signed certificate (enables fingerprint pinning, for public and internal hosts alike), and auto-accepting host-key changes for private-key entries.
 
 - No name is required: each entry gets an **automatic reference name** (from its first domain, e.g. `*.github.com` → `github.com`, with `-2` added on collisions). Agents normally do not need it — write `{{secret}}` in HTTP and `user@host` for SSH/SCP, and the service picks the entry by host. The reference name is only needed when one host has several secrets (`{{name}}` / `name/user@host`); in that case `AMBIGUOUS` is returned with the choices.
-- Domains: `example.com` matches only itself; `*.example.com` matches itself and subdomains at any depth; IPs match exactly. A wildcard base cannot be a public suffix (including private sections), so `*`, `*.com`, `*.co.uk`, and `*.github.io` are rejected. An exact match names a single host, so only ICANN suffixes themselves (`com`, `co.uk`) are rejected and hostnames in private sections such as `github.io` or `httpbin.org` are allowed.
+- Domains: `example.com` matches only itself; `*.example.com` matches subdomains at any depth but **not** `example.com` itself (since 0.2.0 — list the apex separately), nor lookalikes such as `badexample.com` or `example.com.evil.net`; IPs match exactly; CIDR ranges (`198.51.100.0/24`, `2001:db8::/48`, host bits zero, at least /8 resp. /32) match literal IP targets only — a name that resolves into the range does not match. Names are compared lowercased, without a trailing dot, and IDNA-normalized (punycode). Any form can carry `:port`. When several entries match one target, the most specific wins (exact host or IP > longer wildcard > longer CIDR prefix; with a port beats without); equal candidates are an `AMBIGUOUS` error that lists only reference names. Entries can be restricted to operations (`ops`: `http`, `ssh` — including scp and the ssh-agent bridge —, `git`). `*` must be the whole leftmost label and be followed by at least two labels. A wildcard base cannot be a public suffix (including private sections), so `*`, `*.com`, `*.co.uk`, and `*.github.io` are rejected. An exact match names a single host, so only ICANN suffixes themselves (`com`, `co.uk`) are rejected and hostnames in private sections such as `github.io` or `httpbin.org` are allowed.
 - The SSH authentication method is chosen from the secret's content: `-----BEGIN … PRIVATE KEY-----` is a private key, anything else is a password.
 
 ### 5.2 Tools (MCP and CLI correspond one to one)
@@ -243,3 +245,117 @@ CI runs on 6 native GitHub runners: Linux (ubuntu-latest, ubuntu-24.04-arm), mac
 | Release packages: built on each platform's native runner, then unpacked and run directly (real Argon2id parameters); the macOS universal binary also runs its x86_64 part under Rosetta | Linux x64 / arm64, macOS, Windows x64 / arm64 | Pass |
 | Local cross-builds (`scripts/cross-build.sh`, Zig) | Linux x64 / arm64, Windows x64 | Pass |
 | Not yet verified | Real Linux / Windows machines with a TPM (L3), macOS keychain ACL rebinding on upgrade, the full flow on hardened Windows, the L1 warning in an Alpine container | — |
+
+---
+
+## 10. LAN server mode (online edition)
+
+The single-machine design above is unchanged. Server mode is a second deployment shape: one PassManager server on the LAN (for example `pm.example.com` resolving to a private address), agents on other machines, a web admin UI, and root commands on the server. It is enabled by `passmanager init` (the `server` section in the root-owned `install.json`).
+
+### 10.1 Network threat model
+
+| ID | Threat | Mitigation |
+|---|---|---|
+| N1 | Someone outside the LAN reaches the service | Ports 443 (web) and 8443 (agents) only; IPv4 only; the source address is checked in the application against the configured CIDRs (`--lan-cidr`, required, no default: without it the network listeners refuse to start) before any TLS handshake; `install-server.sh` adds an nftables table that drops everything except those CIDRs → 22/web/agent ports and drops all IPv6; IPv6 is disabled with `/etc/sysctl.d/99-disable-ipv6.conf`. The DNS name resolves to a private address, so the certificate is the only public artifact. |
+| N2 | A passive attacker records traffic now and breaks it later (quantum) | Outer TLS 1.3 accepts only the hybrid groups X25519MLKEM768 / SecP256r1MLKEM768 and only TLS_AES_256_GCM_SHA384, no 0-RTT; the agent channel adds an inner layer keyed by ML-KEM-1024 **and** Classic McEliece 6688128 (two families, two libraries). |
+| N3 | Active MITM with a mis-issued certificate | The agent pins the SHA-384 fingerprint of the server's inner static keys from the enrollment code (not TOFU). The inner key confirmation is bound to the TLS exporter, so terminating TLS and relaying the inner bytes fails. |
+| N4 | A LAN device probes the agent port | Only `Hello::Token` and `Hello::Enroll` are accepted over the network; `Password`, `Setup` and `Root` are silently rejected; every failure gets the same random delay and silent close. |
+| N5 | Web UI attacks (CSRF, XSS, DNS rebinding, clickjacking) | Server-rendered pages with no JavaScript, CSP `default-src 'none'`; Host check; Fetch Metadata + Origin checks; CSRF token on every POST; `__Host-` cookie (HttpOnly, Secure, SameSite=Strict); 64 KiB body limit; per-source limits on invalid login links; every template has an XSS injection test. |
+| N6 | Web login credentials are stolen | There are none: login only via a one-time link printed by `passmanager login` (root on the server, i.e. whoever holds the SSH key). The link lives 2 minutes, GET shows a confirmation page, POST consumes it. Sessions expire after 2 h idle / 12 h absolute and live only in memory. |
+| N7 | Secrets leak through the web UI | Secrets are write-only: no page or response contains them (tested), forms never echo them back, and `Reveal` is refused in server mode. |
+| N8 | A stolen agent token | It can only *use* credentials (never see them) and only from the LAN; revocation is immediate (web or `passmanager token revoke`). Tokens are delivered only once, through the double-encrypted channel during enrollment, and stored on the agent in a 0600 file (never written into MCP configs). |
+
+### 10.2 Agent channel construction
+
+```
+TCP (IPv4, LAN source only) → TLS 1.3 [X25519MLKEM768 + AES-256-GCM, ALPN pm-inner/1] → inner layer → existing local protocol (handle_conn)
+
+server static keys:   ML-KEM-1024 (aws-lc-rs) + Classic McEliece 6688128 (liboqs), private parts sealed with the device key
+bundle   = "PMK1" ‖ len‖ek_mlkem ‖ len‖pk_mceliece           (~1 MB, downloaded once at enrollment and cached)
+fpr      = SHA-384("pm/inner/v1/fpr\0" ‖ bundle)             (in the enrollment code, pinned in remote.toml)
+
+C → S  "PMIN" ‖ 0x01 ‖ 0x02 ‖ nonce_c ‖ fpr ‖ ct_K ‖ ct_M     (ct_K/ss_K = ML-KEM.Encaps, ct_M/ss_M = McEliece.Encaps)
+S → C  nonce_s ‖ tag_s ;  C → S  tag_c
+E    = TLS exporter("EXPORTER-PassManager-inner-v1", 64)
+th   = SHA-512("pm/inner/v1/transcript" ‖ client message ‖ nonce_s)
+okm  = HKDF-SHA512(salt = nonce_c ‖ nonce_s, ikm = ss_K ‖ ss_M ‖ E, info = "pm/inner/v1/keys" ‖ th)
+k_c2s, k_s2c, k_fin = okm[0..32], okm[32..64], okm[64..112]
+tag_s = HMAC-SHA384(k_fin, "…server-finished" ‖ th);  tag_c = HMAC-SHA384(k_fin, "…client-finished" ‖ th)
+frame = u32 len ‖ ChaCha20-Poly1305(k_dir, nonce = dir ‖ 0³ ‖ counter_u64, aad = "pm/inner/v1/frame" ‖ len, ≤64 KiB)
+```
+
+- Only a server holding both private keys can produce `tag_s`; a relay through another TLS connection has a different `E` and fails.
+- The version and operation bytes are part of the transcript; the server only accepts version 1 (downgrade attempts fail).
+- Each direction has its own key and an implicit counter (not transmitted): replayed, reordered, dropped or reflected frames fail authentication and close the connection. The outer layer is AES-GCM and the inner layer ChaCha20-Poly1305 (different algorithms).
+- The server wraps the inner session as an `AsyncRead + AsyncWrite` (a duplex pipe with two pumps) and hands it to the unchanged `handle_conn`; the agent side wraps it as `Read + Write` for the existing blocking client, so MCP and CLI usage are unchanged.
+
+Enrollment: `passmanager token add <label>` (root) prints `pm-enroll://<domain>:<port>/<code>#<fpr>` (32 random bytes, 10 minutes, single use, only its SHA-256 is kept, in memory). `passmanager enroll <code>` fetches the bundle, verifies `fpr`, opens an inner session, exchanges the code for a fresh token, and writes `remote.toml`, `token` (0600) and `server-keys.bin` under `~/.config/passmanager` plus the MCP config of detected agents (without the token).
+
+### 10.3 Passwordless vault mode — and its trade-offs
+
+```
+KEK_A = HKDF(salt = vault_id, ikm = device_key, info = "pm/v2/kek/A" ‖ "device-only" ‖ salt)   (KEK_B likewise)
+header v2 = v1 fields + mode byte (device-only); the header hash remains the AAD of both payload layers
+```
+
+- No Argon2 (small servers and containers, e.g. 1 GiB RAM, are fine); the service unlocks automatically at start. v1 (password) vaults are byte-for-byte unchanged.
+- Downgrade protection: the mode is in the authenticated header **and** in the HKDF info; a device-only vault rewritten to look like a password vault (or the reverse) fails to open; the password APIs refuse device-only vaults and vice versa; the seal level may only go up (`reseal`), and the `.bak` fallback is used only for corrupt files, never to bypass a policy failure.
+- **Trade-off, stated plainly:** whoever is root on the server — or, without a TPM, whoever has the disk, a snapshot or a backup — has the vault. The only administrative credential is therefore the SSH key that gives root on the server. There is **no recovery path**: no online sync, no backup, no export.
+
+### 10.4 Device key, TPM and the boot sequence
+
+- Sealing: `systemd-creds --with-key=host+tpm2 --tpm2-pcrs=` (L3) when a TPM works, otherwise `--with-key=host` (L2). The TPM is `/dev/tpmrm0` (auto-detected) or, optionally, a swtpm Unix socket configured with `--tpm-socket` (for example a software TPM that a hypervisor host provides to a container; preferred when configured); in socket mode every `systemd-creds` call gets `SYSTEMD_TPM2_DEVICE=swtpm:path=…` and, when run by root, the `tss` group (the socket is `nobody:tss 0660`, and `ExecStartPre=+` processes have no supplementary groups). Detection is an encrypt/decrypt round trip plus a check of the credential header ID (`has-tpm2` only looks at kernel devices).
+- `passmanager reseal` upgrades L2 → L3: decrypt, re-encrypt to `.new`, verify header and round trip, stop the service, rename, update `install.json`, mark the vault header L3, start. Every step can be re-run after a crash.
+- **What the TPM gives:** a stolen disk image, snapshot or backup cannot be decrypted without this TPM state; moving the container elsewhere does not work either. **What it does not give:** root inside the running container can still ask the TPM to unseal; the hypervisor host root can read container memory. **No PCR binding**, because an LXC container has no boot measurements of its own (PCRs reflect the host firmware/kernel, so binding would break on every host update). **Cost:** losing the swtpm state, clearing the TPM, or migrating to another node makes the vault permanently unreadable.
+- Unprivileged LXC cannot use `LoadCredentialEncrypted=`, so `ExecStartPre=+PassManager service-prepare` (root) decrypts the device key into `/run/passmanager-key/device.key` (service account, 0400); the service reads and deletes it, `ExecStopPost` removes leftovers.
+- The TPM is also a third, optional entropy source (`TPM2_GetRandom` over the swtpm socket or `/dev/tpmrm0`, 1 KiB SP 800-90B sample before use, continuous test; any failure permanently disables only that source).
+
+### 10.5 Robustness (hard reset, kill -9, power loss)
+
+- Unit: `After=/Wants=network-online.target`, bounded wait (60 s) for the TPM in `ExecStartPre`, `Restart=on-failure` with `StartLimitIntervalSec=900`/`StartLimitBurst=10`. Exit code **78** only for real configuration errors (bad `install.json`, missing keys, undecryptable device key, downgraded vault, no permission for privileged ports) together with `RestartPreventExitStatus=78`; transient failures (TPM not yet present, port busy) exit 75 and are retried.
+- Every persistent file is written atomically (temp file → fsync → rename → fsync dir): vault, tokens, `install.json`, sealed keys, certificates, ACME state. Crash-injection tests cover a half-written temp file, a crash before the backup update and a crash before the rename. Reading falls back to `.bak` when the main file is missing, truncated or corrupt, and the first save after such a recovery does not overwrite the good `.bak`.
+- Certificates: a stored certificate is used as long as it is valid; renewal (every 6 h, 30-day window) failing never blocks startup; failures back off from 10 minutes to 6 hours with the failure count persisted, so restart loops do not hammer Let's Encrypt.
+
+### 10.6 Commands
+
+| Where | Command | Purpose |
+|---|---|---|
+| server (root) | `passmanager init [--cf-token-stdin] [--skip-acme] …` | device key, inner keys, passwordless vault, certificate, systemd unit (idempotent) |
+| server (root) | `passmanager login` | one-time web login link |
+| server (root) | `passmanager token add <label>` / `list` / `revoke <id>` | enrollment codes and tokens |
+| server (root) | `passmanager status` / `lock` / `unlock` / `reseal` | status, lock, unlock, L2 → L3 |
+| server (root) | `passmanager import --name <n> [--domain …] [--kind ssh-key] [--fields a,b] [--replace]` | import a secret from stdin |
+| agent | `passmanager enroll 'pm-enroll://…'` | join the server; MCP/CLI then work unchanged |
+| agent | `passmanager ssh-agent [--socket PATH]` | OpenSSH agent bridge (Unix) |
+| agent | `passmanager git-proxy [--listen 127.0.0.1:PORT]` | git credential-injecting proxy |
+| both | `scripts/install-server.sh`, `scripts/install-agent.sh` | one-step installers (`DRY_RUN=1` for tests) |
+
+### 10.7 Entries: multi-field secrets and SSH keys
+
+- An entry holds either one value (`secret`) or named fields (`username`, `password`, `token`, …). Field names are
+  `[a-z0-9_-]`, unique, non-empty values. The 0.1.0 payload format is still read and is rewritten in the new format on the next save.
+- Placeholders: `{{secret}}` = the single value of the entry selected by host (an error for multi-field entries, telling the agent to
+  name a field); `{{name}}` = a named single-value entry; `{{name.field}}`; `{{field}}` only when exactly one entry matches the host.
+  Errors never list other entries' fields. `sudo` uses the `password` field (or the single value of a password entry).
+- Redaction covers every field value in all encodings, also per line for multi-line values (≥ 8 characters per line).
+- SSH: when a key entry and a password entry both match the host, the key is tried first; the password entry is used only if the key is rejected and the server still offers `password` / `keyboard-interactive` (e.g. a default initial password bound to `*.example.com` and a LAN CIDR with `--ops ssh`). `sudo` uses the password entry.
+- SSH key entries (`ssh-key`) hold an unencrypted private key; only the public key and its SHA-256 fingerprint are ever displayed.
+  Host keys bound to the entry (`SHA256:…`) are checked in addition to the TOFU pin store.
+
+### 10.8 ssh-agent bridge
+
+`passmanager ssh-agent` serves the OpenSSH agent protocol on a 0600 Unix socket and forwards `REQUEST_IDENTITIES` / `SIGN_REQUEST`
+over the agent channel. The server signs only if (1) the client sent `session-bind@openssh.com` for this connection and it is not a
+forwarded session, (2) the host key's signature over the session identifier verifies, (3) that host key is allowed for the entry,
+(4) the data is a `publickey` `SSH_MSG_USERAUTH_REQUEST` for the same session identifier and the same public key, and (5) the rate
+limit (30/min) is not exceeded. Every signature and every refusal is written to the audit log (entry, key and host-key fingerprints only).
+Residual risk: a compromised agent machine can still log in to the allowed hosts while the bridge runs — but cannot copy the key.
+
+### 10.9 git credential proxy
+
+`passmanager git-proxy` listens on loopback only, requires a random 128-bit path token (0600 file), and forwards one smart-HTTP
+request per connection as a stream (request frames, then a response head, then response frames, 64 KiB each). The server accepts only
+`GET …/info/refs?service=git-upload-pack|git-receive-pack` and `POST …/git-upload-pack|git-receive-pack` over HTTPS to hosts bound to
+the entry, drops client `Authorization` / `Cookie`, forwards a small header whitelist, adds `Authorization: Basic base64(user:PAT)`,
+refuses redirects, redacts non-pack responses, and aborts a pack stream if the raw token appears in it. Self-signed upstreams are pinned
+like HTTPS entries. The audit log records entry, host, service, status and byte counts.

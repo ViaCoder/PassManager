@@ -1,8 +1,12 @@
 //! PassManager 服务：持有已解锁的库，代 Agent 使用凭据，返回脱敏结果。
 
+pub mod agent;
+pub mod git;
 pub mod http;
+pub mod online;
 pub mod redact;
 mod server;
+pub mod server_files;
 pub mod ssh;
 pub mod template;
 mod tokens;
@@ -64,12 +68,47 @@ pub struct Shared {
     tokens: std::sync::Mutex<TokenStore>,
     /// 就绪状态缓存（时间, 是否就绪），避免每个请求都读取报告与库文件头。
     ready_cache: std::sync::Mutex<Option<(Instant, bool)>>,
+    /// 服务器模式（局域网在线版）的运行时状态。
+    pub(crate) online: Option<online::Online>,
+    /// 无口令库是否是从 .bak 恢复的（安全状态页显示）。
+    recovered: std::sync::atomic::AtomicBool,
+    /// ssh-agent 桥的签名速率限制（全局：每分钟 30 次）。
+    sign_limiter: std::sync::Mutex<agent::SignLimiter>,
 }
 
 /// 会话类型。
 pub(crate) enum Session {
     Agent,
-    Admin { ready: bool },
+    Admin {
+        ready: bool,
+    },
+    /// 服务器模式：本机 root（`passmanager login|token|status|lock`）。
+    Root,
+    /// 服务器模式：网页管理（一次性链接登录）。
+    Web,
+}
+
+/// 服务启动失败。`config` 为真表示配置错误（服务器模式以退出码 78 退出，systemd 不再重启）；
+/// 否则是暂时性故障（退出码 75，有限次重试）。
+#[derive(Debug)]
+pub struct RunError {
+    pub config: bool,
+    pub message: String,
+}
+
+impl RunError {
+    fn config(m: impl Into<String>) -> Self {
+        Self { config: true, message: m.into() }
+    }
+    fn transient(m: impl Into<String>) -> Self {
+        Self { config: false, message: m.into() }
+    }
+}
+
+impl std::fmt::Display for RunError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
 }
 
 impl Shared {
@@ -131,7 +170,126 @@ impl Shared {
             argon: Semaphore::new(1),
             tokens: std::sync::Mutex::new(tokens),
             ready_cache: std::sync::Mutex::new(None),
+            online: None,
+            recovered: std::sync::atomic::AtomicBool::new(false),
+            sign_limiter: std::sync::Mutex::new(agent::SignLimiter::new(30, Duration::from_secs(60))),
         })
+    }
+
+    /// 服务器模式：在 `init` 的基础上加载内层通道密钥与证书，并自动解锁无口令库。
+    /// 返回的错误都是配置错误（设备密钥解不开、密钥文件缺失、库被降级等），重启也不会好。
+    pub fn init_server(layout: Layout) -> Result<Self, RunError> {
+        #[cfg(target_os = "linux")]
+        if let Ok(i) = InstallInfo::load(&layout)
+            && let Some(s) = &i.server
+        {
+            pm_platform::seal::linux::set_tpm_socket(s.tpm_socket.clone().map(Into::into));
+        }
+        let mut me = Self::init(layout).map_err(RunError::config)?;
+        let Some(cfg) = me.info.server.clone() else { return Err(RunError::config("install.json 没有 server 配置")) };
+        cfg.validate().map_err(RunError::config)?;
+        let dk = *me.device_key().map_err(|e| RunError::config(e.message))?;
+        let dk = Zeroizing::new(dk);
+        let keys = server_files::load_server_keys(&me.layout, &dk)
+            .map_err(RunError::config)?
+            .ok_or_else(|| RunError::config("内层通道密钥不存在：请以 root 运行 passmanager init"))?;
+        me.online = Some(online::Online::new(cfg, keys));
+        online::load_stored_cert(&me, me.online.as_ref().unwrap());
+        if me.vault_exists() {
+            let mut v = Vault::open_device_only(&me.layout.vault_path(), &dk, me.sealer.level())
+                .map_err(|e| RunError::config(format!("无法打开密码库：{e}")))?;
+            if v.recovered_from_backup() {
+                log("WARNING: vault.pmv was missing or damaged; opened vault.pmv.bak");
+                me.recovered.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+            // reseal 把 L2 升级为 L3 后：文件头记录的等级随之升级（只允许升级）。
+            if v.header().seal_level < me.sealer.level() {
+                v.upgrade_seal_level(me.sealer.level()).map_err(|e| RunError::config(format!("更新封存等级失败：{e}")))?;
+                log("vault seal level upgraded");
+            }
+            if me.ready() {
+                let inner = me.inner.get_mut();
+                inner.vault = Some(v);
+                inner.last_activity = Instant::now();
+                Self::rebuild_redactor(inner);
+                log("vault unlocked (device-only mode)");
+            } else {
+                log("security check failed; vault stays locked");
+            }
+        }
+        Ok(me)
+    }
+
+    /// 无口令库：用设备密钥解锁（网页"解锁"、root 命令）。
+    async fn unlock_device_only(&self) -> Result<(), ApiErr> {
+        if self.online.is_none() {
+            return Err(err("BAD_REQUEST", "只有服务器模式（无口令库）可以这样解锁"));
+        }
+        if self.inner.lock().await.vault.is_some() {
+            return Ok(());
+        }
+        if !self.vault_exists() {
+            return Err(self.locked_err());
+        }
+        if !self.ready() {
+            return Err(err("NOT_READY", "安全检查未通过，库保持锁定。"));
+        }
+        let dk = Zeroizing::new(*self.device_key()?);
+        let path = self.layout.vault_path();
+        let level = self.sealer.level();
+        let v = tokio::task::spawn_blocking(move || Vault::open_device_only(&path, &dk, level))
+            .await
+            .map_err(|e| err("INTERNAL", e.to_string()))?
+            .map_err(|e| err("INTERNAL", format!("无法打开密码库：{e}")))?;
+        let mut inner = self.inner.lock().await;
+        inner.vault = Some(v);
+        inner.last_activity = Instant::now();
+        Self::rebuild_redactor(&mut inner);
+        log("vault unlocked");
+        Ok(())
+    }
+
+    /// 消耗注册码并为该 Agent 生成访问令牌（只经双层加密通道返回这一次）。
+    pub(crate) fn enroll(&self, code: &str) -> Option<Zeroizing<String>> {
+        let on = self.online.as_ref()?;
+        let label = on.enroll_consume(code)?;
+        let (id, token) = self.tokens.lock().unwrap().create(&label).ok()?;
+        log(&format!("agent enrolled: token {id} ({label})"));
+        Some(Zeroizing::new(token))
+    }
+
+    fn server_status(&self, locked: bool) -> ServerStatusView {
+        let (report, runtime) = self.security_state();
+        let ready = report.passed() && runtime.is_empty();
+        let mut issues: Vec<String> = report.failing().map(|f| format!("{}：{}", f.title, f.detail.lines().next().unwrap_or(""))).collect();
+        issues.extend(runtime);
+        let on = self.online.as_ref();
+        let cs = on.map(|o| o.cert_state.lock().unwrap());
+        ServerStatusView {
+            domain: on.map(|o| o.cfg.domain.clone()).unwrap_or_default(),
+            web_port: on.map(|o| o.cfg.web_port).unwrap_or(0),
+            agent_port: on.map(|o| o.cfg.agent_port).unwrap_or(0),
+            lan: on.map(|o| o.cfg.lan.clone()).unwrap_or_default(),
+            locked,
+            initialized: self.vault_exists(),
+            vault_mode: if on.is_some() { "无口令（设备密钥）".into() } else { "口令".into() },
+            level: self.sealer.level(),
+            seal_method: self.sealer.method().into(),
+            tpm_device: tpm_present(),
+            tpm_rng: match pm_crypto::rng::tpm_status() {
+                pm_crypto::rng::TpmStatus::Active => "已启用（第三个熵源）".into(),
+                pm_crypto::rng::TpmStatus::Absent | pm_crypto::rng::TpmStatus::NotProbed => "没有 TPM 设备".into(),
+                pm_crypto::rng::TpmStatus::Disabled(w) => format!("已停用：{w}"),
+            },
+            cert_not_after: cs.as_ref().and_then(|c| c.not_after),
+            cert_error: cs.as_ref().and_then(|c| c.error.clone()),
+            tokens: self.tokens.lock().unwrap().list().len(),
+            pending_enrollments: on.map(|o| o.pending_count()).unwrap_or(0),
+            server_key_fingerprint: on.map(|o| pm_net::enroll::fpr_text(&o.keys.fingerprint())).unwrap_or_default(),
+            vault_recovered_from_backup: self.recovered.load(std::sync::atomic::Ordering::SeqCst),
+            ready,
+            issues,
+        }
     }
 
     fn device_key(&self) -> Result<&[u8; 32], ApiErr> {
@@ -201,7 +359,10 @@ impl Shared {
 
     fn rebuild_redactor(inner: &mut Inner) {
         inner.redactor = Arc::new(match &inner.vault {
-            Some(v) => Redactor::build(v.payload.entries.iter().map(|e| (e.name.as_str(), e.secret.as_str()))),
+            Some(v) => {
+                let values: Vec<(String, &str)> = v.payload.entries.iter().flat_map(|e| e.secret_values()).collect();
+                Redactor::build(values.iter().map(|(l, s)| (l.as_str(), *s)))
+            }
             None => Redactor::empty(),
         });
     }
@@ -338,10 +499,49 @@ impl Shared {
                 "PassManager security check failed, the vault stays locked. Ask the user to run: PassManager",
             );
         }
+        let server = self.online.is_some();
         let r = match session {
             Session::Agent if !req.is_usage() => Err(err("FORBIDDEN", "this operation is only available in the PassManager TUI")),
             Session::Admin { ready: false } if !matches!(req, Request::Status | Request::Security | Request::Lock) => {
                 Err(err("NOT_READY", "安全检查未通过，库保持锁定。请在\"诊断\"页处理问题后重新打开 PassManager。"))
+            }
+            // 一次性登录链接只能由服务器上的 root 生成。
+            Session::Admin { .. } | Session::Web | Session::Agent if matches!(req, Request::LoginLink) => {
+                Err(err("FORBIDDEN", "login links can only be created by root on the server"))
+            }
+            // 服务器模式：密钥只写不读；没有口令；令牌只能通过注册码经双层加密通道发放。
+            _ if server && matches!(req, Request::Reveal { .. }) => Err(err("FORBIDDEN", "secrets are write-only in server mode")),
+            _ if server && matches!(req, Request::ChangePassword { .. }) => Err(err("BAD_REQUEST", "server mode has no password")),
+            _ if server && matches!(req, Request::CreateToken { .. }) => {
+                Err(err("FORBIDDEN", "use an enrollment code (passmanager token add <label>) to create tokens in server mode"))
+            }
+            _ if !server
+                && matches!(
+                    req,
+                    Request::EnrollCreate { .. }
+                        | Request::Enrollments
+                        | Request::EnrollCancel { .. }
+                        | Request::LoginLink
+                        | Request::Unlock
+                ) =>
+            {
+                Err(err("BAD_REQUEST", "only available in server mode"))
+            }
+            Session::Root | Session::Web
+                if !matches!(
+                    req,
+                    Request::Status
+                        | Request::Security
+                        | Request::ServerStatus
+                        | Request::Lock
+                        | Request::LoginLink
+                        | Request::Tokens
+                        | Request::RevokeToken { .. }
+                        | Request::Enrollments
+                        | Request::EnrollCancel { .. }
+                ) && !self.ready_cached() =>
+            {
+                Err(err("NOT_READY", "安全检查未通过，库保持锁定。请查看\"安全状态\"（passmanager status）。"))
             }
             _ => self.handle(req).await,
         };
@@ -352,10 +552,30 @@ impl Shared {
     }
 
     fn locked_err(&self) -> ApiErr {
+        let server = self.online.is_some();
         if !self.vault_exists() {
-            err("NOT_INITIALIZED", "PassManager has not been set up yet. Ask the user to run: sudo PassManager install")
+            if server {
+                err(
+                    "NOT_INITIALIZED",
+                    "PassManager server is not initialized. Ask the administrator to run on the server: passmanager init",
+                )
+            } else {
+                err("NOT_INITIALIZED", "PassManager has not been set up yet. Ask the user to run: sudo PassManager install")
+            }
         } else if !self.ready() {
-            err("NOT_READY", "PassManager security check failed, the vault stays locked. Ask the user to run: PassManager")
+            if server {
+                err(
+                    "NOT_READY",
+                    "PassManager security check failed on the server, the vault stays locked. Ask the administrator to run on the server: passmanager status",
+                )
+            } else {
+                err("NOT_READY", "PassManager security check failed, the vault stays locked. Ask the user to run: PassManager")
+            }
+        } else if server {
+            err(
+                "LOCKED",
+                "The vault is locked. Ask the administrator to unlock it in the PassManager web UI or run on the server: passmanager unlock",
+            )
         } else {
             err("LOCKED", "The vault is locked. Ask the user to run: PassManager unlock")
         }
@@ -396,17 +616,45 @@ impl Shared {
                 ok(v.payload
                     .entries
                     .iter()
-                    .map(|e| CredentialView { name: e.name.clone(), domains: e.domains.clone(), note: e.note.clone() })
+                    .map(|e| CredentialView {
+                        name: e.name.clone(),
+                        domains: e.domains.clone(),
+                        note: e.note.clone(),
+                        fields: e.fields.iter().map(|f| f.name.clone()).collect(),
+                        status: e.domains.is_empty().then(|| format!("{UNBOUND} (unbound: add domains in the web UI before use)")),
+                        ops: e.ops.clone(),
+                    })
                     .collect::<Vec<_>>())
             }
             Request::Http { method, url, headers, body } => self.do_http(&method, &url, &headers, body.as_deref()).await,
+            Request::AgentKeys => {
+                let inner = self.inner.lock().await;
+                let v = inner.vault.as_ref().ok_or_else(|| self.locked_err())?;
+                ok(v.payload
+                    .entries
+                    .iter()
+                    .filter(|e| e.is_private_key() && e.allows(pm_vault::OP_SSH))
+                    .filter_map(|e| {
+                        agent::public_blob(&e.secret).ok().map(|b| AgentKeyView { blob: STANDARD.encode(b), comment: e.name.clone() })
+                    })
+                    .collect::<Vec<_>>())
+            }
+            Request::AgentSign { key, data, flags, binding } => self.agent_sign(&key, &data, flags, binding).await,
+            Request::GitProxy { .. } => Err(err("BAD_REQUEST", "git proxy requests must be the streaming form")),
             Request::Ssh { target, command } => {
-                // 命令以 `sudo ` 开头时，由服务通过 stdin 提供 sudo 密码。
-                let (cmd, sudo) = match command.trim_start().strip_prefix("sudo ") {
-                    Some(rest) => (rest.trim_start().to_string(), true),
-                    None => (command.clone(), false),
+                let dest = ssh::parse_target(&target)?;
+                // 命令中的占位符（{{name.field}} 等）按目标主机代入，例如把口令经管道交给远端程序。
+                let command = {
+                    let inner = self.inner.lock().await;
+                    let v = inner.vault.as_ref().ok_or_else(|| self.locked_err())?;
+                    http::substitute_all(&v.payload, &command, &dest.host, dest.port, pm_vault::OP_SSH)?.0
                 };
                 let (handle, t, redactor) = self.ssh_session(&target).await?;
+                // 命令以 `sudo ` 开头且有口令条目时，由服务通过 stdin 提供 sudo 密码；只有私钥时原样执行。
+                let (cmd, sudo) = match command.trim_start().strip_prefix("sudo ") {
+                    Some(rest) if !t.secret.is_empty() => (Zeroizing::new(rest.trim_start().to_string()), true),
+                    _ => (command.clone(), false),
+                };
                 let r = ssh::exec(&handle, &t, &cmd, sudo, &redactor).await;
                 ssh::close(handle).await;
                 ok(r?)
@@ -440,20 +688,26 @@ impl Shared {
             Request::AddEntry { entry } => {
                 let mut e = Entry {
                     name: entry.name.trim().to_string(),
-                    secret: Zeroizing::new(entry.secret.clone().unwrap_or_default()),
+                    secret: Zeroizing::new(String::new()),
                     domains: entry.domains.clone(),
                     note: entry.note.clone(),
                     self_signed: entry.self_signed,
                     auto_accept_host_key: entry.auto_accept_host_key,
                     created: pm_vault::now(),
                     updated: pm_vault::now(),
+                    fields: vec![],
+                    host_keys: entry.host_keys.clone().unwrap_or_default(),
+                    ops: entry.ops.clone().unwrap_or_default(),
                 };
+                apply_secret(&mut e, None, &entry)?;
                 // 名称可以留空：按第一个域名自动生成引用名。
                 let auto = e.name.is_empty();
                 if auto {
                     e.name = "pending".into();
                 }
                 validate_entry(&mut e).map_err(|m| err("BAD_REQUEST", m))?;
+                let fp = check_kind(&e, entry.kind.as_deref())?;
+                let mut name = String::new();
                 self.mutate(|v| {
                     if auto {
                         let taken: Vec<&str> = v.payload.entries.iter().map(|x| x.name.as_str()).collect();
@@ -462,33 +716,37 @@ impl Shared {
                     if v.payload.entry(&e.name).is_some() {
                         return Err(err("BAD_REQUEST", format!("名称 {} 已存在", e.name)));
                     }
+                    name = e.name.clone();
                     v.payload.entries.push(e);
                     Ok(())
                 })
                 .await?;
-                ok("added")
+                ok(serde_json::json!({"name": name, "public_key": fp}))
             }
             Request::UpdateEntry { original, entry } => {
+                let mut fp = None;
                 self.mutate(|v| {
                     let idx =
                         v.payload.entries.iter().position(|x| x.name == original).ok_or_else(|| err("UNKNOWN_CREDENTIAL", "条目不存在"))?;
-                    let old = &v.payload.entries[idx];
+                    let old = v.payload.entries[idx].clone();
                     let name = entry.name.trim();
                     let mut e = Entry {
                         // 编辑时名称留空表示不改。
                         name: if name.is_empty() { old.name.clone() } else { name.to_string() },
-                        secret: match &entry.secret {
-                            Some(s) if !s.is_empty() => Zeroizing::new(s.clone()),
-                            _ => old.secret.clone(),
-                        },
+                        secret: Zeroizing::new(String::new()),
                         domains: entry.domains.clone(),
                         note: entry.note.clone(),
                         self_signed: entry.self_signed,
                         auto_accept_host_key: entry.auto_accept_host_key,
                         created: old.created,
                         updated: pm_vault::now(),
+                        fields: vec![],
+                        host_keys: entry.host_keys.clone().unwrap_or_else(|| old.host_keys.clone()),
+                        ops: entry.ops.clone().unwrap_or_else(|| old.ops.clone()),
                     };
+                    apply_secret(&mut e, Some(&old), &entry)?;
                     validate_entry(&mut e).map_err(|m| err("BAD_REQUEST", m))?;
+                    fp = check_kind(&e, entry.kind.as_deref())?;
                     if e.name != original && v.payload.entry(&e.name).is_some() {
                         return Err(err("BAD_REQUEST", format!("名称 {} 已存在", e.name)));
                     }
@@ -496,7 +754,7 @@ impl Shared {
                     Ok(())
                 })
                 .await?;
-                ok("updated")
+                ok(serde_json::json!({"name": entry.name.trim(), "public_key": fp}))
             }
             Request::DeleteEntry { name } => {
                 self.mutate(|v| {
@@ -515,7 +773,11 @@ impl Shared {
                 let inner = self.inner.lock().await;
                 let v = inner.vault.as_ref().ok_or_else(|| self.locked_err())?;
                 let e = v.payload.entry(&name).ok_or_else(|| err("UNKNOWN_CREDENTIAL", "条目不存在"))?;
-                ok(e.secret.as_str())
+                if e.fields.is_empty() {
+                    ok(e.secret.as_str())
+                } else {
+                    ok(e.fields.iter().map(|f| format!("{}: {}", f.name, f.value.as_str())).collect::<Vec<_>>().join("\n"))
+                }
             }
             Request::Pins => {
                 let inner = self.inner.lock().await;
@@ -571,6 +833,32 @@ impl Shared {
                 .await?;
                 ok("saved")
             }
+            Request::Unlock => {
+                self.unlock_device_only().await?;
+                ok("unlocked")
+            }
+            Request::EnrollCreate { label } => {
+                let on = self.online.as_ref().ok_or_else(|| err("BAD_REQUEST", "only available in server mode"))?;
+                ok(on.enroll_create(&label).map_err(|m| err("BAD_REQUEST", m))?)
+            }
+            Request::Enrollments => ok(self.online.as_ref().map(|o| o.enroll_list()).unwrap_or_default()),
+            Request::EnrollCancel { id } => {
+                if self.online.as_ref().is_some_and(|o| o.enroll_cancel(&id)) {
+                    ok("cancelled")
+                } else {
+                    Err(err("BAD_REQUEST", "注册码不存在或已过期"))
+                }
+            }
+            Request::LoginLink => {
+                let on = self.online.as_ref().ok_or_else(|| err("BAD_REQUEST", "only available in server mode"))?;
+                let t = on.links.create();
+                log("web login link created");
+                ok(format!("{}/l/{t}", on.web_origin()))
+            }
+            Request::ServerStatus => {
+                let locked = self.inner.lock().await.vault.is_none();
+                ok(self.server_status(locked))
+            }
             Request::ChangePassword { old, new } => {
                 if new.chars().count() < 8 {
                     return Err(err("BAD_REQUEST", "新口令至少需要 8 个字符"));
@@ -586,6 +874,90 @@ impl Shared {
                 ok("changed")
             }
         }
+    }
+
+    /// git 代理：检查会话与请求，选好条目。
+    pub(crate) async fn git_prepare(
+        &self,
+        session: &Session,
+        method: &str,
+        url: &str,
+    ) -> Result<(git::Service, url::Url, git::Plan), ApiErr> {
+        if !matches!(session, Session::Agent | Session::Root) {
+            return Err(err("FORBIDDEN", "git proxy is only available to agents"));
+        }
+        if !self.ready_cached() {
+            return Err(err("NOT_READY", "PassManager security check failed, the vault stays locked."));
+        }
+        let (svc, u, host, port) = git::check_url(method, url)?;
+        let inner = self.inner.lock().await;
+        let v = inner.vault.as_ref().ok_or_else(|| self.locked_err())?;
+        let plan = git::plan(&v.payload, &host, port, inner.redactor.clone())?;
+        Ok((svc, u, plan))
+    }
+
+    /// git 代理结束：记录审计与首次看到的自签证书指纹。
+    pub(crate) async fn git_finish(&self, url: &str, out: git::Outcome) {
+        if let Some(a) = out.audit {
+            log(&a);
+        }
+        if let (Some(fp), Ok(u)) = (out.observed_pin, url::Url::parse(url))
+            && let Some(h) = http::host_string(&u)
+        {
+            let hp = format!("{h}:{}", u.port_or_known_default().unwrap_or(443));
+            self.record_pin(PinKind::Https, &hp, "x509-spki", &fp).await;
+        }
+    }
+
+    /// ssh-agent 桥的签名（条件见 `agent` 模块说明）。失败一律返回 FORBIDDEN / BAD_REQUEST，不签任何东西。
+    async fn agent_sign(&self, key: &str, data: &str, flags: u32, binding: Option<AgentBinding>) -> R {
+        let dec = |s: &str| STANDARD.decode(s.as_bytes()).map_err(|_| err("BAD_REQUEST", "invalid base64"));
+        let key_blob = dec(key)?;
+        let data = Zeroizing::new(dec(data)?);
+        let Some(b) = binding else {
+            return Err(err("FORBIDDEN", "refusing to sign: no session-bind@openssh.com binding (OpenSSH >= 8.9 required)"));
+        };
+        if b.forwarding {
+            return Err(err("FORBIDDEN", "refusing to sign for a forwarded agent session"));
+        }
+        let host_blob = dec(&b.host_key)?;
+        let session_id = dec(&b.session_id)?;
+        let host_fp = agent::verify_binding(&host_blob, &session_id, &dec(&b.signature)?).map_err(|m| err("FORBIDDEN", m))?;
+        let req = agent::parse_userauth(&data).map_err(|m| err("FORBIDDEN", format!("refusing to sign: {m}")))?;
+        if req.session_id != session_id || req.key_blob != key_blob || req.host_key.as_ref().is_some_and(|h| *h != host_blob) {
+            return Err(err("FORBIDDEN", "refusing to sign: request does not belong to the bound session"));
+        }
+        let (name, pem, allowed) = {
+            let inner = self.inner.lock().await;
+            let v = inner.vault.as_ref().ok_or_else(|| self.locked_err())?;
+            let e = v
+                .payload
+                .entries
+                .iter()
+                .find(|e| {
+                    e.is_private_key()
+                        && e.allows(pm_vault::OP_SSH)
+                        && agent::public_blob(&e.secret).ok().as_deref() == Some(key_blob.as_slice())
+                })
+                .ok_or_else(|| err("UNKNOWN_CREDENTIAL", "no stored key matches"))?;
+            (e.name.clone(), e.secret.clone(), agent_allowed_host_keys(e, &v.payload.pins))
+        };
+        if !allowed.contains(&host_fp) {
+            log(&format!("ssh-agent sign refused: entry={name} host={host_fp} (host key not bound to this entry)"));
+            return Err(err(
+                "FORBIDDEN",
+                format!(
+                    "refusing to sign: host key {host_fp} is not bound to \"{name}\". Ask the user to add it in the PassManager web UI."
+                ),
+            ));
+        }
+        if !self.sign_limiter.lock().unwrap().allow_at(Instant::now()) {
+            return Err(err("RATE_LIMITED", "too many signature requests; try again in a minute"));
+        }
+        let sig = agent::sign(&pem, &data, flags).map_err(|m| err("INTERNAL", m))?;
+        let key_fp = ssh::key_fingerprint(&pem).unwrap_or_default();
+        log(&format!("ssh-agent sign: entry={name} key={key_fp} host={host_fp} at={}", pm_vault::now()));
+        ok(STANDARD.encode(sig))
     }
 
     async fn verify_password(&self, password: String) -> Result<(), ApiErr> {
@@ -687,8 +1059,8 @@ impl Shared {
         let (target, expected, redactor) = {
             let inner = self.inner.lock().await;
             let v = inner.vault.as_ref().ok_or_else(|| self.locked_err())?;
-            let e = http::select(&v.payload, dest.name.as_deref(), &dest.host)?;
-            let t = ssh::Target::from_entry(&e, &dest.host, dest.port, &dest.user);
+            let (key, pw) = http::ssh_credentials(&v.payload, dest.name.as_deref(), &dest.host, dest.port)?;
+            let t = ssh::Target::from_entries(key.as_ref(), pw.as_ref(), &dest.host, dest.port, &dest.user);
             let expected = v.payload.pin(PinKind::Ssh, &t.host_port()).map(|p| p.fingerprint.clone());
             (t, expected, inner.redactor.clone())
         };
@@ -730,8 +1102,79 @@ impl Shared {
     }
 }
 
+/// 新建或编辑条目时设置密钥 / 字段。
+/// - `entry.fields` 为 Some：按给出的顺序设置全部字段，值为空时沿用原条目同名字段（不存在则报错），未列出的字段删除；
+/// - 否则单值：`secret` 非空时替换；为空时沿用原值（原条目是多字段时保留原字段）。
+fn apply_secret(e: &mut Entry, old: Option<&Entry>, input: &EntryInput) -> Result<(), ApiErr> {
+    match &input.fields {
+        Some(list) if !list.is_empty() => {
+            if input.secret.as_deref().is_some_and(|s| !s.is_empty()) {
+                return Err(err("BAD_REQUEST", "多字段条目不能同时提供单独的密钥"));
+            }
+            let mut fields = Vec::new();
+            for f in list {
+                let name = f.name.trim().to_string();
+                let value = match f.value.as_deref() {
+                    Some(v) if !v.is_empty() => Zeroizing::new(v.to_string()),
+                    _ => old
+                        .and_then(|o| o.field(&name))
+                        .map(|x| x.value.clone())
+                        .ok_or_else(|| err("BAD_REQUEST", format!("字段 {name} 没有值")))?,
+                };
+                fields.push(pm_vault::Field { name, value });
+            }
+            e.fields = fields;
+            e.secret = Zeroizing::new(String::new());
+        }
+        _ => match (input.secret.as_deref(), old) {
+            (Some(s), _) if !s.is_empty() => {
+                if old.is_some_and(|o| !o.fields.is_empty()) && input.fields.is_none() {
+                    return Err(err("BAD_REQUEST", "这是多字段条目，请按字段编辑"));
+                }
+                e.secret = Zeroizing::new(s.to_string());
+            }
+            (_, Some(o)) => {
+                e.secret = o.secret.clone();
+                e.fields = o.fields.clone();
+            }
+            (_, None) => {}
+        },
+    }
+    Ok(())
+}
+
+/// 校验声明的类型。`ssh-key`：必须是能解析的（未加密）SSH 私钥，返回公钥指纹。
+fn check_kind(e: &Entry, kind: Option<&str>) -> Result<Option<String>, ApiErr> {
+    match kind.unwrap_or("") {
+        "" => Ok(e.is_private_key().then(|| ssh::key_fingerprint(&e.secret).ok()).flatten()),
+        KIND_PASSWORD => Ok(None),
+        KIND_SSH_KEY => {
+            if !e.fields.is_empty() {
+                return Err(err("BAD_REQUEST", "ssh-key 条目是单个私钥，不能有字段"));
+            }
+            if !e.is_private_key() {
+                return Err(err("BAD_REQUEST", "内容不是 PEM / OpenSSH 私钥（应以 -----BEGIN … PRIVATE KEY----- 开头）"));
+            }
+            ssh::key_fingerprint(&e.secret).map(Some).map_err(|m| err("BAD_REQUEST", m))
+        }
+        other => Err(err("BAD_REQUEST", format!("未知的条目类型 {other}（password / ssh-key）"))),
+    }
+}
+
 fn entry_view(e: &Entry) -> EntryView {
+    let public_key = if e.is_private_key() { ssh::key_fingerprint(&e.secret).ok() } else { None };
     EntryView {
+        kind: if !e.fields.is_empty() {
+            KIND_FIELDS.into()
+        } else if e.is_private_key() {
+            KIND_SSH_KEY.into()
+        } else {
+            KIND_PASSWORD.into()
+        },
+        fields: e.fields.iter().map(|f| f.name.clone()).collect(),
+        host_keys: e.host_keys.clone(),
+        ops: e.ops.clone(),
+        public_key,
         name: e.name.clone(),
         domains: e.domains.clone(),
         note: e.note.clone(),
@@ -760,6 +1203,19 @@ fn pin_view(p: &Pin) -> PinView {
     }
 }
 
+/// ssh-agent 桥允许的主机密钥：条目上显式绑定的指纹，加上指纹库里主机与条目域名匹配的 SSH 主机密钥（TOFU）。
+/// 匹配规则与其他用途相同（通配符、网段只匹配字面 IP、host:port）。
+fn agent_allowed_host_keys(e: &Entry, pins: &[pm_vault::Pin]) -> Vec<String> {
+    let mut allowed = e.host_keys.clone();
+    for p in pins.iter().filter(|p| p.kind == PinKind::Ssh) {
+        let (h, port) = p.host_port.rsplit_once(':').map(|(h, port)| (h, port.parse().unwrap_or(22))).unwrap_or((p.host_port.as_str(), 22));
+        if domain::matches_any_port(&e.domains, h, port) {
+            allowed.push(p.fingerprint.clone());
+        }
+    }
+    allowed
+}
+
 /// `pattern` 可为 `host:port`、`host` 或 `*.domain`（任意端口）。
 fn pin_matches(pattern: &str, host_port: &str) -> bool {
     if pattern == host_port {
@@ -784,6 +1240,7 @@ fn default_user_info() -> InstallInfo {
         seal_method: seal::file::METHOD.into(),
         seal_level: 1,
         binary: std::env::current_exe().map(|p| p.display().to_string()).unwrap_or_default(),
+        server: None,
     }
 }
 
@@ -807,6 +1264,18 @@ fn set_private_dir(p: &std::path::Path) {
     let _ = p;
 }
 
+/// 是否发现了 TPM（swtpm 套接字或 /dev/tpmrm0）。
+fn tpm_present() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        pm_platform::seal::linux::discover_tpm().is_some()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        std::path::Path::new(pm_platform::seal::TPM_DEVICE).exists()
+    }
+}
+
 pub(crate) static SHUTDOWN: tokio::sync::Notify = tokio::sync::Notify::const_new();
 
 /// 请求服务退出（Windows 服务管理器的停止命令等）。
@@ -814,10 +1283,14 @@ pub fn request_shutdown() {
     SHUTDOWN.notify_one();
 }
 
-/// 运行服务（阻塞直到收到退出信号）。
-pub fn run(layout: Layout) -> Result<(), String> {
+/// 运行服务（阻塞直到收到退出信号）。install.json 有 server 配置时以服务器模式运行。
+pub fn run(layout: Layout) -> Result<(), RunError> {
     pm_platform::process::harden_process();
-    let shared = Arc::new(Shared::init(layout)?);
+    let server = InstallInfo::load(&layout).ok().is_some_and(|i| i.server.is_some());
+    if server {
+        return run_server(layout);
+    }
+    let shared = Arc::new(Shared::init(layout).map_err(RunError::transient)?);
     if let Err(e) = &shared.device {
         log(&format!("WARNING: {e}"));
     }
@@ -827,10 +1300,47 @@ pub fn run(layout: Layout) -> Result<(), String> {
     if shared.layout.mode == Mode::User {
         let _ = std::fs::write(shared.layout.data_dir.join("service.pid"), std::process::id().to_string());
     }
-    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().map_err(|e| e.to_string())?;
+    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().map_err(|e| RunError::transient(e.to_string()))?;
     rt.block_on(async move {
         tokio::spawn(shared.clone().housekeeping());
         server::serve(shared).await
+    })
+    .map_err(RunError::transient)
+}
+
+/// 服务器模式：本地 socket（root 管理命令）+ 443 网页 + 8443 Agent 通道 + 证书续期。
+fn run_server(layout: Layout) -> Result<(), RunError> {
+    let shared = Arc::new(Shared::init_server(layout)?);
+    if shared.sealer.level() == 1 {
+        log(&format!("WARNING: {}", seal::L1_WARNING));
+    }
+    let cfg = shared.online.as_ref().expect("server mode").cfg.clone();
+    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().map_err(|e| RunError::transient(e.to_string()))?;
+    rt.block_on(async move {
+        let bind = |port: u16| {
+            let addr = format!("{}:{port}", cfg.bind);
+            async move {
+                tokio::net::TcpListener::bind(&addr).await.map_err(|e| {
+                    let msg = format!("监听 {addr} 失败：{e}");
+                    // 没有绑定特权端口的权限是配置问题；端口被占用、地址暂时不可用等按暂时性故障重试。
+                    if e.kind() == std::io::ErrorKind::PermissionDenied { RunError::config(msg) } else { RunError::transient(msg) }
+                })
+            }
+        };
+        let web = bind(cfg.web_port).await?;
+        let agents = bind(cfg.agent_port).await?;
+        log(&format!(
+            "server mode: web https://{}:{} , agents :{} (LAN only: {})",
+            cfg.domain,
+            cfg.web_port,
+            cfg.agent_port,
+            cfg.lan.join(", ")
+        ));
+        tokio::spawn(shared.clone().housekeeping());
+        tokio::spawn(online::cert_loop(shared.clone()));
+        tokio::spawn(online::serve_web(shared.clone(), web));
+        tokio::spawn(online::serve_agents(shared.clone(), agents));
+        server::serve(shared).await.map_err(RunError::transient)
     })
 }
 
@@ -874,3 +1384,47 @@ fn nix_user(name: &str) -> Result<u32, ()> {
 
 #[cfg(target_os = "macos")]
 pub static ROOT_PHASE_KEY: std::sync::Mutex<Option<Zeroizing<[u8; 32]>>> = std::sync::Mutex::new(None);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// ssh-agent 桥的主机绑定与其他用途使用同一套匹配规则：通配符（不含顶点）、网段（只匹配字面 IP）、host:port。
+    #[test]
+    fn agent_host_binding_uses_domain_matcher() {
+        let pin = |hp: &str, fp: &str| pm_vault::Pin {
+            kind: PinKind::Ssh,
+            host_port: hp.into(),
+            algo: "ecdsa-sha2-nistp384".into(),
+            fingerprint: fp.into(),
+            first_seen: 0,
+        };
+        let pins = vec![
+            pin("db1.example.com:22", "FP-db1"),
+            pin("example.com:22", "FP-apex"),
+            pin("198.51.100.9:22", "FP-lan"),
+            pin("198.51.101.9:22", "FP-other-net"),
+            pin("db2.example.com:2222", "FP-db2-2222"),
+            pin("[2001:db8::5]:22", "FP-v6"),
+        ];
+        let mut https_pin = pin("db3.example.com:22", "FP-https");
+        https_pin.kind = PinKind::Https;
+        let mut all = pins.clone();
+        all.push(https_pin);
+        let e = Entry {
+            name: "k".into(),
+            secret: Zeroizing::new(String::new()),
+            domains: vec!["*.example.com:22".into(), "198.51.100.0/24".into(), "2001:db8::/48".into()],
+            note: String::new(),
+            self_signed: false,
+            auto_accept_host_key: false,
+            created: 0,
+            updated: 0,
+            fields: vec![],
+            host_keys: vec!["SHA256:explicit".into()],
+            ops: vec![],
+        };
+        let got = agent_allowed_host_keys(&e, &all);
+        assert_eq!(got, vec!["SHA256:explicit", "FP-db1", "FP-lan", "FP-v6"]);
+    }
+}

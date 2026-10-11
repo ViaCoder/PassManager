@@ -214,6 +214,42 @@ pub fn check(ctx: &Ctx) -> Vec<Finding> {
     f
 }
 
+/// 服务器模式的检查：服务账户 + 自身文件。账户提权类检查（sudo、root 锁定、危险组）针对的是
+/// "同一台机器上的 Agent"，服务器上没有本机 Agent，管理员就是经 SSH 密钥登录的 root，因此不适用。
+pub fn check_server(ctx: &Ctx) -> Vec<Finding> {
+    let sh = shadow();
+    let mut f = Vec::new();
+    let svc = &ctx.info.service_user;
+    match up::user(svc) {
+        Some(su) => {
+            let locked = sh.iter().find(|s| &s.name == svc).is_none_or(|s| !pw_set(&s.pw));
+            let nologin = NOLOGIN.contains(&su.shell.as_str());
+            let sg: Vec<String> = groups_of(svc, su.gid)
+                .into_iter()
+                .map(|g| g.0)
+                .filter(|n| SUDO_GROUPS.contains(&n.as_str()) || DANGER_GROUPS.contains(&n.as_str()))
+                .collect();
+            f.push(if locked && nologin && sg.is_empty() {
+                Finding::pass("service_account", &format!("服务账户 {svc} 不可登录且无管理员权限"))
+            } else {
+                Finding::fixable(
+                    "service_account",
+                    &format!("服务账户 {svc} 不可登录且无管理员权限"),
+                    "将设置 nologin、锁定口令并移出管理员组。",
+                )
+            });
+        }
+        None => f.push(Finding::manual(
+            "service_account",
+            "服务账户存在",
+            format!("找不到服务账户 {svc}。"),
+            "重新运行 scripts/install-server.sh。",
+        )),
+    }
+    f.extend(own_files(ctx));
+    f
+}
+
 fn own_files(ctx: &Ctx) -> Vec<Finding> {
     let mut f = Vec::new();
     let svc = up::user(&ctx.info.service_user);

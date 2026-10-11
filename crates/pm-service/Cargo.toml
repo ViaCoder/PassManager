@@ -10,6 +10,8 @@ pm-crypto = { path = "../pm-crypto" }
 pm-vault = { path = "../pm-vault" }
 pm-platform = { path = "../pm-platform" }
 pm-proto = { path = "../pm-proto" }
+pm-net = { path = "../pm-net" }
+pm-web = { path = "../pm-web" }
 serde.workspace = true
 serde_json.workspace = true
 zeroize.workspace = true
@@ -24,6 +26,13 @@ russh-sftp = "3"
 aho-corasick = "1"
 url = "2"
 percent-encoding = "2"
+tokio-rustls = { version = "0.26", default-features = false, features = ["aws_lc_rs"] }
+hyper = { version = "1", features = ["client", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body = "1"
+http-body-util = "0.1"
+bytes = "1"
+webpki-root-certs = "1"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
@@ -32,4 +41,7 @@ libc = "0.2"
 windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Security"] }
 
 [dev-dependencies]
+pm-net = { path = "../pm-net", features = ["test-hooks"] }
+rcgen = "0.14"
+pm-vault = { path = "../pm-vault", features = ["test-hooks"] }
 tempfile = "3"

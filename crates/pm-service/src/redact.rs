@@ -67,11 +67,16 @@ pub fn variants(secret: &str) -> Vec<Vec<u8>> {
     }
     let html = secret.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;").replace('\'', "&#39;");
     push(&mut out, html.into_bytes());
+    // 多行的值（PEM 私钥、多行口令）：每一行（≥ 8 个字符）也按全部编码单独脱敏。
     if secret.contains('\n') {
         for line in secret.lines() {
             let l = line.trim();
-            if l.len() >= 16 {
-                push(&mut out, l.as_bytes().to_vec());
+            if l.len() >= 8 && l != secret {
+                for v in variants(l) {
+                    if !out.contains(&v) {
+                        out.push(v);
+                    }
+                }
             }
         }
     }
@@ -114,7 +119,15 @@ impl Redactor {
         if patterns.is_empty() {
             return Self::empty();
         }
-        let ac = AhoCorasickBuilder::new().match_kind(MatchKind::LeftmostLongest).build(&patterns).ok();
+        // 模式总长度大时（例如 64 KiB 的导入内容及其各种编码）不能让库自动选 DFA：DFA 的状态表随模式长度
+        // 成倍增长，构建会耗尽 CPU 与内存。大于 16 KiB 时固定用 contiguous NFA（构建是线性的）。
+        let total: usize = patterns.iter().map(|p| p.len()).sum();
+        let mut b = AhoCorasickBuilder::new();
+        b.match_kind(MatchKind::LeftmostLongest);
+        if total > 16 * 1024 {
+            b.kind(Some(aho_corasick::AhoCorasickKind::ContiguousNFA));
+        }
+        let ac = b.build(&patterns).ok();
         Self { ac, replacements }
     }
 
@@ -137,6 +150,19 @@ impl Redactor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 很长的密钥（导入上限 64 KiB）：构建与扫描都必须很快（曾因自动选择 DFA 而卡住）。
+    #[test]
+    fn large_secrets_build_quickly() {
+        let big = "y".repeat(64 * 1024);
+        let multi = (0..2000).map(|i| format!("line-{i:05}-abcdefgh")).collect::<Vec<_>>().join("\n");
+        let t0 = std::time::Instant::now();
+        let r = Redactor::build([("big", big.as_str()), ("multi", multi.as_str())]);
+        let (out, n) = r.redact(format!("x{big}x {}", "line-01234-abcdefgh").as_bytes());
+        assert!(n >= 2);
+        assert!(!String::from_utf8_lossy(&out).contains("line-01234-abcdefgh"));
+        assert!(t0.elapsed() < std::time::Duration::from_secs(20), "{:?}", t0.elapsed());
+    }
     use base64::engine::general_purpose::STANDARD;
 
     const T_UNRESERVED: &percent_encoding::AsciiSet =

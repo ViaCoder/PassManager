@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% block body %}
+<h1>状态</h1>
+<div class="card">
+  <dl class="kv">
+    <dt>密码库</dt><dd>{% if not st.initialized %}<span class="bad-text">尚未初始化</span>{% elif st.locked %}<span class="bad-text">已锁定</span>{% else %}<span class="ok-text">已解锁</span>{% endif %}（{{ st.vault_mode }}）</dd>
+    <dt>设备密钥封存</dt><dd>L{{ st.level }}（{{ st.seal_method }}）</dd>
+    <dt>条目</dt><dd>{{ entries }}</dd>
+    <dt>Agent 令牌</dt><dd>{{ st.tokens }}（未使用的注册码 {{ st.pending_enrollments }}）</dd>
+    <dt>证书到期</dt><dd>{% if st.cert_not_after %}{{ st.cert_not_after | datetime }}{% else %}<span class="bad-text">没有可用的证书</span>{% endif %}{% if st.cert_error %}<br><span class="bad-text">{{ st.cert_error }}</span>{% endif %}</dd>
+    <dt>网页 / Agent 端口</dt><dd>{{ st.domain }}:{{ st.web_port }} / {{ st.agent_port }}（只允许 {{ st.lan | join(", ") }}）</dd>
+  </dl>
+</div>
+<div class="row">
+  {% if st.locked %}
+  <form method="post" action="/unlock" class="inline"><input type="hidden" name="csrf" value="{{ csrf }}"><button>解锁</button></form>
+  {% else %}
+  <form method="post" action="/lock" class="inline"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="danger">立即锁定</button></form>
+  {% endif %}
+</div>
+{% endblock %}

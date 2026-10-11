@@ -127,6 +127,11 @@ mod tests {
             private_key: false,
             created: 0,
             updated: 0,
+            kind: "password".into(),
+            fields: vec![],
+            public_key: None,
+            host_keys: vec![],
+            ops: vec![],
         }];
         app
     }

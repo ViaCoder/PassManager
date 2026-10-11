@@ -82,6 +82,7 @@ out = HKDF-SHA512(salt = "pm/rng/v1" ‖ counter, ikm = getrandom(64) ‖ aws-lc
 - 只要任一来源可靠，输出就是安全的；每次调用都实时读取两个来源，不缓存状态，天然 fork 安全。
 - 启动健康检测：对每个来源各采样 4 KiB，执行 SP 800-90B 重复计数测试（截断值 6）与自适应比例测试（窗口 512、截断值 20），拒绝全零/全一、两源相同的输出。
 - 连续测试：每次调用比较各源本次与上次输出的前 16 字节、两源之间是否相同。任何失败都 **fail-closed**：此后所有调用都返回错误。
+- 可选的第三个来源（服务器模式）：TPM（经 `/dev/tpmrm0` 或配置的 swtpm 套接字发送 `TPM2_GetRandom`）通过 1 KiB 启动健康检测后并入 IKM；之后任何失败只停用这个源（§10.4）。
 - liboqs 的随机数通过 `OQS_randombytes_custom_algorithm` 接入组合 RNG；若该回调中 RNG 失败，进程直接 abort。
 - 启动自检（任何一项失败都拒绝运行）：SHA-512（FIPS 180-2）、HKDF（RFC 5869）、AES-256-GCM（GCM 规范用例 14）、ChaCha20-Poly1305（RFC 8439 §2.8.2）、Argon2id（RFC 9106 §5.3）的已知答案测试，ML-KEM 往返，liboqs 可用性；KEM 密钥生成后做成对一致性测试。
 
@@ -121,6 +122,7 @@ SealedPayload = { ct_mlkem, ct_mce, nonce_a, nonce_b, c2 }
 - 文件头的 SHA-512 作为两层 AEAD 的关联数据，任何字段被篡改都会导致解密失败；封存等级写在文件头里，降级会被拒绝。
 - KDF 参数硬下限：内存 ≥ 256 MiB、迭代 ≥ 2；默认 1 GiB / t=3 / p=4，按本机物理内存选择内存大小，再增加迭代次数直到单次 ≥ 1 秒。
 - 原子写入：写临时文件 → fsync → 备份旧文件为 `.bak` → rename → fsync 目录；主文件缺失时读取 `.bak`。
+- 第 2 版文件头（服务器模式的无口令库）多一个模式字节，见 §10.3。主文件缺失或损坏时才回退到 `.bak`。
 - 修改口令只重新包裹 `wrap_A` / `wrap_B`。
 
 ---
@@ -151,7 +153,7 @@ SealedPayload = { ct_mlkem, ct_mce, nonce_a, nonce_b, c2 }
 `密钥 + 域名（+ 可选说明）`，高级选项：自签证书（启用指纹固定，公网和内网主机都适用）、私钥条目自动接受主机密钥变更。
 
 - 不需要起名：每个条目有一个**自动生成的引用名**（取第一个域名，如 `*.github.com` → `github.com`，重名时加 `-2`）。Agent 平时不需要它——HTTP 中写 `{{secret}}`、SSH/SCP 写 `user@host`，服务按主机自动选择；只有同一主机保存了多个密钥时才用引用名指定（`{{引用名}}` / `引用名/user@host`），此时会返回 `AMBIGUOUS` 并列出可选项。
-- 域名：`example.com` 只匹配自身；`*.example.com` 匹配自身及任意层级子域名；IP 精确匹配。通配符的基底不能是公共后缀（含私有段），因此 `*`、`*.com`、`*.co.uk`、`*.github.io` 都会被拒绝；精确匹配只对应一台主机，只拒绝 ICANN 顶级后缀本身（`com`、`co.uk`），允许 `github.io`、`httpbin.org` 这类私有段中的主机名。
+- 域名：`example.com` 只匹配自身；`*.example.com` 匹配任意层级的子域名，但**不**匹配 `example.com` 本身（0.2.0 起，需要时单独列出），也不匹配 `badexample.com`、`example.com.evil.net` 这类形似名称；IP 精确匹配；网段（`198.51.100.0/24`、`2001:db8::/48`，主机位为 0，IPv4 至少 /8、IPv6 至少 /32）只匹配字面 IP 目标——域名即使解析到该网段也不匹配。名称比较前统一小写、去掉末尾的点并做 IDNA（punycode）规范化。任一形式都可以加 `:端口`。多个条目匹配同一目标时选最具体的（精确主机或 IP > 更长的通配符 > 前缀更长的网段；同级时带端口的更具体）；同样具体的报 `AMBIGUOUS`，只列出引用名。条目可以限定用途（`ops`：`http`、`ssh`——含 scp 与 ssh-agent 桥——、`git`）。`*` 只能是最左边的整个标签，其后至少两个标签。通配符的基底不能是公共后缀（含私有段），因此 `*`、`*.com`、`*.co.uk`、`*.github.io` 都会被拒绝；精确匹配只对应一台主机，只拒绝 ICANN 顶级后缀本身（`com`、`co.uk`），允许 `github.io`、`httpbin.org` 这类私有段中的主机名。
 - SSH 认证方式由密钥内容自动判断：`-----BEGIN … PRIVATE KEY-----` 为私钥，否则为密码。
 
 ### 5.2 工具（MCP 与 CLI 一一对应）
@@ -243,3 +245,113 @@ CI 在 6 种 GitHub 原生运行器上执行：Linux（ubuntu-latest、ubuntu-24
 | 发布包：在各平台原生运行器上构建后直接解包运行（真实 Argon2id 参数），macOS 通用二进制另以 Rosetta 运行 x86_64 部分 | Linux x64 / arm64、macOS、Windows x64 / arm64 | 通过 |
 | 本地交叉构建（`scripts/cross-build.sh`，Zig） | Linux x64 / arm64、Windows x64 | 通过 |
 | 尚未验证 | 有 TPM 的真实 Linux / Windows（L3）、macOS 升级时钥匙串 ACL 换绑、Windows 加固后的完整流程、在 Alpine 容器中显示 L1 警告 | — |
+
+---
+
+## 10. 局域网在线版（服务器模式）
+
+前面的单机设计保持不变。服务器模式是另一种部署形态：局域网里一台 PassManager 服务器（例如解析到内网地址的 `pm.example.com`），其他机器上的 Agent 经网络使用凭据，另有网页管理界面与服务器上的 root 命令。由 `passmanager init` 开启（root 所有的 `install.json` 里的 `server` 配置）。
+
+### 10.1 网络威胁模型
+
+| 编号 | 威胁 | 应对 |
+|---|---|---|
+| N1 | 局域网以外的人连到服务 | 只开 443（网页）与 8443（Agent）；只用 IPv4；在任何 TLS 握手之前，程序内按配置的网段（`--lan-cidr`，必须指定、没有默认值；不指定时网络监听拒绝启动）检查来源地址；`install-server.sh` 加一张 nftables 表，只放行这些网段访问 22 与网页 / Agent 端口，丢弃其余入站与全部 IPv6；`/etc/sysctl.d/99-disable-ipv6.conf` 关闭 IPv6。域名解析到内网地址，公开的只有证书。 |
+| N2 | 现在录下流量、将来用量子计算机破解 | 外层 TLS 1.3 只接受混合组 X25519MLKEM768 / SecP256r1MLKEM768 与 TLS_AES_256_GCM_SHA384，无 0-RTT；Agent 通道再加一层内层，由 ML-KEM-1024 **和** Classic McEliece 6688128（两个家族、两个库）共同决定密钥。 |
+| N3 | 用误签发的证书做主动中间人 | Agent 固定注册码里服务端内层静态公钥的 SHA-384 指纹（不是 TOFU）；内层的密钥确认绑定 TLS exporter，终止 TLS 后再转发内层字节必然失败。 |
+| N4 | 局域网设备探测 Agent 端口 | 网络上只接受 `Hello::Token` 与 `Hello::Enroll`；`Password`、`Setup`、`Root` 一律静默拒绝；所有失败都是同样的随机延迟后静默断开。 |
+| N5 | 针对网页的攻击（CSRF、XSS、DNS 重绑定、点击劫持） | 服务端渲染、没有 JavaScript、CSP `default-src 'none'`；Host 校验；Fetch Metadata 与 Origin 校验；每个 POST 校验 CSRF 令牌；`__Host-` cookie（HttpOnly、Secure、SameSite=Strict）；请求体上限 64 KiB；无效登录链接按来源限速；每个模板都有 XSS 注入测试。 |
+| N6 | 网页登录凭据被盗 | 没有凭据：只能用 `passmanager login`（服务器上的 root，也就是持有 SSH 密钥的人）打印的一次性链接登录。链接 2 分钟有效，GET 只显示确认页，POST 才消耗；会话空闲 2 小时、登录满 12 小时失效，只保存在内存里。 |
+| N7 | 密钥经网页泄露 | 密钥只写不读：任何页面、任何响应都不包含密钥（有测试），表单从不回显，服务器模式拒绝 `Reveal`。 |
+| N8 | Agent 令牌被盗 | 只能**使用**凭据（看不到明文），且只能从局域网使用；在网页或用 `passmanager token revoke` 吊销立即生效。令牌只在注册时经双层加密通道送达一次，在 Agent 上存为 0600 文件（不写进任何 MCP 配置）。 |
+
+### 10.2 Agent 通道的构造
+
+```
+TCP（IPv4，只接受局域网来源）→ TLS 1.3 [X25519MLKEM768 + AES-256-GCM，ALPN pm-inner/1] → 内层 → 原有的本地协议（handle_conn）
+
+服务端静态密钥：ML-KEM-1024（aws-lc-rs）+ Classic McEliece 6688128（liboqs），私钥用设备密钥封存
+bundle = "PMK1" ‖ 长度‖ek_mlkem ‖ 长度‖pk_mceliece          （约 1 MB，注册时下载一次并缓存）
+fpr    = SHA-384("pm/inner/v1/fpr\0" ‖ bundle)                （写在注册码里，固定在 remote.toml）
+
+C → S  "PMIN" ‖ 0x01 ‖ 0x02 ‖ nonce_c ‖ fpr ‖ ct_K ‖ ct_M     （ct_K/ss_K = ML-KEM 封装，ct_M/ss_M = McEliece 封装）
+S → C  nonce_s ‖ tag_s ；  C → S  tag_c
+E    = TLS exporter("EXPORTER-PassManager-inner-v1", 64)
+th   = SHA-512("pm/inner/v1/transcript" ‖ 客户端消息 ‖ nonce_s)
+okm  = HKDF-SHA512(salt = nonce_c ‖ nonce_s, ikm = ss_K ‖ ss_M ‖ E, info = "pm/inner/v1/keys" ‖ th)
+k_c2s, k_s2c, k_fin = okm[0..32], okm[32..64], okm[64..112]
+tag_s = HMAC-SHA384(k_fin, "…server-finished" ‖ th)；tag_c = HMAC-SHA384(k_fin, "…client-finished" ‖ th)
+帧    = u32 长度 ‖ ChaCha20-Poly1305(k_方向, nonce = 方向 ‖ 0³ ‖ 计数器 u64, aad = "pm/inner/v1/frame" ‖ 长度, ≤64 KiB)
+```
+
+- 只有同时持有两把私钥的服务端才能算出 `tag_s`；经另一条 TLS 连接转发时 `E` 不同，握手失败。
+- 版本与操作码字节在 transcript 里；服务端只接受版本 1（降级尝试失败）。
+- 两个方向各一把密钥、各一个不在线上传输的计数器：重放、重排、丢帧、反射都会认证失败并断开连接。外层 AES-GCM、内层 ChaCha20-Poly1305，算法不同。
+- 服务端把内层会话包装成 `AsyncRead + AsyncWrite`（duplex 管道 + 两个加解密泵）交给原样不变的 `handle_conn`；Agent 端包装成 `Read + Write` 交给原有的阻塞客户端，所以 MCP 与 CLI 的用法不变。
+
+注册：`passmanager token add <标签>`（root）输出 `pm-enroll://<域名>:<端口>/<注册码>#<指纹>`（32 字节随机数，10 分钟有效，只能用一次，服务端只在内存里保存它的 SHA-256）。`passmanager enroll <注册码>` 下载公钥包、核对指纹、建立内层会话、用注册码换一个新令牌，然后在 `~/.config/passmanager` 下写入 `remote.toml`、`token`（0600）与 `server-keys.bin`，并为检测到的 Agent 写入 MCP 配置（不含令牌）。
+
+### 10.3 无口令库模式及其代价
+
+```
+KEK_A = HKDF(salt = vault_id, ikm = device_key, info = "pm/v2/kek/A" ‖ "device-only" ‖ salt)   （KEK_B 同理）
+v2 文件头 = v1 的字段 + 模式字节（device-only）；文件头哈希仍是两层载荷加密的 AAD
+```
+
+- 不运行 Argon2（1 GiB 内存的小服务器或容器也够用）；服务启动时自动解锁。v1（口令）库的格式逐字节不变。
+- 防降级：模式写在受认证的文件头里，**同时**参与 HKDF 的 info；把无口令库改写成口令库（或反过来）都打不开；口令接口拒绝无口令库，反之亦然；封存等级只能升高（`reseal`）；`.bak` 回退只用于文件损坏，绝不用来绕过策略检查。
+- **代价（直说）：** 拿到服务器 root 的人——或者在没有 TPM 时，拿到磁盘、快照或备份的人——就拿到了密码库。因此唯一的管理凭据就是能以 root 登录服务器的 SSH 密钥。**没有任何恢复途径**：不做在线同步、不做备份、不能导出。
+
+### 10.4 设备密钥、TPM 与开机顺序
+
+- 封存：TPM 可用时 `systemd-creds --with-key=host+tpm2 --tpm2-pcrs=`（L3），否则 `--with-key=host`（L2）。TPM 是自动检测的 `/dev/tpmrm0`，或用 `--tpm-socket` 配置的 swtpm Unix 套接字（例如虚拟化宿主机为容器提供的软件 TPM；配置后优先）；套接字模式下每次调用 `systemd-creds` 都带 `SYSTEMD_TPM2_DEVICE=swtpm:path=…`，root 调用时还会补上 `tss` 组（套接字为 `nobody:tss 0660`，而 `ExecStartPre=+` 的进程没有附加组）。判断 TPM 是否可用靠一次加密 / 解密往返并检查凭据文件头的类型 ID（`has-tpm2` 只看内核设备）。
+- `passmanager reseal` 把 L2 升级为 L3：解密 → 重新加密到 `.new` → 检查文件头并解密比对 → 停止服务 → rename → 更新 `install.json` → 库文件头记为 L3 → 启动服务。任何一步之后断电，重新运行即可。
+- **TPM 带来什么：** 偷走的磁盘镜像、快照或备份没有这份 TPM 状态就解不开；把容器搬到别处也解不开。**带不来什么：** 正在运行的容器里的 root 仍然可以让 TPM 解封；虚拟化宿主机的 root 能读容器内存。**不绑定 PCR**：LXC 没有自己的启动度量（PCR 反映宿主机的固件与内核，绑定后宿主机每次升级都会解不开）。**代价：** swtpm 状态丢失、TPM 被清除或迁移到别的节点后，密码库永久无法打开。
+- 非特权 LXC 不支持 `LoadCredentialEncrypted=`，所以由 `ExecStartPre=+PassManager service-prepare`（root）把设备密钥解密到 `/run/passmanager-key/device.key`（服务账户 0400），服务读取后立即删除，`ExecStopPost` 清理残留。
+- TPM 同时是随机数的第三个可选来源（经 swtpm 套接字或 `/dev/tpmrm0` 发送 `TPM2_GetRandom`；启用前 1 KiB 样本过 SP 800-90B 检测，运行中连续检测；任何失败只永久停用这个源）。
+
+### 10.5 健壮性（硬重启、kill -9、断电）
+
+- 单元：`After=/Wants=network-online.target`；`ExecStartPre` 里有限次（60 秒）等待 TPM；`Restart=on-failure` 加 `StartLimitIntervalSec=900`/`StartLimitBurst=10`。退出码 **78** 只用于真正的配置错误（`install.json` 损坏、密钥缺失、设备密钥解不开、库被降级、没有绑定特权端口的权限），配合 `RestartPreventExitStatus=78`；暂时性故障（TPM 还没出现、端口被占用）以 75 退出并重试。
+- 所有持久文件都原子写入（临时文件 → fsync → rename → fsync 目录）：库、令牌表、`install.json`、封存的密钥、证书、ACME 状态。崩溃注入测试覆盖半写的临时文件、更新 .bak 之前崩溃、rename 之前崩溃。主文件缺失、截断或损坏时读取回退到 `.bak`，恢复后的第一次保存不会覆盖完好的 `.bak`。
+- 证书：已保存的证书只要没过期就先用它启动；续期（每 6 小时检查，剩余 30 天内续期）失败从不阻塞启动；失败后按 10 分钟到 6 小时退避，失败次数持久化，服务反复重启也不会频繁请求 Let's Encrypt。
+
+### 10.6 命令
+
+| 位置 | 命令 | 作用 |
+|---|---|---|
+| 服务器（root） | `passmanager init [--cf-token-stdin] [--skip-acme] …` | 设备密钥、内层密钥、无口令库、证书、systemd 单元（可重复执行） |
+| 服务器（root） | `passmanager login` | 网页一次性登录链接 |
+| 服务器（root） | `passmanager token add <标签>` / `list` / `revoke <id>` | 注册码与令牌 |
+| 服务器（root） | `passmanager status` / `lock` / `unlock` / `reseal` | 状态、锁定、解锁、L2 → L3 |
+| 服务器（root） | `passmanager import --name <名称> [--domain …] [--kind ssh-key] [--fields a,b] [--replace]` | 从标准输入导入密钥 |
+| Agent 机器 | `passmanager enroll 'pm-enroll://…'` | 接入服务器；之后 MCP / CLI 用法不变 |
+| Agent 机器 | `passmanager ssh-agent [--socket 路径]` | OpenSSH agent 桥（Unix） |
+| Agent 机器 | `passmanager git-proxy [--listen 127.0.0.1:端口]` | git 凭据注入代理 |
+| 两端 | `scripts/install-server.sh`、`scripts/install-agent.sh` | 一键安装（`DRY_RUN=1` 用于测试） |
+
+### 10.7 条目：多字段密钥与 SSH 私钥
+
+- 条目要么是一个值（`secret`），要么是若干命名字段（`username`、`password`、`token`……）。字段名只能是 `[a-z0-9_-]`、不能重复、值不能为空。
+  0.1.0 的载荷格式仍可读取，下次保存时改写为新格式。
+- 占位符：`{{secret}}` = 按主机选出的条目的单值（多字段条目会报错并提示写字段名）；`{{名称}}` = 指定的单值条目；`{{名称.字段}}`；
+  `{{字段}}` 只在恰好一个条目匹配该主机时可用。错误信息不会列出其他条目的字段。`sudo` 使用 `password` 字段（或密码条目的单值）。
+- 脱敏覆盖每个字段的值及其全部编码；多行值还逐行脱敏（每行 ≥ 8 个字符）。
+- SSH：私钥条目与口令条目都匹配同一主机时先用私钥；只有私钥被拒且服务器仍提供 `password` / `keyboard-interactive` 时才用口令条目
+  （例如绑定到 `*.example.com` 与局域网网段、`--ops ssh` 的默认初始口令）。`sudo` 使用口令条目的口令。
+- SSH 私钥条目（`ssh-key`）保存未加密的私钥；任何地方只显示公钥与 SHA-256 指纹。条目上绑定的主机密钥（`SHA256:…`）与 TOFU 指纹库一起检查。
+
+### 10.8 ssh-agent 桥
+
+`passmanager ssh-agent` 在 0600 的 Unix 套接字上提供 OpenSSH agent 协议，把 `REQUEST_IDENTITIES` / `SIGN_REQUEST` 经 Agent 通道转给服务器。
+服务器只在以下条件都满足时签名：(1) 客户端为这条连接发送了 `session-bind@openssh.com` 且不是转发会话；(2) 主机密钥对会话标识的签名有效；
+(3) 该主机密钥被允许用于该条目；(4) 待签数据是针对同一会话标识、同一公钥的 `publickey` `SSH_MSG_USERAUTH_REQUEST`；(5) 未超过速率限制（30 次/分钟）。
+每次签名与每次拒绝都写入审计日志（只记条目、公钥与主机密钥指纹）。剩余风险：桥运行期间，被攻破的 Agent 机器仍能登录允许的主机，但拿不走私钥。
+
+### 10.9 git 凭据代理
+
+`passmanager git-proxy` 只监听回环地址，要求随机 128 位路径令牌（0600 文件），每个连接转发一个 smart-HTTP 请求，以流的形式传输
+（请求帧 → 响应头 → 响应帧，每帧 64 KiB）。服务器只接受经 HTTPS 发往条目绑定主机的 `GET …/info/refs?service=git-upload-pack|git-receive-pack`
+与 `POST …/git-upload-pack|git-receive-pack`；丢弃客户端的 `Authorization` / `Cookie`，只转发少量白名单请求头，加上
+`Authorization: Basic base64(用户名:PAT)`；拒绝重定向；非 pack 响应脱敏；pack 流中一旦出现令牌原文即中止。自签证书的上游与 HTTPS 条目一样按指纹固定。
+审计日志记录条目、主机、服务、状态与字节数。
