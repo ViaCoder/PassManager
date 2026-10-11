@@ -4,6 +4,16 @@ English | [简体中文](CHANGELOG.zh-CN.md)
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.3.7] - 2026-10-11
+
+### Fixed
+
+- **Stale cached stylesheet after upgrades**: pages referenced `/static/style.css` (and the favicon) under a fixed URL with `max-age=3600`, so after an upgrade the browser combined the new HTML with the old cached stylesheet (huge unstyled icons, visible skip link) until a hard reload. Static assets are now referenced as `/static/style.css?v=<hash>` / `/static/icon.svg?v=<hash>`, where the hash is the first 10 hex characters of the SHA-256 of the compiled-in file; a new build with different bytes gets a new URL. Requests with the current hash are served with `max-age=31536000, immutable`; requests without `v` or with an old/unknown `v` still get the current file with `max-age=3600` (stale pages never 404). Pages themselves stay `no-store`, so they always reference the current hash. Other headers (CSP, `nosniff`, CORP, Referrer-Policy) and the Host check are unchanged.
+
+### Tests
+
+- Hash function (known value, one changed byte changes the URL), `Cache-Control` selection, rendered pages contain the exact current hash for each asset, the static routes work with and without (current, old, malformed) `?v` and keep all security headers and the Host check.
+
 ## [0.3.6] - 2026-10-11
 
 ### Changed

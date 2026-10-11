@@ -289,6 +289,8 @@ pub fn templates() -> Environment<'static> {
         }
         None => Value::from(""),
     });
+    // 静态资源的版本（内容哈希），base.html 用来拼 `?v=`。
+    env.add_global("assets", sv(asset_versions()));
     env.add_filter("datetime", |ts: i64| {
         let d = ts.div_euclid(86400);
         let s = ts.rem_euclid(86400);
@@ -314,11 +316,35 @@ pub const FAVICON_SVG: &str = concat!(
     "</svg>"
 );
 
-/// 静态资源：(路径, Content-Type, 内容)。都只读、可缓存，不需要会话。
-pub const STATIC: &[(&str, &str, &str)] = &[
-    ("/static/style.css", "text/css; charset=utf-8", include_str!("../static/style.css")),
-    ("/static/icon.svg", "image/svg+xml", FAVICON_SVG),
+/// 静态资源：(模板里的键, 路径, Content-Type, 内容)。都只读、可缓存，不需要会话。
+/// 页面用 `{{ assets.键 }}`（内容哈希）拼出 `路径?v=哈希`：升级后内容变了，地址也随之改变，
+/// 浏览器不会继续用缓存里的旧文件。
+pub const STATIC: &[(&str, &str, &str, &str)] = &[
+    ("style", "/static/style.css", "text/css; charset=utf-8", include_str!("../static/style.css")),
+    ("icon", "/static/icon.svg", "image/svg+xml", FAVICON_SVG),
 ];
+
+/// 带当前版本参数的请求：内容永远不会在这个地址下改变。
+pub const CACHE_IMMUTABLE: &str = "max-age=31536000, immutable";
+/// 不带版本参数或版本不是当前的（例如旧页面）：照样返回当前文件，只缓存一小时。
+pub const CACHE_UNVERSIONED: &str = "max-age=3600";
+
+/// 内容哈希：SHA-256 的前 10 个十六进制字符，用作静态资源地址的 `?v=`。
+pub fn asset_hash(body: &[u8]) -> String {
+    hex::encode(&pm_crypto::sha256(body)[..5])
+}
+
+/// 每个静态资源当前的版本（键 → 内容哈希），进程内只计算一次。
+pub fn asset_versions() -> &'static std::collections::BTreeMap<&'static str, String> {
+    static V: std::sync::OnceLock<std::collections::BTreeMap<&'static str, String>> = std::sync::OnceLock::new();
+    V.get_or_init(|| STATIC.iter().map(|(k, _, _, b)| (*k, asset_hash(b.as_bytes()))).collect())
+}
+
+/// 静态资源的 Cache-Control：查询串里的 `v` 等于当前哈希时长期缓存，否则一小时。
+pub fn static_cache_control(query: Option<&str>, current: &str) -> &'static str {
+    let v = query.into_iter().flat_map(|q| q.split('&')).find_map(|kv| kv.strip_prefix("v="));
+    if v == Some(current) { CACHE_IMMUTABLE } else { CACHE_UNVERSIONED }
+}
 
 /// 模板对应的导航项（顶栏高亮当前页面，`aria-current="page"`）。
 fn nav_of(template: &str) -> &'static str {
@@ -363,8 +389,14 @@ pub fn civil(z: i64) -> (i64, u32, u32) {
 
 pub fn router(st: St) -> Router {
     let mut r = Router::new();
-    for (path, ctype, body) in STATIC {
-        r = r.route(path, get(move || async move { ([(header::CONTENT_TYPE, *ctype), (header::CACHE_CONTROL, "max-age=3600")], *body) }));
+    for (key, path, ctype, body) in STATIC {
+        let current = asset_versions()[key].as_str();
+        r = r.route(
+            path,
+            get(move |uri: axum::http::Uri| async move {
+                ([(header::CONTENT_TYPE, *ctype), (header::CACHE_CONTROL, static_cache_control(uri.query(), current))], *body)
+            }),
+        );
     }
     r.route("/", get(dashboard))
         .route("/login", get(login_page))

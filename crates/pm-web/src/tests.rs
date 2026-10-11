@@ -856,7 +856,7 @@ fn assets_are_offline_and_script_free() {
         None
     }
     let mut files: Vec<(&str, &str)> = TEMPLATES.to_vec();
-    files.extend(STATIC.iter().map(|(p, _, b)| (*p, *b)));
+    files.extend(STATIC.iter().map(|(_, p, _, b)| (*p, *b)));
     assert!(files.iter().any(|(n, _)| *n == "/static/style.css") && files.iter().any(|(n, _)| *n == "/static/icon.svg"));
     for (name, src) in files {
         let l = src.to_ascii_lowercase();
@@ -947,7 +947,12 @@ async fn favicon_is_same_origin_and_csp_is_unchanged() {
     let (st, _) = state();
     let page = send(&st, Method::GET, "/login", None, None, &[]).await;
     assert_eq!(page.headers.get("content-security-policy").unwrap(), CSP);
-    assert!(page.body.contains(r#"<link rel="icon" href="/static/icon.svg" type="image/svg+xml">"#));
+    assert!(
+        page.body.contains(&format!(
+            r#"<link rel="icon" href="/static/icon.svg?v={}" type="image/svg+xml">"#,
+            asset_hash(FAVICON_SVG.as_bytes())
+        ))
+    );
     assert!(page.body.contains(r#"<symbol id="i-terminal""#) && page.body.contains(r##"<use href="#i-terminal">"##));
     let r = send(&st, Method::GET, "/static/icon.svg", None, None, &[]).await;
     assert_eq!(r.status, StatusCode::OK);
@@ -1099,4 +1104,79 @@ async fn referrer_policy_is_same_origin_and_browser_posts_work() {
         );
     }
     assert!(*mock.locked.lock().unwrap());
+}
+
+/// 升级后浏览器不能继续用缓存里的旧样式表：静态资源地址带内容哈希 `?v=`。
+#[test]
+fn asset_hash_changes_with_content() {
+    assert_eq!(asset_hash(b"abc"), "ba7816bf8f", "SHA-256(\"abc\") 的前 10 个十六进制字符");
+    let css = STATIC[0].3;
+    let h = asset_hash(css.as_bytes());
+    assert_eq!(h.len(), 10);
+    assert!(h.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()));
+    assert_eq!(asset_hash(css.as_bytes()), h, "确定性");
+    let mut changed = css.as_bytes().to_vec();
+    changed[0] ^= 1;
+    assert_ne!(asset_hash(&changed), h, "改一个字节，地址就变");
+    assert_ne!(asset_hash(format!("{css} ").as_bytes()), h);
+    let v = asset_versions();
+    assert_eq!(v.len(), STATIC.len());
+    for (k, _, _, b) in STATIC {
+        assert_eq!(v[k], asset_hash(b.as_bytes()), "{k}");
+    }
+    // Cache-Control：只有当前哈希才长期缓存。
+    assert_eq!(static_cache_control(Some(&format!("v={h}")), &h), CACHE_IMMUTABLE);
+    assert_eq!(static_cache_control(Some(&format!("x=1&v={h}")), &h), CACHE_IMMUTABLE);
+    for q in [None, Some(""), Some("v="), Some("v=0000000000"), Some("v=ba7816bf8f"), Some(&format!("v={h}x")), Some(&format!("vv={h}"))] {
+        assert_eq!(static_cache_control(q, &h), CACHE_UNVERSIONED, "{q:?}");
+    }
+}
+
+#[tokio::test]
+async fn static_assets_are_versioned_by_content_hash() {
+    let css_v = asset_hash(include_str!("../static/style.css").as_bytes());
+    let icon_v = asset_hash(FAVICON_SVG.as_bytes());
+    // 渲染出的页面（登录前后）都引用当前哈希。
+    let base = templates().get_template("login.html").unwrap().render(context! {}).unwrap();
+    assert!(base.contains(&format!(r#"<link rel="stylesheet" href="/static/style.css?v={css_v}">"#)), "{base}");
+    assert!(base.contains(&format!(r#"<link rel="icon" href="/static/icon.svg?v={icon_v}" type="image/svg+xml">"#)));
+    let (st, _) = state();
+    let (cookie, _) = login(&st).await;
+    for (p, c) in [("/login", None), ("/", Some(cookie.as_str())), ("/entries", Some(cookie.as_str()))] {
+        let r = send(&st, Method::GET, p, c, None, &[]).await;
+        assert!(
+            r.body.contains(&format!("/static/style.css?v={css_v}\"")) && r.body.contains(&format!("/static/icon.svg?v={icon_v}\"")),
+            "{p}"
+        );
+        assert_eq!(r.headers.get("cache-control").unwrap(), "no-store", "页面本身不缓存，所以总是引用当前哈希");
+    }
+    // 静态路由：带或不带 v、旧的或乱写的 v 都返回当前文件（旧页面不会 404）；安全头不变。
+    for (path, ctype, body, cur) in [
+        ("/static/style.css", "text/css; charset=utf-8", include_str!("../static/style.css"), css_v.as_str()),
+        ("/static/icon.svg", "image/svg+xml", FAVICON_SVG, icon_v.as_str()),
+    ] {
+        for (q, cache) in [
+            (String::new(), CACHE_UNVERSIONED),
+            (format!("?v={cur}"), CACHE_IMMUTABLE),
+            ("?v=0000000000".to_string(), CACHE_UNVERSIONED),
+            ("?v=%3Cscript%3E&x=%ZZ".to_string(), CACHE_UNVERSIONED),
+            ("?v".to_string(), CACHE_UNVERSIONED),
+        ] {
+            let r = send(&st, Method::GET, &format!("{path}{q}"), None, None, &[]).await;
+            assert_eq!(r.status, StatusCode::OK, "{path}{q}");
+            assert_eq!(r.body, body, "{path}{q}");
+            for (k, v) in [
+                ("content-type", ctype),
+                ("cache-control", cache),
+                ("x-content-type-options", "nosniff"),
+                ("cross-origin-resource-policy", "same-origin"),
+                ("content-security-policy", CSP),
+                ("referrer-policy", "same-origin"),
+            ] {
+                assert_eq!(r.headers.get(k).unwrap(), v, "{path}{q} {k}");
+            }
+        }
+        let req = axum::http::Request::builder().uri(format!("{path}?v={cur}")).header("host", "evil.example").body(Body::empty()).unwrap();
+        assert_eq!(router(st.clone()).oneshot(req).await.unwrap().status(), StatusCode::FORBIDDEN, "Host 校验");
+    }
 }
