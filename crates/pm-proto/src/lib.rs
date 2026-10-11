@@ -434,6 +434,9 @@ pub struct ServerStatusView {
     pub web_port: u16,
     pub agent_port: u16,
     pub lan: Vec<String>,
+    /// 额外允许访问服务端口的地址或网段。
+    #[serde(default)]
+    pub allow: Vec<String>,
     pub locked: bool,
     pub initialized: bool,
     pub vault_mode: String,

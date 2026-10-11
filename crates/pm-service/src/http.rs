@@ -41,6 +41,8 @@ pub struct Prepared {
     pub port: u16,
     pub self_signed: bool,
     pub names: Vec<String>,
+    /// URL 以占位符开头（例如 `{{ai.base_url}}`）时，对 Agent 的消息与日志用这个占位符代替真实的主机。
+    pub label: Option<String>,
 }
 
 impl Prepared {
@@ -262,6 +264,10 @@ pub fn prepare(payload: &Payload, method: &str, url: &str, headers: &[(String, S
         ));
     }
 
+    // URL 以占位符开头（{{条目}} 或 {{条目.字段}}，其值是完整的 https 基础地址）：原样代入后再解析。
+    if let Some((lead, rest)) = leading_placeholder(url) {
+        return prepare_with_base(payload, &method_up, &lead, rest, headers, body);
+    }
     // 先用占位符的"哑值"解析 URL，确定协议、主机与端口（禁止在主机部分使用占位符）。
     let dummy = template::substitute(url, |_| Some("pmph".into())).unwrap_or_default();
     let parsed = Url::parse(&dummy).map_err(|e| err("BAD_REQUEST", format!("invalid URL: {e}")))?;
@@ -312,6 +318,139 @@ pub fn prepare(payload: &Payload, method: &str, url: &str, headers: &[(String, S
         port,
         self_signed: resolved.iter().any(|(_, r)| r.entry.self_signed),
         names: resolved.iter().map(|(_, r)| r.entry.name.clone()).collect(),
+        label: None,
+    })
+}
+
+/// URL 开头的占位符：返回（名称，其后的文本）。只认紧接在开头的 `{{…}}`。
+fn leading_placeholder(url: &str) -> Option<(String, &str)> {
+    let u = url.trim_start();
+    let inner = u.strip_prefix("{{")?;
+    let end = inner.find("}}")?;
+    let name = inner[..end].trim();
+    if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.') {
+        return None;
+    }
+    Some((name.to_string(), &inner[end + 2..]))
+}
+
+/// 按名称取得开头占位符的条目与值（不检查主机：主机正是由这个值决定的；之后再按最终的主机检查绑定）。
+/// 只接受显式的 `{{条目}}` / `{{条目.字段}}`；`{{secret}}` 与裸字段名依赖主机选择，不能放在开头。
+fn resolve_named(payload: &Payload, token: &str) -> Result<Resolved, ApiErr> {
+    if token == AUTO_PLACEHOLDER {
+        return Err(err("BAD_REQUEST", "a placeholder at the start of the URL must name the entry: {{entry}} or {{entry.field}}"));
+    }
+    if let Some(e) = payload.entry(token) {
+        if !e.fields.is_empty() {
+            return Err(has_fields_error(e));
+        }
+        return Ok(Resolved { entry: e.clone(), field: None });
+    }
+    let mut by_prefix: Vec<&Entry> =
+        payload.entries.iter().filter(|e| token.len() > e.name.len() + 1 && token.starts_with(&format!("{}.", e.name))).collect();
+    by_prefix.sort_by_key(|e| std::cmp::Reverse(e.name.len()));
+    let Some(e) = by_prefix.first() else {
+        return Err(err(
+            "UNKNOWN_CREDENTIAL",
+            format!("no credential \"{token}\" (a placeholder at the start of the URL must be {{{{entry}}}} or {{{{entry.field}}}})"),
+        ));
+    };
+    let field = &token[e.name.len() + 1..];
+    match e.field(field) {
+        Some(_) => Ok(Resolved { entry: (*e).clone(), field: Some(field.to_string()) }),
+        None => Err(err("UNKNOWN_FIELD", format!("\"{}\" has no field \"{field}\"", e.name))),
+    }
+}
+
+/// URL 以占位符开头时的准备：值必须是不带用户信息的绝对 https URL；值原样代入（不做百分号编码），其后的文本照原样追加；
+/// 代入后的主机与端口必须与值本身的一致（后缀不能改变主机），并满足提供该值的条目以及其他所有占位符的域名绑定。
+/// 错误信息只提到占位符名称，从不包含值本身。
+fn prepare_with_base(
+    payload: &Payload,
+    method_up: &str,
+    lead: &str,
+    rest: &str,
+    headers: &[(String, String)],
+    body: Option<&str>,
+) -> Result<Prepared, ApiErr> {
+    let label = format!("{{{{{lead}}}}}");
+    let bad = |why: &str| err("BAD_URL", format!("the value of {label} {why}"));
+    let base_r = resolve_named(payload, lead)?;
+    if !base_r.entry.allows(pm_vault::OP_HTTP) {
+        return Err(err("OP_NOT_ALLOWED", format!("\"{}\" may only be used for {}", base_r.entry.name, base_r.entry.ops.join(", "))));
+    }
+    let base = base_r.value();
+    if base.is_empty() || base.chars().any(|c| c.is_control() || c.is_whitespace()) {
+        return Err(bad("is not a URL (it contains whitespace or control characters)"));
+    }
+    let base_url = Url::parse(&base).map_err(|_| bad("is not an absolute URL"))?;
+    if base_url.scheme() != "https" {
+        return Err(err("USE_HTTPS", format!("the value of {label} is not an https:// URL")));
+    }
+    if !base_url.username().is_empty() || base_url.password().is_some() {
+        return Err(bad("contains credentials (user info); not allowed"));
+    }
+    let host = host_string(&base_url).ok_or_else(|| bad("has no host"))?;
+    let port = base_url.port_or_known_default().unwrap_or(443);
+    // 开头的值所属条目必须绑定到它自己的主机。
+    check_domain(&base_r.entry, &host, port, pm_vault::OP_HTTP).map_err(|e| {
+        if e.code == "DOMAIN_MISMATCH" {
+            err("DOMAIN_MISMATCH", format!("the URL in {label} points to a host that \"{}\" is not bound to", base_r.entry.name))
+        } else {
+            e
+        }
+    })?;
+    // 其他占位符（后缀、请求头、请求体）照常按最终的主机解析与编码。
+    let mut names = template::find_names(rest);
+    for n in collect_names("", headers, body) {
+        if !names.contains(&n) {
+            names.push(n);
+        }
+    }
+    let mut resolved: Vec<(String, Resolved)> = vec![];
+    for n in &names {
+        resolved.push((n.clone(), resolve(payload, n, &host, port, pm_vault::OP_HTTP)?));
+    }
+    let lookup = |n: &str| resolved.iter().find(|(p, _)| p == n).map(|(_, r)| r.value().to_string());
+    let suffix = Zeroizing::new(
+        template::substitute(rest, |n| lookup(n).map(|s| percent_encoding::utf8_percent_encode(&s, URL_ENCODE).to_string()))
+            .map_err(|n| err("UNKNOWN_CREDENTIAL", format!("no credential \"{n}\"")))?,
+    );
+    let full = Zeroizing::new(format!("{}{}", base.as_str(), suffix.as_str()));
+    let real = Url::parse(&full).map_err(|_| err("BAD_URL", format!("{label} followed by the rest of the URL is not a valid URL")))?;
+    if real.scheme() != "https"
+        || host_string(&real).as_deref() != Some(host.as_str())
+        || real.port_or_known_default() != Some(port)
+        || !real.username().is_empty()
+        || real.password().is_some()
+    {
+        return Err(err("BAD_URL", format!("the text after {label} must not change the scheme, host, port or user info")));
+    }
+    let mut hs = Vec::new();
+    for (k, v) in headers {
+        let k2 = template::substitute(k, lookup).map_err(|n| err("UNKNOWN_CREDENTIAL", n))?;
+        let v2 = Zeroizing::new(template::substitute(v, lookup).map_err(|n| err("UNKNOWN_CREDENTIAL", n))?);
+        if k2.contains(['\r', '\n']) || v2.contains(['\r', '\n']) {
+            return Err(err("BAD_REQUEST", "header names/values must not contain line breaks"));
+        }
+        hs.push((k2, v2));
+    }
+    let body = match body {
+        Some(b) => Some(Zeroizing::new(template::substitute(b, lookup).map_err(|n| err("UNKNOWN_CREDENTIAL", n))?)),
+        None => None,
+    };
+    let mut entries = vec![base_r.entry.name.clone()];
+    entries.extend(resolved.iter().map(|(_, r)| r.entry.name.clone()));
+    Ok(Prepared {
+        method: reqwest::Method::from_bytes(method_up.as_bytes()).map_err(|_| err("BAD_REQUEST", "bad method"))?,
+        url: real,
+        headers: hs,
+        body,
+        host,
+        port,
+        self_signed: base_r.entry.self_signed || resolved.iter().any(|(_, r)| r.entry.self_signed),
+        names: entries,
+        label: Some(label),
     })
 }
 
@@ -492,7 +631,8 @@ pub async fn execute(p: Prepared, expected_pin: Option<String>, redactor: &Redac
                 return Ok(Outcome::PinMismatch { observed: obs });
             }
             let msg = redactor.redact_str(&error_chain(&e.without_url()));
-            return Err(err("UPSTREAM_ERROR", format!("request to {} failed: {msg}", p.host)));
+            let target = p.label.clone().unwrap_or_else(|| p.host.clone());
+            return Err(err("UPSTREAM_ERROR", format!("request to {target} failed: {msg}")));
         }
     };
     let status = resp.status().as_u16();
@@ -765,5 +905,94 @@ mod tests {
         assert_eq!(names(ssh_credentials(&p, None, "db1.example.com", 22).unwrap()), (Some("db1-key".into()), None));
         assert_eq!(ssh_credentials(&p, None, "db2.example.com", 22).unwrap_err().code, "AMBIGUOUS");
         assert_eq!(ssh_credentials(&p, None, "nothing.example.org", 22).unwrap_err().code, "NO_CREDENTIAL");
+    }
+
+    const GW: &str = "https://gateway.example.com/v1/acct-7f3e/gw-secret/compat/chat/completions";
+
+    fn gw_entry(name: &str, base: &str, domains: &[&str]) -> Entry {
+        let fld = |n: &str, v: &str| pm_vault::Field { name: n.into(), value: Zeroizing::new(v.into()) };
+        let mut e = ent(name, "", domains, &[]);
+        e.fields = vec![fld("base_url", base), fld("api_key", "sk-gw-0123456789")];
+        e
+    }
+
+    /// URL 以 {{条目.字段}} 开头：值原样代入（不编码），后缀照原样追加，主机由值决定并按条目的绑定检查。
+    #[test]
+    fn leading_base_url_placeholder() {
+        let mut p = Payload::default();
+        p.entries.push(gw_entry("ai", GW, &["gateway.example.com"]));
+        let r = prepare(&p, "POST", "{{ai.base_url}}", &[("Authorization".into(), "Bearer {{ai.api_key}}".into())], Some("{}")).unwrap();
+        assert_eq!(r.url.as_str(), GW, "原样代入");
+        assert_eq!((r.host.as_str(), r.port), ("gateway.example.com", 443));
+        assert_eq!(r.headers[0].1.as_str(), "Bearer sk-gw-0123456789");
+        assert_eq!(r.label.as_deref(), Some("{{ai.base_url}}"));
+        assert_eq!(r.names, vec!["ai".to_string(), "ai".to_string()]);
+        let r = prepare(&p, "GET", "{{ai.base_url}}/models?x=1", &[], None).unwrap();
+        assert_eq!(r.url.as_str(), format!("{GW}/models?x=1"), "后缀照原样追加");
+        // 后缀里的其他占位符仍然百分号编码。
+        let r = prepare(&p, "GET", "{{ai.base_url}}?k={{ai.api_key}}&u={{ai.base_url}}", &[], None).unwrap();
+        assert!(r.url.as_str().starts_with(&format!("{GW}?k=sk-gw-0123456789&u=https%3A%2F%2Fgateway.example.com%2Fv1")), "{}", r.url);
+        // 中间位置的占位符：与以前一样百分号编码。
+        let r = prepare(&p, "GET", "https://gateway.example.com/q?u={{ai.base_url}}", &[], None).unwrap();
+        assert!(r.url.query().unwrap().starts_with("u=https%3A%2F%2Fgateway.example.com%2Fv1%2Facct-7f3e"));
+        assert_eq!(r.label, None);
+        // 大小写与末尾的点：按规范化后的主机比较。
+        let mut p2 = Payload::default();
+        p2.entries.push(gw_entry("ai", "https://GATEWAY.Example.com./v1", &["gateway.example.com"]));
+        assert_eq!(prepare(&p2, "GET", "{{ai.base_url}}", &[], None).unwrap().host, "gateway.example.com");
+    }
+
+    /// 拒绝：主机不在条目的绑定内、不是 https、带用户信息、后缀改变主机、以 @ 结尾的值、
+    /// 依赖主机选择的 {{secret}} 放在开头、scheme 之后的占位符、只允许 ssh 的条目。错误信息从不包含值本身。
+    #[test]
+    fn leading_base_url_rejections_never_echo_the_value() {
+        let cases: Vec<(&str, &str, &str, &[&str])> = vec![
+            ("https://evil.example/v1/acct-7f3e/x", "{{ai.base_url}}", "DOMAIN_MISMATCH", &["gateway.example.com"]),
+            ("http://gateway.example.com/v1/acct-7f3e", "{{ai.base_url}}", "USE_HTTPS", &["gateway.example.com"]),
+            ("https://user-acct-7f3e:pw@gateway.example.com/v1", "{{ai.base_url}}", "BAD_URL", &["gateway.example.com"]),
+            ("https://gateway.example.com", "{{ai.base_url}}@evil.example/acct-7f3e", "BAD_URL", &["gateway.example.com"]),
+            ("https://gateway.example.com", "{{ai.base_url}}:8443/acct-7f3e", "BAD_URL", &["gateway.example.com"]),
+            ("https://gateway.example.com@", "{{ai.base_url}}acct-7f3e.evil.example/", "BAD_URL", &["gateway.example.com"]),
+            ("https://gateway.example.com/acct-7f3e path", "{{ai.base_url}}", "BAD_URL", &["gateway.example.com"]),
+            ("not a url acct-7f3e", "{{ai.base_url}}", "BAD_URL", &["gateway.example.com"]),
+            ("https://gateway.example.com:8443/acct-7f3e", "{{ai.base_url}}", "DOMAIN_MISMATCH", &["gateway.example.com:443"]),
+        ];
+        for (value, url, code, doms) in cases {
+            let mut p = Payload::default();
+            p.entries.push(gw_entry("ai", value, doms));
+            let e = prepare(&p, "GET", url, &[], None).err().unwrap_or_else(|| panic!("{value} {url}"));
+            assert_eq!(e.code, code, "{value} {url}: {}", e.message);
+            assert!(!e.message.contains("acct-7f3e") && !e.message.contains(value), "错误信息不包含值：{}", e.message);
+        }
+        let mut p = Payload::default();
+        p.entries.push(gw_entry("ai", GW, &["gateway.example.com"]));
+        let e = prepare(&p, "GET", "{{secret}}/x", &[], None).err().unwrap();
+        assert_eq!(e.code, "BAD_REQUEST");
+        let e = prepare(&p, "GET", "https://{{ai.base_url}}", &[], None).err().unwrap();
+        assert!(
+            matches!(e.code.as_str(), "BAD_REQUEST" | "DOMAIN_MISMATCH") && !e.message.contains("acct-7f3e"),
+            "scheme 之后的占位符仍然禁止：{}",
+            e.message
+        );
+        assert_eq!(prepare(&p, "GET", "{{ai.nope}}", &[], None).err().unwrap().code, "UNKNOWN_FIELD");
+        let mut ssh_only = gw_entry("ai2", GW, &["gateway.example.com"]);
+        ssh_only.ops = vec!["ssh".into()];
+        p.entries.push(ssh_only);
+        assert_eq!(prepare(&p, "GET", "{{ai2.base_url}}", &[], None).err().unwrap().code, "OP_NOT_ALLOWED");
+        // 其他占位符也按最终的主机检查绑定。
+        p.entries.push(ent("other", "o-secret", &["elsewhere.example"], &[]));
+        assert_eq!(prepare(&p, "GET", "{{ai.base_url}}?t={{other}}", &[], None).err().unwrap().code, "DOMAIN_MISMATCH");
+    }
+
+    /// 多字段条目的每个字段（包括 base_url）都进入脱敏：响应里出现基础地址时被替换。
+    #[test]
+    fn base_url_is_redacted_in_responses() {
+        let e = gw_entry("ai", GW, &["gateway.example.com"]);
+        let values = e.secret_values();
+        assert!(values.iter().any(|(l, v)| l == "ai.base_url" && *v == GW));
+        let r = crate::redact::Redactor::build(values.iter().map(|(l, v)| (l.as_str(), *v)));
+        let out = r.redact_str(&format!("{{\"error\":\"unknown route {GW}\",\"key\":\"sk-gw-0123456789\"}}"));
+        assert!(!out.contains("acct-7f3e") && !out.contains("sk-gw-0123456789"), "{out}");
+        assert!(out.contains("[REDACTED:ai.base_url]") && out.contains("[REDACTED:ai.api_key]"));
     }
 }

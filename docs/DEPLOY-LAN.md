@@ -31,6 +31,33 @@ systemd unit and runs `passmanager init` (device key at L3 with a TPM, else L2; 
 
 Check: `passmanager status`, `ss -tlnp`, `nft list table inet passmanager`, `systemd-analyze security passmanager`.
 
+### 1.1 Single-port mode and IP allowlist
+
+When only one port can reach the server (for example a forwarder that passes a single TCP port), use single-port mode: one TLS
+listener serves the web UI and the agent channel and tells them apart by the TLS ALPN protocol (`pm-inner/1` for agents; `h2`,
+`http/1.1` or no ALPN for browsers). All generated addresses then carry the port (`https://pm.example.com:8121`,
+`pm-enroll://pm.example.com:8121/…`, the agent-setup one-liner, the login link).
+
+```sh
+./install-server.sh --domain pm.example.com --port 8121 \
+    --lan-cidr 198.51.100.0/24 \
+    --allow "203.0.113.7 203.0.113.64/26" --allow 2001:db8::/32 --skip-acme
+# site file: PORT=8121   ALLOW_IPS="203.0.113.7 203.0.113.64/26"
+```
+
+- `--lan-cidr` (LAN): may reach SSH (22) and the service port(s).
+- `--allow` / `ALLOW_IPS`: IPv4/IPv6 addresses or CIDRs that may reach the service port(s) only, not SSH. One value may hold several
+  space-separated entries. The same list is enforced by nftables and by the service itself (web and agent channel); `127.0.0.1` and
+  `::1` are always allowed by the service. An invalid entry (for example a CIDR with host bits set) stops the installer before
+  anything is changed; an invalid list in the service configuration is a configuration error (exit 78).
+- IPv6 entries: the installer disables IPv6 and drops all IPv6 traffic, so they have no effect until you enable IPv6 yourself (the
+  installer prints a warning).
+- Re-running the installer replaces the whole `inet passmanager` table and the service configuration: switching from
+  `--web-port/--agent-port` to `--port` (or back) leaves no old rules or listeners behind.
+- Already enrolled agents keep working after the port changes once their configuration points to the new port: either edit
+  `port = 8121` in `~/.config/passmanager/remote.toml` (the pinned server fingerprint does not change), or enroll again with a new
+  `passmanager agent-setup` text.
+
 ## 2. Web admin
 
 `ssh root@pm.example.com passmanager login` prints a one-time link (2 minutes, single use). Open it and click the button.
@@ -80,7 +107,8 @@ passmanager import --name pin --interactive                                     
 Content is stored verbatim (one trailing newline stripped, 64 KiB max), never echoed or logged; the command prints only the
 name, byte count and domain count. Entries without `--domain` are shown as "未绑定域名" (unbound) and unusable until a domain is
 added in the web UI. Placeholders: `{{secret}}` (single-value entries), `{{name.field}}`, `{{field}}` (when exactly one entry matches
-the host); `sudo` uses the `password` field.
+the host); `sudo` uses the `password` field. A confidential base URL (for example an AI gateway endpoint) goes into a `base_url`
+field (`--fields base_url,api_key`); agents then use `{{ai.base_url}}/models` as the URL with `Authorization: Bearer {{ai.api_key}}`.
 
 Bindings may be exact hosts, `*.example.com` (subdomains only, not the apex), IPs, or CIDR ranges such as `198.51.100.0/24`
 (matched against literal IP targets only), each optionally with `:port`; the most specific matching entry wins. A default initial

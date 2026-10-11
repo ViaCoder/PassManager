@@ -36,3 +36,4 @@ ip	scripts/release_scan.py	8e099943f7370d7e	扫描器自检用的样例地址（
 pem	crates/pm-service/src/http.rs	03d104c669e3c7b6	选择规则测试的假私钥（内容是 fake）
 entropy	crates/pm-proto/src/agent_text.rs	deb87fabd17715bb	测试用的假提交哈希（0123…）
 entropy	crates/pm-web/src/tests.rs	86db3cb20c001de4	测试用的假注册码（字母表顺序）
+entropy	crates/passmanager/tests/agent_setup_e2e.rs	d83454ebcac22f62	端到端测试的假密钥（EchoSecret…）

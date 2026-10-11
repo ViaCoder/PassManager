@@ -5,7 +5,7 @@
 //! - 使用规则写在 `<!-- passmanager:begin -->` 与 `<!-- passmanager:end -->` 之间，原地更新、不重复。
 
 /// 使用规则的版本（规则内容变化时加 1）。
-pub const INSTRUCTIONS_VERSION: u32 = 1;
+pub const INSTRUCTIONS_VERSION: u32 = 2;
 pub const BEGIN: &str = "<!-- passmanager:begin -->";
 pub const END: &str = "<!-- passmanager:end -->";
 /// 公开的源码仓库。
@@ -54,6 +54,8 @@ pub fn rules(lang: Lang) -> &'static str {
 - Never ask the user for a password, token or key, and never print, log or store plaintext secrets. Reference them only as
   placeholders in `http`, `ssh` and `scp` requests: `{{secret}}` (the entry for the target host), `{{entry}}`,
   `{{entry.field}}`, or `{{field}}`. PassManager fills them in on the server and redacts the results.
+  If an entry has a `base_url` field, use `{{entry.base_url}}` as the URL (optionally followed by a path, e.g.
+  `{{ai.base_url}}/models`); the base URL itself stays secret.
 - For plain `ssh`/`scp`/`git` over SSH run `passmanager ssh-agent` and use the printed `SSH_AUTH_SOCK`; for git over HTTPS run
   `passmanager git-proxy` and apply the `git config` line it prints. Private keys and tokens never leave the server.
 - Errors: `LOCKED`/`NOT_READY` → ask the user to unlock or fix the server; `DOMAIN_MISMATCH` or an unbound entry → ask the user
@@ -66,6 +68,7 @@ pub fn rules(lang: Lang) -> &'static str {
 - 使用 PassManager 的 MCP 工具（或 `passmanager` 命令行）。先调用 `list` 查看有哪些主机与条目。
 - 永远不要向用户索要口令、令牌或私钥，也不要打印、记录或保存明文。只在 `http`、`ssh`、`scp` 请求里用占位符引用：
   `{{secret}}`（目标主机对应的条目）、`{{条目}}`、`{{条目.字段}}` 或 `{{字段}}`。PassManager 在服务器上代入并对结果脱敏。
+  条目有 `base_url` 字段时，用 `{{条目.base_url}}` 作为 URL（后面可以接路径，例如 `{{ai.base_url}}/models`）；基础地址本身也是秘密。
 - 普通的 `ssh`/`scp`/基于 SSH 的 `git`：运行 `passmanager ssh-agent` 并使用它打印的 `SSH_AUTH_SOCK`；基于 HTTPS 的 git：
   运行 `passmanager git-proxy` 并执行它打印的 `git config`。私钥与令牌不会离开服务器。
 - 错误：`LOCKED`/`NOT_READY` → 请用户解锁或处理服务器；`DOMAIN_MISMATCH` 或条目未绑定域名 → 请用户在 PassManager 网页里
@@ -231,7 +234,7 @@ mod tests {
         let b = instruction_block(Lang::En);
         assert!(b.starts_with(BEGIN) && b.trim_end().ends_with(END));
         assert_eq!(b.matches(BEGIN).count(), 1);
-        assert!(b.contains("v1") && b.contains("`list`"));
+        assert!(b.contains(&format!("v{INSTRUCTIONS_VERSION}")) && b.contains("`list`") && b.contains("{{entry.base_url}}"));
         assert_eq!(Lang::parse("ZH").unwrap(), Lang::Zh);
         assert!(Lang::parse("fr").is_err());
     }

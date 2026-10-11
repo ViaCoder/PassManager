@@ -265,6 +265,47 @@ fn host_header_must_match_service() {
     }
 }
 
+/// 非 443 端口（例如单端口模式的 8121）：Host 必须带这个端口，Origin 也必须是带端口的 https 地址；
+/// 生成的地址（origin、一键接入脚本里的下载地址）都带端口。
+#[tokio::test]
+async fn non_default_port_in_host_origin_and_urls() {
+    assert!(host_ok("pm.example.com", 8121, "pm.example.com:8121"));
+    assert!(host_ok("pm.example.com", 8121, "PM.example.com.:8121"));
+    for bad in ["pm.example.com", "pm.example.com:443", "pm.example.com:8443", "pm.example.com:81210", "evil.example:8121"] {
+        assert!(!host_ok("pm.example.com", 8121, bad), "{bad}");
+    }
+    let cfg = WebConfig { domain: "pm.example.com".into(), port: 8121, agent_bin_dir: None };
+    assert_eq!(cfg.origin(), "https://pm.example.com:8121");
+    assert_eq!(WebConfig { port: 443, ..cfg }.origin(), "https://pm.example.com");
+    let o = "https://pm.example.com:8121".to_string();
+    let mk = |host: &str, origin: Option<&str>| {
+        let mut h = HeaderMap::new();
+        h.insert(header::HOST, HeaderValue::from_str(host).unwrap());
+        if let Some(v) = origin {
+            h.insert(header::ORIGIN, HeaderValue::from_str(v).unwrap());
+        }
+        h
+    };
+    let g = |m: &Method, h: &HeaderMap| guard_check("pm.example.com", 8121, &o, m, &"/".parse::<Uri>().unwrap(), h);
+    assert!(g(&Method::GET, &mk("pm.example.com:8121", None)).is_ok());
+    assert!(g(&Method::GET, &mk("pm.example.com", None)).is_err(), "缺少端口");
+    assert!(g(&Method::POST, &mk("pm.example.com:8121", Some("https://pm.example.com:8121"))).is_ok());
+    for bad in ["https://pm.example.com", "https://pm.example.com:443", "http://pm.example.com:8121"] {
+        assert!(g(&Method::POST, &mk("pm.example.com:8121", Some(bad))).is_err(), "{bad}");
+    }
+    // 一键接入脚本：下载地址带端口。
+    let mock = Arc::new(Mock::default());
+    let st =
+        AppState::new(mock, LoginLinks::new(), WebConfig { domain: "pm.test".into(), port: 8121, agent_bin_dir: Some(agent_bin_dir()) });
+    let b = axum::http::Request::builder().method(Method::GET).uri(format!("/a/{BOOT_CODE}")).header("host", "pm.test:8121");
+    let r = router(st.clone()).oneshot(b.body(Body::empty()).unwrap()).await.unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    let body = String::from_utf8(r.into_body().collect().await.unwrap().to_bytes().to_vec()).unwrap();
+    assert!(body.contains(&format!("PM_BASE='https://pm.test:8121/a/{BOOT_CODE}'")), "{body}");
+    let b = axum::http::Request::builder().method(Method::GET).uri(format!("/a/{BOOT_CODE}")).header("host", "pm.test");
+    assert_eq!(router(st).oneshot(b.body(Body::empty()).unwrap()).await.unwrap().status(), StatusCode::FORBIDDEN, "错误的端口");
+}
+
 #[test]
 fn cross_site_requests_are_rejected() {
     let o = "https://pm.test".to_string();

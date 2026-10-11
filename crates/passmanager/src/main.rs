@@ -167,7 +167,11 @@ enum Cmd {
   # 不使用 ACME：跳过证书申请，之后用 import-cert 导入
   passmanager init --domain pm.example.com --lan-cidr 198.51.100.0/24 --skip-acme
   # 重复运行是安全的：已有的密钥、库与证书保持不变，只更新指定的配置项
-  passmanager init --lan-cidr 198.51.100.0/24 --lan-cidr 203.0.113.0/24")]
+  passmanager init --lan-cidr 198.51.100.0/24 --lan-cidr 203.0.113.0/24
+  # 单端口模式（网页与 Agent 共用 8121），并允许两个额外的地址访问该端口（不含 SSH）
+  passmanager init --port 8121 --allow \"203.0.113.7 2001:db8::/32\"
+  # 清空允许列表
+  passmanager init --allow \"\"")]
     Init {
         /// 域名（证书与 Host 校验）；首次初始化时必须指定
         #[arg(long)]
@@ -184,6 +188,13 @@ enum Cmd {
         /// Agent 端口，默认 8443
         #[arg(long)]
         agent_port: Option<u16>,
+        /// 单端口模式：网页与 Agent 通道共用这个端口（按 TLS ALPN 分流），例如 --port 8121
+        #[arg(long, conflicts_with_all = ["web_port", "agent_port"])]
+        port: Option<u16>,
+        /// 额外允许访问服务端口的 IPv4 / IPv6 地址或网段（可重复；一个值可含多个以空格分隔的条目；
+        /// 给空字符串表示清空）。与 --lan-cidr 不同，防火墙不为它们开放 SSH
+        #[arg(long = "allow")]
+        allow: Option<Vec<String>>,
         /// 从标准输入读取 Cloudflare API token（第一行），用设备密钥封存
         #[arg(long)]
         cf_token_stdin: bool,
@@ -282,6 +293,15 @@ TLS 握手失败时从固定的发布源码构建客户端的步骤，以及使�
     /// 内部：一键接入用的 Agent 程序目录（安装脚本使用）
     #[command(hide = true)]
     AgentBinDir,
+    /// 内部：校验 IP 地址 / 网段列表（安装脚本与服务使用同一个解析器）；每个有效条目输出"4 条目"或"6 条目"
+    #[command(hide = true)]
+    CheckNet {
+        /// 只接受 IPv4（局域网网段）
+        #[arg(long)]
+        v4_only: bool,
+        /// 条目（每个参数可含多个以空格分隔的条目）
+        entries: Vec<String>,
+    },
     /// 构建信息：版本、发布标签与提交（只有从发布标签构建时才有后两项）
     #[command(hide = true)]
     BuildInfo,
@@ -432,6 +452,8 @@ fn main() -> ExitCode {
             bind,
             web_port,
             agent_port,
+            port,
+            allow,
             cf_token_stdin,
             skip_acme,
             acme_directory,
@@ -445,6 +467,8 @@ fn main() -> ExitCode {
             bind,
             web_port,
             agent_port,
+            port,
+            allow,
             acme_directory,
             acme_root_pem,
             dns,
@@ -480,6 +504,16 @@ fn main() -> ExitCode {
             match b.pinned() {
                 Some((tag, commit)) => println!("version {}\ntag {tag}\ncommit {commit}", b.version),
                 None => println!("version {}\ntag none (development build)\ncommit none", b.version),
+            }
+            ExitCode::SUCCESS
+        }
+        Some(Cmd::CheckNet { v4_only, entries }) => {
+            for e in server_opts::split_allow(&entries) {
+                match pm_platform::paths::parse_net(&e) {
+                    Ok((ip, _)) if v4_only && !ip.is_ipv4() => return install::fail(format!("局域网网段只支持 IPv4：{e}")),
+                    Ok((ip, _)) => println!("{} {e}", if ip.is_ipv4() { 4 } else { 6 }),
+                    Err(m) => return install::fail(m),
+                }
             }
             ExitCode::SUCCESS
         }

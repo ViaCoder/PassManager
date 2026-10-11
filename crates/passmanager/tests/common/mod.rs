@@ -90,6 +90,11 @@ impl Env {
 
     /// 初始化服务器（用户模式）、导入自签证书、启动服务、注册一个 Agent。
     pub fn setup(tag: &str) -> Self {
+        Self::setup_with(tag, false)
+    }
+
+    /// `single`：单端口模式（网页与 Agent 通道共用一个端口，按 ALPN 分流）。
+    pub fn setup_with(tag: &str, single: bool) -> Self {
         let base = PathBuf::from("/tmp").join(format!("pm-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         std::fs::create_dir_all(&base).unwrap();
@@ -100,32 +105,26 @@ impl Env {
         let mut env = Env {
             home: base.join("server"),
             agent_dir: base.join("agent"),
-            web: free_port(),
-            agent: free_port(),
+            web: 0,
+            agent: 0,
             ca,
             service_log: base.join("service.log"),
             base,
             child: None,
         };
         std::fs::create_dir_all(&env.home).unwrap();
+        env.web = free_port();
+        env.agent = if single { env.web } else { free_port() };
         let (w, a) = (env.web.to_string(), env.agent.to_string());
-        let o = env.run(&[
-            "init",
-            "--skip-acme",
-            "--no-start",
-            "--domain",
-            "pm.test",
-            "--lan-cidr",
-            "127.0.0.1/32",
-            "--bind",
-            "127.0.0.1",
-            "--web-port",
-            &w,
-            "--agent-port",
-            &a,
-            "--acme-directory",
-            "",
-        ]);
+        let mut args =
+            vec!["init", "--skip-acme", "--no-start", "--domain", "pm.test", "--lan-cidr", "127.0.0.1/32", "--bind", "127.0.0.1"];
+        if single {
+            args.extend(["--port", w.as_str()]);
+        } else {
+            args.extend(["--web-port", w.as_str(), "--agent-port", a.as_str()]);
+        }
+        args.extend(["--acme-directory", ""]);
+        let o = env.run(&args);
         assert!(o.status.success(), "init: {}{}", stdout(&o), stderr(&o));
         let o = env.run(&["import-cert", env.ca.to_str().unwrap(), env.base.join("key.pem").to_str().unwrap()]);
         assert!(o.status.success(), "{}", stderr(&o));

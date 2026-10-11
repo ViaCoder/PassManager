@@ -93,6 +93,11 @@ passmanager agent-setup --label laptop --lang zh                           # 打
   git clone / push 经服务器转发，由服务器加上保存的令牌（`Authorization: Basic x-access-token:<PAT>`）。
   Agent 机器拿不到令牌；只允许 HTTPS、只用于条目的域名、不跟随重定向。
 
+- **单端口模式与 IP 允许列表**：`install-server.sh --port 8121` 在一个端口上同时提供网页与 Agent 通道（按 TLS ALPN 分流），
+  `--allow "203.0.113.7 2001:db8::/32"` 让额外的地址访问这个端口（但不能访问 SSH）；防火墙与服务使用同一份列表。
+- **基础地址占位符**：条目可以在 `base_url` 字段里保存需要保密的基础地址（例如 AI 网关的地址）；Agent 调用
+  `{{ai.base_url}}/models`，地址在服务器上代入，按条目的域名检查，并从结果中脱敏。
+
 完整步骤：[docs/DEPLOY-LAN.zh-CN.md](docs/DEPLOY-LAN.zh-CN.md)。设计：[docs/DESIGN.zh-CN.md](docs/DESIGN.zh-CN.md) §10。
 
 ## 卸载

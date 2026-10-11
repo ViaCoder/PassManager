@@ -67,6 +67,25 @@ pub fn variants(secret: &str) -> Vec<Vec<u8>> {
     }
     let html = secret.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;").replace('\'', "&#39;");
     push(&mut out, html.into_bytes());
+    // 值是 URL（例如保存在 base_url 字段里的网关地址，路径里有账号标识）：路径（含查询）也单独脱敏——
+    // 上游常在错误信息或请求回显里只给出路径。
+    if let Ok(u) = url::Url::parse(trimmed)
+        && matches!(u.scheme(), "https" | "http")
+    {
+        let mut path = u.path().to_string();
+        if let Some(q) = u.query() {
+            path.push('?');
+            path.push_str(q);
+        }
+        let path = path.trim_end_matches('/');
+        if path.len() >= 8 && path != trimmed {
+            for v in variants(path) {
+                if !out.contains(&v) {
+                    out.push(v);
+                }
+            }
+        }
+    }
     // 多行的值（PEM 私钥、多行口令）：每一行（≥ 8 个字符）也按全部编码单独脱敏。
     if secret.contains('\n') {
         for line in secret.lines() {
@@ -204,5 +223,18 @@ mod tests {
         let r = Redactor::build([("srv", pem)]);
         let s = r.redact_str("leak: AAAAMwAAAAtzc2gtZWQyNTUxOQAAACD0aQ end");
         assert!(s.contains("[REDACTED:srv]"));
+    }
+
+    #[test]
+    fn url_values_also_redact_their_path() {
+        let gw = "https://gateway.example.com/v1/acct-7f3e/gw-x/compat/chat/completions";
+        let r = Redactor::build([("ai.base_url", gw)]);
+        let echo = "GET /v1/acct-7f3e/gw-x/compat/chat/completions/models HTTP/1.1";
+        let out = r.redact_str(echo);
+        assert!(!out.contains("acct-7f3e"), "{out}");
+        assert!(r.redact_str(&format!("see {gw}")).contains("[REDACTED:ai.base_url]"));
+        // 只有主机（没有路径）的值：不会把常见的短路径当作秘密。
+        let r2 = Redactor::build([("x", "https://gateway.example.com")]);
+        assert_eq!(r2.redact_str("GET / HTTP/1.1"), "GET / HTTP/1.1");
     }
 }

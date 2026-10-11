@@ -4,6 +4,18 @@ English | [简体中文](CHANGELOG.zh-CN.md)
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.3.5] - 2026-10-11
+
+### Added
+
+- **Single-port mode**: `install-server.sh --port N` (site file `PORT`, `passmanager init --port N`) serves the web UI and the agent channel on one TLS port and dispatches on the negotiated ALPN — only clients asking for `pm-inner/1` alone reach the agent channel (same inner handshake and TLS-exporter binding); `h2`, `http/1.1`, no ALPN and browser-style offers get the web UI. Every generated address carries the port (web origin, login link, agent-setup one-liner, bootstrap downloads, `pm-enroll://` codes) and the web Host/Origin checks require it. Equal web and agent ports now mean single-port mode. Two-port mode (443/8443) is unchanged and remains the default.
+- **IP allowlist**: `--allow` (repeatable, several space-separated entries per value; site file `ALLOW_IPS`) adds IPv4/IPv6 addresses or CIDRs that may reach the service port(s) but not SSH; `--lan-cidr` keeps access to SSH and the service. nftables and the service's own source check (web and agent channel) use the same list; `127.0.0.1`/`::1` are always allowed by the service. Entries are validated by the service's parser before the installer changes anything (host bits must be zero); an invalid list in the configuration is a configuration error (exit 78). IPv6 entries are written before the IPv6 drop rule and the installer warns that they have no effect while IPv6 is disabled. Re-running the installer replaces the old rules and listeners.
+- **Base-URL placeholders**: an http URL may start with `{{entry}}` / `{{entry.field}}` (for example `{{ai.base_url}}/models`): the stored value is used raw as the base URL (absolute https, no user info), the rest is appended, and the resulting host must be bound to that entry and to every other placeholder. The URL never appears in messages, logs or responses; URL values are also redacted by path. MCP tool description and agent rules (version 2) mention it.
+
+### Fixed
+
+- `passmanager init` rewrote the systemd unit with only the `tss` group, dropping the swtpm socket/directory groups the installer had added; it now computes the same groups.
+
 ## [0.3.4] - 2026-10-11
 
 ### Fixed

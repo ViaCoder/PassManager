@@ -339,7 +339,12 @@ header v2 = v1 fields + mode byte (device-only); the header hash remains the AAD
 - Placeholders: `{{secret}}` = the single value of the entry selected by host (an error for multi-field entries, telling the agent to
   name a field); `{{name}}` = a named single-value entry; `{{name.field}}`; `{{field}}` only when exactly one entry matches the host.
   Errors never list other entries' fields. `sudo` uses the `password` field (or the single value of a password entry).
-- Redaction covers every field value in all encodings, also per line for multi-line values (≥ 8 characters per line).
+- A URL that starts with `{{entry}}` / `{{entry.field}}` (typically `{{ai.base_url}}`, optionally followed by a path or query) uses
+  that value raw as the base: it must be an absolute https URL without user info, the text after it must not change scheme, host,
+  port or user info, and the resulting host must be bound to that entry and to every other placeholder in the request. Messages and
+  logs name the placeholder, never the URL. `{{secret}}` and bare field names cannot start a URL (they depend on the host).
+- Redaction covers every field value in all encodings, also per line for multi-line values (≥ 8 characters per line); for URL values
+  also the path and query on their own.
 - SSH: when a key entry and a password entry both match the host, the key is tried first; the password entry is used only if the key is rejected and the server still offers `password` / `keyboard-interactive` (e.g. a default initial password bound to `*.example.com` and a LAN CIDR with `--ops ssh`). `sudo` uses the password entry.
 - SSH key entries (`ssh-key`) hold an unencrypted private key; only the public key and its SHA-256 fingerprint are ever displayed.
   Host keys bound to the entry (`SHA256:…`) are checked in addition to the TOFU pin store.

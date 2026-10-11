@@ -77,10 +77,6 @@ fn give_back(l: &Layout) -> Result<(), String> {
     Ok(())
 }
 
-fn tss_group() -> Option<String> {
-    nix::unistd::Group::from_name("tss").ok().flatten().map(|g| g.name)
-}
-
 // ---------------- init ----------------
 
 pub use crate::server_opts::{InitOpts, merge_config};
@@ -114,13 +110,13 @@ fn init_inner(o: &InitOpts) -> Result<(), String> {
     let cfg = merge_config(prev.as_ref().and_then(|p| p.server.clone()), o);
     cfg.validate()?;
     sl::set_tpm_socket(cfg.tpm_socket.clone().map(Into::into));
-    println!(
-        "== 初始化 PassManager 服务器（{}，网页 {} / Agent {}，只允许 {}）==",
-        cfg.domain,
-        cfg.web_port,
-        cfg.agent_port,
-        cfg.lan.join(", ")
-    );
+    let ports = if cfg.single_port() {
+        format!("单端口 {}", cfg.web_port)
+    } else {
+        format!("网页 {} / Agent {}", cfg.web_port, cfg.agent_port)
+    };
+    let allow = if cfg.allow.is_empty() { String::new() } else { format!("，以及 {}", cfg.allow.join(", ")) };
+    println!("== 初始化 PassManager 服务器（{}，{ports}，只允许局域网 {}{allow}）==", cfg.domain, cfg.lan.join(", "));
 
     std::fs::create_dir_all(&l.data_dir).map_err(|e| e.to_string())?;
     if l.mode == Mode::System {
@@ -207,7 +203,10 @@ fn init_inner(o: &InitOpts) -> Result<(), String> {
     if l.mode == Mode::System && Path::new("/run/systemd/system").exists() {
         let mut out = std::fs::File::create(LINUX_TMPFILES_PATH).map_err(|e| e.to_string())?;
         std::io::Write::write_all(&mut out, linux_server_tmpfiles(&info, &l).as_bytes()).map_err(|e| e.to_string())?;
-        std::fs::write(LINUX_UNIT_PATH, linux_server_unit(&info, &l, tss_group().as_deref())).map_err(|e| e.to_string())?;
+        // 与安装脚本相同：tss，以及只对组开放的 swtpm 套接字及其目录的组（不能只写 tss，否则会覆盖安装脚本的设置）。
+        let groups = sl::service_tpm_groups().join(" ");
+        std::fs::write(LINUX_UNIT_PATH, linux_server_unit(&info, &l, Some(groups.as_str()).filter(|g| !g.is_empty())))
+            .map_err(|e| e.to_string())?;
         chown_mode(Path::new(LINUX_TMPFILES_PATH), 0, 0, 0o644)?;
         chown_mode(Path::new(LINUX_UNIT_PATH), 0, 0, 0o644)?;
         run("systemd-tmpfiles", &["--create", LINUX_TMPFILES_PATH])?;
@@ -435,8 +434,15 @@ pub fn status() -> ExitCode {
 
 fn print_status(s: &ServerStatusView) {
     let yes = |b: bool, t: &str, f: &str| if b { format!("{GREEN}{t}{RESET}") } else { format!("{RED}{f}{RESET}") };
-    println!("域名           {}（网页 :{}，Agent :{}）", s.domain, s.web_port, s.agent_port);
+    if s.web_port == s.agent_port {
+        println!("域名           {}（网页与 Agent 共用端口 :{}）", s.domain, s.web_port);
+    } else {
+        println!("域名           {}（网页 :{}，Agent :{}）", s.domain, s.web_port, s.agent_port);
+    }
     println!("允许的网段     {}", s.lan.join(", "));
+    if !s.allow.is_empty() {
+        println!("允许列表       {}（只开放服务端口）", s.allow.join(", "));
+    }
     println!(
         "密码库         {}，{}",
         if s.initialized { yes(!s.locked, "已解锁", "已锁定") } else { format!("{RED}未初始化{RESET}") },

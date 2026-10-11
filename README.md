@@ -99,6 +99,13 @@ What else 0.2.0 adds on top of `http` / `ssh` / `scp`:
   exact line) git clones and pushes through the server, which adds the stored token (`Authorization: Basic x-access-token:<PAT>`).
   The agent machine never receives the token; only HTTPS, only the entry's domains, no redirects.
 
+- **Single-port mode and IP allowlist**: `install-server.sh --port 8121` serves the web UI and the agent channel on one port
+  (split by TLS ALPN), and `--allow "203.0.113.7 2001:db8::/32"` lets extra addresses reach that port (but not SSH); the firewall
+  and the service enforce the same list.
+- **Base-URL placeholders**: an entry can store a confidential base URL (for example an AI gateway endpoint) in a `base_url`
+  field; agents call `{{ai.base_url}}/models` and the URL is substituted on the server, checked against the entry's domains and
+  redacted from results.
+
 Full walkthrough: [docs/DEPLOY-LAN.md](docs/DEPLOY-LAN.md). Design: [docs/DESIGN.md](docs/DESIGN.md) §10.
 
 ## Uninstall

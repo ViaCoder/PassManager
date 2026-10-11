@@ -8,12 +8,18 @@
 #        不申请证书（之后用 passmanager import-cert 导入）
 #   ./install-server.sh --site-file site.local.env < cf-token
 #        从本地站点配置文件读取参数（KEY=VALUE；只认下面列出的键，不会当作脚本执行）
+#   ./install-server.sh --domain pm.example.com --port 8121 --lan-cidr 198.51.100.0/24 \
+#        --allow "203.0.113.7 203.0.113.64/26" --skip-acme
+#        单端口模式（只有一个端口可用时，例如经端口转发）；允许列表中的地址只能访问服务端口，不能访问 SSH
 #
 # 选项（域名与网段没有默认值，必须给出）：
 #   --domain NAME        服务域名（证书与 Host 校验）                       站点文件键 DOMAIN
-#   --lan-cidr CIDR      允许访问的 IPv4 网段，可重复                      站点文件键 LAN_CIDRS（空格分隔）
-#   --web-port N         网页端口（默认 443）                              站点文件键 WEB_PORT
-#   --agent-port N       Agent 端口（默认 8443）                           站点文件键 AGENT_PORT
+#   --lan-cidr CIDR      局域网 IPv4 网段，可重复；可访问 SSH（22）与服务端口  站点文件键 LAN_CIDRS（空格分隔）
+#   --allow "列表"       额外允许访问服务端口（不含 SSH）的 IPv4 / IPv6 地址或网段，可重复，
+#                        一个值可含多个以空格分隔的条目                    站点文件键 ALLOW_IPS（空格分隔）
+#   --port N             单端口模式：网页与 Agent 通道共用这个端口（按 TLS ALPN 分流）  站点文件键 PORT
+#   --web-port N         网页端口（默认 443；两端口模式）                  站点文件键 WEB_PORT
+#   --agent-port N       Agent 端口（默认 8443；两端口模式）               站点文件键 AGENT_PORT
 #   --tpm-socket PATH    可选：swtpm 的 Unix 数据套接字；不给时只自动检测 /dev/tpmrm0   站点文件键 TPM_SOCKET
 #   --agent-bundle DIR   可选：放有发布包（PassManager-<版本>-<目标>.tar.gz，可附 SHA256SUMS）的目录，
 #                        供一键接入（passmanager agent-setup）给其他平台的 Agent 机器下载；本机程序总会提供
@@ -26,7 +32,8 @@
 #   1. 安装 /usr/local/bin/PassManager（以及小写别名 passmanager）；
 #   2. 专用系统账户 passmanager（不可登录）；root 加入 tss 组；发现 TPM 时安装 tss2 运行库；
 #   3. /etc/sysctl.d/99-disable-ipv6.conf（all/default/lo 关闭 IPv6）并立即应用；
-#   4. nftables：独立的 inet passmanager 表，只允许给定网段访问 22 与网页 / Agent 端口，丢弃其余入站与全部 IPv6；
+#   4. nftables：独立的 inet passmanager 表（每次整体替换）：局域网可访问 22 与服务端口，允许列表只能访问服务端口，
+#      丢弃其余入站与全部 IPv6（允许列表里的 IPv6 条目在 IPv6 关闭时不起作用，会给出警告）；
 #   5. systemd 单元（加固沙箱、network-online、有限次重试、78 不重启）；
 #   6. passmanager init：设备密钥（有 TPM 用 L3，否则 L2）、内层通道密钥、无口令密码库、证书，启动服务。
 #
@@ -38,6 +45,9 @@ DOMAIN=""
 LANS=()
 WEB_PORT=""
 AGENT_PORT=""
+PORT=""
+ALLOWS=()
+ALLOW_GIVEN=0
 SKIP_ACME=0
 TPM_SOCKET=""
 SITE_FILE=""
@@ -53,6 +63,8 @@ while [ $# -gt 0 ]; do
     --domain) DOMAIN="${2:?--domain 需要参数}"; shift 2 ;;
     --lan-cidr|--lan) LANS+=("${2:?--lan-cidr 需要参数}"); shift 2 ;;
     --web-port) WEB_PORT="${2:?--web-port 需要参数}"; shift 2 ;;
+    --port) PORT="${2:?--port 需要参数}"; shift 2 ;;
+    --allow) read -r -a _a <<< "${2?--allow 需要参数}"; ALLOWS+=("${_a[@]}"); ALLOW_GIVEN=1; shift 2 ;;
     --agent-port) AGENT_PORT="${2:?--agent-port 需要参数}"; shift 2 ;;
     --tpm-socket) TPM_SOCKET="${2:?--tpm-socket 需要参数}"; shift 2 ;;
     --site-file) SITE_FILE="${2:?--site-file 需要参数}"; shift 2 ;;
@@ -75,6 +87,8 @@ if [ -n "$SITE_FILE" ]; then
       DOMAIN) [ -n "$DOMAIN" ] || DOMAIN="$val" ;;
       LAN_CIDRS) if [ ${#LANS[@]} -eq 0 ]; then read -r -a LANS <<< "$val"; fi ;;
       WEB_PORT) [ -n "$WEB_PORT" ] || WEB_PORT="$val" ;;
+      PORT) [ -n "$PORT" ] || PORT="$val" ;;
+      ALLOW_IPS) if [ "${ALLOW_GIVEN:-0}" != 1 ]; then read -r -a ALLOWS <<< "$val"; fi ;;
       AGENT_PORT) [ -n "$AGENT_PORT" ] || AGENT_PORT="$val" ;;
       TPM_SOCKET) [ -n "$TPM_SOCKET" ] || TPM_SOCKET="$val" ;;
       AGENT_BUNDLE) [ -n "$AGENT_BUNDLE" ] || AGENT_BUNDLE="$val" ;;
@@ -84,8 +98,14 @@ if [ -n "$SITE_FILE" ]; then
   done < "$SITE_FILE"
 fi
 
+if [ -n "$PORT" ] && { [ -n "$WEB_PORT" ] || [ -n "$AGENT_PORT" ]; }; then
+  echo "--port（单端口模式）不能与 --web-port / --agent-port 同时使用" >&2; exit 2
+fi
 WEB_PORT="${WEB_PORT:-443}"
 AGENT_PORT="${AGENT_PORT:-8443}"
+if [ -n "$PORT" ]; then
+  WEB_PORT="$PORT"; AGENT_PORT="$PORT"
+fi
 [ -n "$DOMAIN" ] || { echo "必须指定 --domain（没有默认值）" >&2; exit 2; }
 [ ${#LANS[@]} -gt 0 ] || { echo "必须至少指定一个 --lan-cidr（没有默认值；服务不会在没有网段限制时监听网络）" >&2; exit 2; }
 for c in "${LANS[@]}"; do
@@ -98,7 +118,13 @@ case "$DOMAIN" in
 esac
 for p in "$WEB_PORT" "$AGENT_PORT"; do
   case "$p" in ''|*[!0-9]*) echo "端口无效：$p" >&2; exit 2 ;; esac
+  if [ "$p" -lt 1 ] || [ "$p" -gt 65535 ]; then echo "端口无效：$p" >&2; exit 2; fi
 done
+if [ "$WEB_PORT" = "$AGENT_PORT" ]; then
+  PORTS="$WEB_PORT"
+else
+  PORTS="$WEB_PORT, $AGENT_PORT"
+fi
 case "$TPM_SOCKET" in
   ""|/*) ;;
   *) echo "--tpm-socket 必须是绝对路径" >&2; exit 2 ;;
@@ -130,6 +156,21 @@ warn() { printf '\033[33m警告：%s\033[0m\n' "$*" >&2; }
 BIN_SRC="$HERE/PassManager"
 [ -x "$BIN_SRC" ] || BIN_SRC="$HERE/../PassManager"
 [ -x "$BIN_SRC" ] || { echo "找不到 PassManager 可执行文件（应与本脚本放在同一目录）" >&2; exit 1; }
+
+# 网段与允许列表用服务本身的解析器校验（防火墙与应用层使用同一份、同样解释的列表），在修改任何东西之前。
+"$BIN_SRC" check-net --v4-only "${LANS[@]}" > /dev/null || { echo "局域网网段无效（见上）" >&2; exit 2; }
+ALLOW4=()
+ALLOW6=()
+if [ ${#ALLOWS[@]} -gt 0 ]; then
+  NETS="$("$BIN_SRC" check-net "${ALLOWS[@]}")" || { echo "--allow / ALLOW_IPS 中有无效条目（见上）" >&2; exit 2; }
+  while read -r fam e; do
+    [ -n "$e" ] || continue
+    if [ "$fam" = 4 ]; then ALLOW4+=("$e"); else ALLOW6+=("$e"); fi
+  done <<< "$NETS"
+fi
+SVC_V4_SET="$(IFS=,; printf '%s' "${LANS[*]}${ALLOW4[*]:+,${ALLOW4[*]}}" | sed 's/,/, /g')"
+ALLOW6_SET="$(IFS=,; printf '%s' "${ALLOW6[*]}" | sed 's/,/, /g')"
+ALLOW_ALL="${ALLOWS[*]}"
 
 # ---- 1. 程序 ----
 say "安装程序"
@@ -203,7 +244,14 @@ if ! sysctl -p "$SYSCTL_FILE" >/dev/null 2>&1; then
 fi
 
 # ---- 4. nftables ----
-say "防火墙（只允许 $LAN_SET 访问 22/$WEB_PORT/$AGENT_PORT）"
+say "防火墙（局域网 $LAN_SET → 22 与 $PORTS；${ALLOW4[*]:+允许列表 ${ALLOW4[*]} → $PORTS}）"
+if [ ${#ALLOW6[@]} -gt 0 ]; then
+  warn "允许列表中的 IPv6 条目（${ALLOW6[*]}）不起作用：本脚本关闭了 IPv6，防火墙也丢弃全部 IPv6。需要时请自行启用 IPv6。"
+fi
+IP6_RULE=""
+if [ -n "$ALLOW6_SET" ]; then
+  IP6_RULE="ip6 saddr { $ALLOW6_SET } tcp dport { $PORTS } ct state new accept"
+fi
 NFT_DIR="$ROOT/etc/nftables.d"
 NFT_FILE="$NFT_DIR/passmanager.nft"
 install -d -m 0755 "$NFT_DIR"
@@ -215,11 +263,13 @@ table inet passmanager {
 	chain input {
 		type filter hook input priority filter - 1; policy drop;
 		iif "lo" accept
+		${IP6_RULE:-# 没有 IPv6 允许条目}
 		meta nfproto ipv6 drop
 		ct state invalid drop
 		ct state established,related accept
 		ip protocol icmp accept
-		ip saddr { $LAN_SET } tcp dport { 22, $WEB_PORT, $AGENT_PORT } ct state new accept
+		ip saddr { $LAN_SET } tcp dport 22 ct state new accept
+		ip saddr { $SVC_V4_SET } tcp dport { $PORTS } ct state new accept
 	}
 }
 EOF
@@ -234,7 +284,7 @@ fi
 if nft -c -f "$NFT_FILE" && nft -f "$NFT_FILE"; then
   systemctl enable nftables.service >/dev/null 2>&1 || warn "无法启用 nftables.service（重启后规则需要手动加载）"
 else
-  warn "nftables 规则加载失败（容器可能没有 CAP_NET_ADMIN）。应用内仍会拒绝 $LAN_SET 以外的来源。"
+  warn "nftables 规则加载失败（容器可能没有 CAP_NET_ADMIN）。应用内仍会拒绝局域网与允许列表以外的来源。"
 fi
 
 # ---- 5. systemd 单元 ----
@@ -251,7 +301,13 @@ systemctl daemon-reload
 
 # ---- 6. 初始化 ----
 say "初始化（设备密钥、内层通道密钥、无口令密码库、证书）"
-INIT_ARGS=(init --domain "$DOMAIN" --web-port "$WEB_PORT" --agent-port "$AGENT_PORT")
+if [ -n "$PORT" ]; then
+  INIT_ARGS=(init --domain "$DOMAIN" --port "$PORT")
+else
+  INIT_ARGS=(init --domain "$DOMAIN" --web-port "$WEB_PORT" --agent-port "$AGENT_PORT")
+fi
+# 允许列表总是整体传给 init（空字符串表示清空），重复运行时与本次参数一致。
+INIT_ARGS+=(--allow "$ALLOW_ALL")
 for c in "${LANS[@]}"; do INIT_ARGS+=(--lan-cidr "$c"); done
 [ -n "$TPM_SOCKET" ] && INIT_ARGS+=(--tpm-socket "$TPM_SOCKET")
 NO_CERT="$SKIP_ACME"

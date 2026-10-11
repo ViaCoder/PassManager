@@ -50,6 +50,28 @@ ss -tlnp | grep -E ':(443|8443)\b'; ip -6 addr; nft list table inet passmanager
 systemd-analyze security passmanager; journalctl -u passmanager -n 30 --no-pager
 ```
 
+### 单端口模式与 IP 允许列表
+
+只有一个端口能到达服务器时（例如只转发一个 TCP 端口的转发器），用单端口模式：一个 TLS 监听同时提供网页与 Agent 通道，
+按 TLS 的 ALPN 区分（Agent 用 `pm-inner/1`；浏览器用 `h2`、`http/1.1` 或不带 ALPN）。所有生成的地址都带这个端口
+（`https://pm.example.com:8121`、`pm-enroll://pm.example.com:8121/…`、接入说明的一行命令、登录链接）。
+
+```sh
+./install-server.sh --domain pm.example.com --port 8121 \
+    --lan-cidr 198.51.100.0/24 \
+    --allow "203.0.113.7 203.0.113.64/26" --allow 2001:db8::/32 --skip-acme
+# 站点文件：PORT=8121   ALLOW_IPS="203.0.113.7 203.0.113.64/26"
+```
+
+- `--lan-cidr`（局域网）：可以访问 SSH（22）与服务端口。
+- `--allow` / `ALLOW_IPS`：只能访问服务端口（不能访问 SSH）的 IPv4 / IPv6 地址或网段；一个值可以含多个以空格分隔的条目。
+  防火墙与服务本身（网页与 Agent 通道）使用同一份列表；服务总是允许 `127.0.0.1` 与 `::1`。无效条目（例如主机位不为 0 的网段）
+  会让安装脚本在修改任何东西之前退出；服务配置里的无效列表是配置错误（退出码 78）。
+- IPv6 条目：安装脚本关闭了 IPv6 并丢弃全部 IPv6，所以在你自行启用 IPv6 之前它们不起作用（脚本会给出警告）。
+- 重新运行安装脚本会整体替换 `inet passmanager` 表与服务配置：从 `--web-port/--agent-port` 换成 `--port`（或反过来）不会留下旧的规则或监听。
+- 已注册的 Agent：端口变更后，把 `~/.config/passmanager/remote.toml` 里的 `port` 改成新端口（固定的服务端指纹不变），
+  或者用新的 `passmanager agent-setup` 文字重新注册。
+
 ## 2. 网页管理
 
 ```sh
@@ -100,7 +122,8 @@ passmanager import --name pin --interactive                                     
 
 内容原样保存（只去掉末尾一个换行，上限 64 KiB），从不回显或写入日志，只打印 `已导入 <名称>（<n> 字节，<k> 个域名）`。
 没有 `--domain` 的条目显示为"未绑定域名"，在网页里添加域名之前 Agent 无法使用。占位符：`{{secret}}`（单值条目）、
-`{{名称.字段}}`、`{{字段}}`（只有一个条目匹配该主机时）；`sudo` 使用 `password` 字段。
+`{{名称.字段}}`、`{{字段}}`（只有一个条目匹配该主机时）；`sudo` 使用 `password` 字段。需要保密的基础地址（例如 AI 网关的地址）
+放进 `base_url` 字段（`--fields base_url,api_key`）；Agent 用 `{{ai.base_url}}/models` 作为 URL，并带 `Authorization: Bearer {{ai.api_key}}`。
 
 绑定可以是精确主机、`*.example.com`（只匹配子域名，不含顶点域名本身）、IP 或网段（如 `198.51.100.0/24`，只匹配直接用 IP 访问的目标），
 都可以加 `:端口`；多个条目匹配时用最具体的。新机器的默认初始 SSH 口令（只用于 SSH，且只在已保存的私钥被拒后才使用）：

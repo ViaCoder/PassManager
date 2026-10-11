@@ -151,18 +151,44 @@ pub(crate) fn join_groups_for(ops: &mut dyn GroupOps, path: &Path) -> io::Result
     // 先目录（否则连套接字本身都 stat 不到），再套接字。
     if let Some(parent) = path.parent()
         && let Ok((mode, gid)) = ops.stat(parent)
-        && mode & 0o001 == 0
-        && mode & 0o010 != 0
+        && group_only(mode, true)
     {
         join(ops, gid, &mut added)?;
     }
     if let Ok((mode, gid)) = ops.stat(path)
-        && mode & 0o006 != 0o006
-        && mode & 0o060 == 0o060
+        && group_only(mode, false)
     {
         join(ops, gid, &mut added)?;
     }
     Ok(added)
+}
+
+/// 目录或套接字只对组开放（对其他人不开放）时需要的组：目录看 x 位，套接字 / 设备看 rw 位。
+fn group_only(mode: u32, dir: bool) -> bool {
+    if dir { mode & 0o001 == 0 && mode & 0o010 != 0 } else { mode & 0o006 != 0o006 && mode & 0o060 == 0o060 }
+}
+
+/// 服务账户访问配置的 swtpm 套接字所需的附加组（写进 systemd 单元的 SupplementaryGroups）：
+/// tss（存在时），以及套接字所在目录与套接字本身只对组开放时它们的组。只返回有名字的组，跳过 root 与 nogroup。
+pub fn service_tpm_groups() -> Vec<String> {
+    ensure_tpm_access();
+    let mut gids: Vec<u32> = RealOps.tss_gid().into_iter().collect();
+    if let Some(s) = socket_path() {
+        for (p, dir) in [(s.parent().map(Path::to_path_buf), true), (Some(s.clone()), false)] {
+            if let Some(p) = p
+                && let Ok((mode, gid)) = RealOps.stat(&p)
+                && group_only(mode, dir)
+                && !gids.contains(&gid)
+            {
+                gids.push(gid);
+            }
+        }
+    }
+    gids.into_iter()
+        .filter(|g| *g != 0)
+        .filter_map(|g| nix::unistd::Group::from_gid(nix::unistd::Gid::from_raw(g)).ok().flatten().map(|g| g.name))
+        .filter(|n| n != "nogroup" && n != "root")
+        .collect()
 }
 
 static JOINED: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
@@ -852,8 +878,8 @@ mod tests {
     }
 
     const TSS: u32 = 107;
-    const SOCK_DIR: &str = "/var/lib/swtpm-host";
-    const SOCK: &str = "/var/lib/swtpm-host/tpm.sock";
+    const SOCK_DIR: &str = "/run/swtpm-test";
+    const SOCK: &str = "/run/swtpm-test/tpm.sock";
 
     impl GroupOps for FakeOps {
         fn is_root(&self) -> bool {
@@ -892,6 +918,12 @@ mod tests {
             }
             Err(io::Error::from_raw_os_error(libc::ENOENT))
         }
+    }
+
+    #[test]
+    fn group_only_permission_bits() {
+        assert!(group_only(0o040750, true) && !group_only(0o040755, true) && !group_only(0o040700, true));
+        assert!(group_only(0o140660, false) && group_only(0o140664, false) && !group_only(0o140666, false) && !group_only(0o140600, false));
     }
 
     /// 加入组发生在访问之前：没有附加组的 root 先加入目录与套接字的组，之后才能 stat 套接字；

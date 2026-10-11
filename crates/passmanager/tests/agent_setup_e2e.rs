@@ -171,11 +171,22 @@ fn one_liner(text: &str) -> (String, String) {
 
 #[test]
 fn one_line_agent_setup() {
+    run_agent_setup(false);
+}
+
+/// 单端口模式（网页与 Agent 通道共用一个端口，按 ALPN 分流）：同样的完整流程，所有地址都带这个端口。
+#[test]
+fn one_line_agent_setup_single_port() {
+    run_agent_setup(true);
+}
+
+fn run_agent_setup(single: bool) {
     if !have("curl") || !have("sha256sum") {
         eprintln!("跳过：没有 curl 或 sha256sum");
         return;
     }
-    let env = Env::setup("agentsetup");
+    let env = Env::setup_with(if single { "agentsetup1" } else { "agentsetup2" }, single);
+    assert_eq!(env.web == env.agent, single);
     // 服务器的 Agent 程序目录：放一个"客户端"包装脚本（转调测试构建的程序，并带上测试用的连接地址与 CA）。
     let o = env.run(&["agent-bin-dir"]);
     let bin_dir = std::path::PathBuf::from(stdout(&o).trim());
@@ -264,6 +275,59 @@ fn one_line_agent_setup() {
         let o = client_list(&h2, set, remove);
         assert!(o.status.success(), "{what}: {}{}", stdout(&o), stderr(&o));
     }
+    // 经服务器代为发出 HTTP 请求（本地回显服务），密钥只在服务器上代入，结果脱敏。
+    let echo = echo_server();
+    let dom = format!("127.0.0.1:{echo}");
+    let o = env.run_stdin(&["import", "--name", "echo-key", "--domain", &dom, "--self-signed"], b"EchoSecret-0123456789\n");
+    assert!(o.status.success(), "{}", stderr(&o));
+    let o = Command::new(BIN)
+        .args(["http", &format!("https://{dom}/x"), "-H", "Authorization: Bearer {{secret}}"])
+        .env("HOME", &h2)
+        .env_remove("PASSMANAGER_CONFIG_DIR")
+        .env_remove("PASSMANAGER_HOME")
+        .output()
+        .unwrap();
+    let out = stdout(&o);
+    assert!(o.status.success() && out.contains("[REDACTED:echo-key]") && !out.contains("EchoSecret-0123456789"), "{out}{}", stderr(&o));
+    outputs += &out;
+    // URL 以 {{条目.base_url}} 开头：基础地址（路径里有账号标识）只在服务器上代入；响应（回显的请求行）与错误里都不出现。
+    let base = format!("https://127.0.0.1:{echo}/v1/acct-7f3e/gw-secret");
+    let o = env.run_stdin(
+        &["import", "--name", "ai", "--fields", "base_url,api_key", "--domain", &dom, "--self-signed"],
+        format!("{base}\nsk-gw-0123456789\n").as_bytes(),
+    );
+    assert!(o.status.success(), "{}", stderr(&o));
+    let client = |args: &[&str]| {
+        Command::new(BIN).args(args).env("HOME", &h2).env_remove("PASSMANAGER_CONFIG_DIR").env_remove("PASSMANAGER_HOME").output().unwrap()
+    };
+    let o = client(&["http", "{{ai.base_url}}/models", "-H", "Authorization: Bearer {{ai.api_key}}"]);
+    let out = stdout(&o) + &stderr(&o);
+    assert!(o.status.success(), "{out}");
+    assert!(out.contains("[REDACTED:ai.base_url]") && out.contains("[REDACTED:ai.api_key]"), "{out}");
+    assert!(!out.contains("acct-7f3e") && !out.contains("sk-gw-0123456789"), "{out}");
+    outputs += &out;
+    // 上游连不上：错误里只有占位符，没有地址。
+    let closed = free_port();
+    let bad_dom = format!("127.0.0.1:{closed}");
+    let o = env.run_stdin(
+        &["import", "--name", "ai-down", "--fields", "base_url,api_key", "--domain", &bad_dom, "--self-signed"],
+        format!("https://127.0.0.1:{closed}/v1/acct-7f3e/down\nsk-down-0123456789\n").as_bytes(),
+    );
+    assert!(o.status.success(), "{}", stderr(&o));
+    let o = client(&["http", "{{ai-down.base_url}}/models", "-H", "Authorization: Bearer {{ai-down.api_key}}"]);
+    let out = stdout(&o) + &stderr(&o);
+    assert!(!o.status.success() && out.contains("{{ai-down.base_url}}") && !out.contains("acct-7f3e") && !out.contains(&bad_dom), "{out}");
+    // 主机不在条目的绑定内：拒绝，不发送，错误里没有值。
+    let o = env.run_stdin(
+        &["import", "--name", "ai-evil", "--fields", "base_url,api_key", "--domain", &dom, "--self-signed"],
+        b"https://evil.example/v1/acct-7f3e/x\nsk-evil-0123456789\n",
+    );
+    assert!(o.status.success());
+    let o = client(&["http", "{{ai-evil.base_url}}", "-H", "Authorization: Bearer {{ai-evil.api_key}}"]);
+    let out = stdout(&o) + &stderr(&o);
+    assert!(!o.status.success() && out.contains("DOMAIN_MISMATCH") && !out.contains("acct-7f3e") && !out.contains("evil.example"), "{out}");
+    outputs += &out;
+    assert!(!env.service_log().contains("acct-7f3e"), "日志里没有基础地址");
     let token = std::fs::read_to_string(h2.join(".config/passmanager/token")).unwrap();
 
     // ---- 安装时设置了 XDG_*（与之后的使用不同）：配置仍写到固定位置，之后在任何环境下都能找到 ----
@@ -339,7 +403,11 @@ fn one_line_agent_setup() {
     let o = direct(&h4, &url2);
     outputs += &(stdout(&o) + &stderr(&o));
     assert!(o.status.success(), "{}{}", stdout(&o), stderr(&o));
-    assert!(std::fs::read_to_string(h4.join(".gemini/GEMINI.md")).unwrap().contains("PassManager (agent instructions v1)"));
+    assert!(
+        std::fs::read_to_string(h4.join(".gemini/GEMINI.md"))
+            .unwrap()
+            .contains(&format!("PassManager (agent instructions v{})", pm_proto::agent_text::INSTRUCTIONS_VERSION))
+    );
     assert_eq!(pq_get(&env, "GET", &format!("/a/{code2}")).0, 404);
     // --no-instructions：不写规则。
     let o = env.run(&["agent-setup", "--label", "noinstr"]);

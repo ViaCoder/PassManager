@@ -171,10 +171,11 @@ mod tests {
             assert_eq!(t2.matches(BEGIN).count(), 1);
             // 新版本原地更新，块后面的用户内容保留。
             let with_after = format!("{t}\n# after\n");
-            let b2 = b1.replace("v1", "v2");
+            let cur = format!("instructions v{}", pm_proto::agent_text::INSTRUCTIONS_VERSION);
+            let b2 = b1.replace(&cur, "instructions v999");
             let (t3, c3) = upsert_text(&with_after, &b2).unwrap();
             assert_eq!(c3, Change::Updated);
-            assert!(t3.contains("v2") && !t3.contains("instructions v1") && t3.ends_with("# after\n") && t3.matches(BEGIN).count() == 1);
+            assert!(t3.contains("v999") && !t3.contains(&cur) && t3.ends_with("# after\n") && t3.matches(BEGIN).count() == 1);
             // 移除后回到用户原来的内容。
             let removed = remove_text(&t).unwrap().unwrap();
             assert_eq!(removed.trim_end(), user.trim_end());

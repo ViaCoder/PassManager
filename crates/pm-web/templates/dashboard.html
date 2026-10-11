@@ -8,7 +8,7 @@
     <dt>条目</dt><dd>{{ entries }}</dd>
     <dt>Agent 令牌</dt><dd>{{ st.tokens }}（未使用的注册码 {{ st.pending_enrollments }}）</dd>
     <dt>证书到期</dt><dd>{% if st.cert_not_after %}{{ st.cert_not_after | datetime }}{% else %}<span class="bad-text">没有可用的证书</span>{% endif %}{% if st.cert_error %}<br><span class="bad-text">{{ st.cert_error }}</span>{% endif %}</dd>
-    <dt>网页 / Agent 端口</dt><dd>{{ st.domain }}:{{ st.web_port }} / {{ st.agent_port }}（只允许 {{ st.lan | join(", ") }}）</dd>
+    <dt>{% if st.web_port == st.agent_port %}端口（网页与 Agent 共用）{% else %}网页 / Agent 端口{% endif %}</dt><dd>{{ st.domain }}:{{ st.web_port }}{% if st.web_port != st.agent_port %} / {{ st.agent_port }}{% endif %}（只允许局域网 {{ st.lan | join(", ") }}{% if st.allow %}，以及 {{ st.allow | join(", ") }}{% endif %}）</dd>
   </dl>
 </div>
 <div class="row">

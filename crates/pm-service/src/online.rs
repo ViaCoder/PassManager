@@ -66,8 +66,9 @@ impl Online {
         pm_web::WebConfig { domain: self.cfg.domain.clone(), port: self.cfg.web_port, agent_bin_dir: None }.origin()
     }
 
+    /// 应用层来源检查（与防火墙使用同一份列表：局域网网段 + 允许列表；本机回环总是允许）。
     pub fn allowed(&self, ip: IpAddr) -> bool {
-        pm_platform::paths::ip_allowed(ip, &self.cfg.lan)
+        self.cfg.source_allowed(ip)
     }
 
     /// 新建注册码。返回给调用方的 URL 只出现这一次；服务端只保存 SHA-256。
@@ -293,10 +294,21 @@ pub(crate) async fn serve_agents(shared: Arc<Shared>, listener: TcpListener) {
     }
 }
 
-/// 网页（443）。
+/// 网页（默认 443）。
 pub(crate) async fn serve_web(shared: Arc<Shared>, listener: TcpListener) {
+    serve_web_with(shared, listener, false).await
+}
+
+/// 单端口模式：一个 TLS 监听，按协商出的 ALPN 分流——`pm-inner/1` 进入 Agent 通道（与两端口模式的 Agent 端口
+/// 完全相同的内层握手与 TLS exporter 绑定），h2 / http/1.1 / 没有 ALPN 是网页。
+pub(crate) async fn serve_single(shared: Arc<Shared>, listener: TcpListener) {
+    serve_web_with(shared, listener, true).await
+}
+
+async fn serve_web_with(shared: Arc<Shared>, listener: TcpListener, single: bool) {
     let Some(on) = shared.online.as_ref() else { return };
-    let cfg = pm_net::tls::server_config(on.certs.clone(), &[b"h2", b"http/1.1"]);
+    let alpn: Vec<&[u8]> = if single { pm_web::front::SINGLE_PORT_ALPN.to_vec() } else { vec![b"h2", b"http/1.1"] };
+    let cfg = pm_net::tls::server_config(on.certs.clone(), &alpn);
     if let Err(e) = pm_net::tls::check_policy(&cfg) {
         log(&format!("TLS policy self-check failed: {e}"));
         return;
@@ -311,9 +323,27 @@ pub(crate) async fn serve_web(shared: Arc<Shared>, listener: TcpListener) {
             agent_bin_dir: Some(shared.layout.data_dir.join("agent-bin")),
         },
     );
-    let lan = on.cfg.lan.clone();
-    let allow: pm_web::front::Allow = Arc::new(move |ip| pm_platform::paths::ip_allowed(ip, &lan));
-    pm_web::front::Front::new(TlsAcceptor::from(cfg), &on.cfg.domain, on.cfg.web_port, allow).serve(listener, pm_web::router(st)).await;
+    let scfg = on.cfg.clone();
+    let allow: pm_web::front::Allow = Arc::new(move |ip| scfg.source_allowed(ip));
+    let mut front = pm_web::front::Front::new(TlsAcceptor::from(cfg), &on.cfg.domain, on.cfg.web_port, allow);
+    if single {
+        let (sh, keys) = (shared.clone(), on.keys.clone());
+        let active = Arc::new(AtomicUsize::new(0));
+        front = front.with_inner(Arc::new(move |tls, _peer| {
+            let (sh, keys, active) = (sh.clone(), keys.clone(), active.clone());
+            Box::pin(async move {
+                if active.fetch_add(1, Ordering::SeqCst) >= MAX_AGENT_CONNS {
+                    active.fetch_sub(1, Ordering::SeqCst);
+                    return;
+                }
+                if let Ok(Some(stream)) = pm_net::inner::server::accept_tls(tls, &keys).await {
+                    handle_conn(sh, stream, Peer { elevated: false, allowed: true, network: true }).await;
+                }
+                active.fetch_sub(1, Ordering::SeqCst);
+            })
+        }));
+    }
+    front.serve(listener, pm_web::router(st)).await;
 }
 
 /// 网页调用服务：管理会话（不能取明文、不能生成登录链接）。
@@ -490,8 +520,33 @@ mod tests {
         let on = online();
         assert!(on.allowed("198.51.100.20".parse().unwrap()));
         assert!(!on.allowed("203.0.113.20".parse().unwrap()));
-        assert!(!on.allowed("127.0.0.1".parse().unwrap()));
-        assert!(!on.allowed("::1".parse().unwrap()));
+        assert!(on.allowed("127.0.0.1".parse().unwrap()), "本机回环总是允许（0.3.5 起）");
+        assert!(!on.allowed("127.0.0.2".parse().unwrap()));
+        assert!(on.allowed("::1".parse().unwrap()), "本机回环总是允许");
+        assert!(!on.allowed("2001:db8::1".parse().unwrap()));
         assert_eq!(on.web_origin(), "https://pm.test");
+    }
+
+    /// 单端口模式（8121）：网页地址、注册码 URL 与接入说明里的一行命令都带端口；允许列表进入应用层检查。
+    #[test]
+    fn single_port_urls_and_allow_list() {
+        let base = online();
+        let mut cfg = base.cfg.clone();
+        cfg.web_port = 8121;
+        cfg.agent_port = 8121;
+        cfg.allow = vec!["203.0.113.7".into(), "2001:db8::/32".into()];
+        let on = Online::new(cfg, ServerKeys::from_parts(base.keys.bundle(), &base.keys.secret_bytes()).unwrap());
+        assert_eq!(on.web_origin(), "https://pm.test:8121");
+        let v = on.enroll_create("laptop").unwrap();
+        assert!(v.url.starts_with("pm-enroll://pm.test:8121/"), "{}", v.url);
+        let code = pm_net::enroll::EnrollUrl::parse(&v.url).unwrap().code;
+        let text =
+            pm_proto::agent_text::setup_text(pm_proto::agent_text::Lang::En, &on.web_origin(), &code, &v.url, &Default::default(), 10);
+        assert!(text.contains(&format!("https://pm.test:8121/a/{code}")), "{text}");
+        assert!(on.allowed("203.0.113.7".parse().unwrap()) && on.allowed("2001:db8::9".parse().unwrap()));
+        assert!(on.allowed("198.51.100.20".parse().unwrap()) && !on.allowed("203.0.113.8".parse().unwrap()));
+        // 默认端口：不写 :443；Agent 端口照常写。
+        let d = online();
+        assert!(d.enroll_create("x").unwrap().url.starts_with("pm-enroll://pm.test:8443/"));
     }
 }

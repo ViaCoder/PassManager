@@ -225,10 +225,10 @@ pub fn client_config_dirs_with(get: impl Fn(&str) -> Option<std::ffi::OsString>,
 pub struct ServerConfig {
     /// 证书与 Host 校验使用的域名（安装时必须指定，例如 `pm.example.com`）。没有默认值。
     pub domain: String,
-    /// 网页管理端口（443）。
+    /// 网页管理端口（默认 443）。与 `agent_port` 相同时为单端口模式：一个 TLS 监听按 ALPN 分流网页与 Agent 通道。
     #[serde(default = "default_web_port")]
     pub web_port: u16,
-    /// Agent 通道端口（8443）。
+    /// Agent 通道端口（默认 8443）。
     #[serde(default = "default_agent_port")]
     pub agent_port: u16,
     /// 监听地址（只支持 IPv4）。
@@ -237,6 +237,10 @@ pub struct ServerConfig {
     /// 允许连接的来源网段（IPv4 CIDR，安装时必须指定）。没有默认值：为空时服务拒绝启动网络监听。
     #[serde(default)]
     pub lan: Vec<String>,
+    /// 额外允许访问服务端口的地址或网段（IPv4 / IPv6，例如 `203.0.113.7`、`2001:db8::/32`）。与 `lan` 不同，
+    /// 防火墙不为它们开放 SSH（22）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allow: Vec<String>,
     /// ACME 目录 URL；为空表示不自动申请证书（只用 `import-cert` 导入的证书）。
     #[serde(default)]
     pub acme_directory: String,
@@ -282,6 +286,7 @@ impl Default for ServerConfig {
             agent_port: default_agent_port(),
             bind: default_bind(),
             lan: Vec::new(),
+            allow: Vec::new(),
             acme_directory: LETS_ENCRYPT.into(),
             acme_root_pem: None,
             dns: default_dns(),
@@ -305,8 +310,9 @@ impl ServerConfig {
         {
             return Err(format!("域名无效：{d}"));
         }
-        if self.web_port == 0 || self.agent_port == 0 || self.web_port == self.agent_port {
-            return Err("端口无效（网页与 Agent 端口必须不同且非 0）".into());
+        // 两个端口相同表示单端口模式（按 ALPN 分流），不是错误。
+        if self.web_port == 0 || self.agent_port == 0 {
+            return Err("端口无效（不能为 0）".into());
         }
         if self.bind.parse::<std::net::Ipv4Addr>().is_err() {
             return Err(format!("监听地址必须是 IPv4：{}", self.bind));
@@ -316,6 +322,9 @@ impl ServerConfig {
         }
         for c in &self.lan {
             parse_cidr(c)?;
+        }
+        for a in &self.allow {
+            parse_net(a).map_err(|e| format!("允许列表中的条目无效：{e}"))?;
         }
         if let Some(t) = &self.tpm_socket
             && (!t.starts_with('/') || t.contains(['\n', ' ']))
@@ -340,6 +349,89 @@ pub fn parse_cidr(s: &str) -> Result<(std::net::Ipv4Addr, u8), String> {
         return Err(format!("网段无效：{s}"));
     }
     Ok((ip, len))
+}
+
+impl ServerConfig {
+    /// 单端口模式：网页与 Agent 通道共用一个端口（按 ALPN 分流）。
+    pub fn single_port(&self) -> bool {
+        self.web_port == self.agent_port
+    }
+
+    /// 服务端口（单端口模式下只有一个）。
+    pub fn service_ports(&self) -> Vec<u16> {
+        if self.single_port() { vec![self.web_port] } else { vec![self.web_port, self.agent_port] }
+    }
+
+    /// 应用层的来源检查（网页与 Agent 通道都使用；与防火墙规则使用同一份列表）：
+    /// 本机回环（127.0.0.1、::1）总是允许；其次是局域网网段 `lan` 与允许列表 `allow`。
+    pub fn source_allowed(&self, ip: std::net::IpAddr) -> bool {
+        let ip = normalize_ip(ip);
+        ip == std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
+            || ip == std::net::IpAddr::V6(std::net::Ipv6Addr::LOCALHOST)
+            || ip_allowed(ip, &self.lan)
+            || net_allowed(ip, &self.allow)
+    }
+}
+
+/// IPv4 映射的 IPv6 地址按 IPv4 处理。
+fn normalize_ip(ip: std::net::IpAddr) -> std::net::IpAddr {
+    match ip {
+        std::net::IpAddr::V6(v6) => v6.to_ipv4_mapped().map(std::net::IpAddr::V4).unwrap_or(ip),
+        v4 => v4,
+    }
+}
+
+/// 解析 IPv4 / IPv6 地址或网段（`addr` 视为 /32 或 /128）。主机位必须为 0（防止写错的网段被悄悄放宽或收窄）。
+pub fn parse_net(s: &str) -> Result<(std::net::IpAddr, u8), String> {
+    let s = s.trim();
+    let (ip, len) = match s.split_once('/') {
+        Some((ip, len)) => {
+            let ip: std::net::IpAddr = ip.parse().map_err(|_| format!("不是 IP 地址或网段：{s}"))?;
+            let len: u8 = len.parse().map_err(|_| format!("前缀长度无效：{s}"))?;
+            (ip, len)
+        }
+        None => {
+            let ip: std::net::IpAddr = s.parse().map_err(|_| format!("不是 IP 地址或网段：{s}"))?;
+            (ip, if ip.is_ipv4() { 32 } else { 128 })
+        }
+    };
+    let max = if ip.is_ipv4() { 32 } else { 128 };
+    if len > max {
+        return Err(format!("前缀长度无效：{s}"));
+    }
+    let (bits, mask) = net_bits(ip, len);
+    if bits & !mask != 0 {
+        return Err(format!("网段的主机位不为 0：{s}（是否想写 {}/{len}？）", net_addr(ip, len)));
+    }
+    Ok((ip, len))
+}
+
+fn net_bits(ip: std::net::IpAddr, len: u8) -> (u128, u128) {
+    match ip {
+        std::net::IpAddr::V4(v) => (u32::from(v) as u128, if len == 0 { 0 } else { (u32::MAX << (32 - len as u32)) as u128 }),
+        std::net::IpAddr::V6(v) => (u128::from(v), if len == 0 { 0 } else { u128::MAX << (128 - len as u32) }),
+    }
+}
+
+fn net_addr(ip: std::net::IpAddr, len: u8) -> std::net::IpAddr {
+    let (b, m) = net_bits(ip, len);
+    match ip {
+        std::net::IpAddr::V4(_) => std::net::IpAddr::V4(std::net::Ipv4Addr::from((b & m) as u32)),
+        std::net::IpAddr::V6(_) => std::net::IpAddr::V6(std::net::Ipv6Addr::from(b & m)),
+    }
+}
+
+/// 地址是否落在任一条目（IPv4 / IPv6 地址或网段）内；地址族不同不匹配，无效条目不匹配任何地址。
+pub fn net_allowed(ip: std::net::IpAddr, entries: &[String]) -> bool {
+    let ip = normalize_ip(ip);
+    entries.iter().filter_map(|e| parse_net(e).ok()).any(|(net, len)| {
+        if net.is_ipv4() != ip.is_ipv4() {
+            return false;
+        }
+        let (a, m) = net_bits(ip, len);
+        let (n, _) = net_bits(net, len);
+        a & m == n & m
+    })
 }
 
 /// 来源地址是否在允许的网段内。IPv6 一律拒绝（IPv4 映射地址按 IPv4 处理）。
@@ -463,6 +555,50 @@ mod tests {
     use super::*;
 
     #[test]
+    fn allowlist_parsing_and_source_check() {
+        let ip = |s: &str| s.parse::<std::net::IpAddr>().unwrap();
+        // 解析：v4、v6、网段；主机位不为 0、垃圾、越界前缀都拒绝。
+        assert_eq!(parse_net("203.0.113.7").unwrap(), (ip("203.0.113.7"), 32));
+        assert_eq!(parse_net("198.51.100.0/24").unwrap(), (ip("198.51.100.0"), 24));
+        assert_eq!(parse_net("2001:db8::/32").unwrap(), (ip("2001:db8::"), 32));
+        assert_eq!(parse_net("2001:db8::5").unwrap(), (ip("2001:db8::5"), 128));
+        for bad in [
+            "198.51.100.1/24",
+            "2001:db8::1/32",
+            "198.51.100.0/33",
+            "2001:db8::/129",
+            "pm.example.com",
+            "198.51.100",
+            "",
+            "1.2.3.4/x",
+            "1.2.3.4 5.6.7.8",
+        ] {
+            assert!(parse_net(bad).is_err(), "{bad:?}");
+        }
+        assert!(parse_net("198.51.100.1/24").unwrap_err().contains("198.51.100.0/24"), "提示正确的写法");
+        // 来源检查：LAN、允许列表（v4 与 v6）、其他；回环总是允许；映射地址按 v4。
+        let mut c = ServerConfig { domain: "pm.example.com".into(), lan: vec!["198.51.100.0/24".into()], ..Default::default() };
+        c.allow = vec!["203.0.113.7".into(), "203.0.113.64/26".into(), "2001:db8::/32".into()];
+        for ok in ["198.51.100.9", "203.0.113.7", "203.0.113.100", "2001:db8::42", "::ffff:203.0.113.7", "127.0.0.1", "::1"] {
+            assert!(c.source_allowed(ip(ok)), "{ok}");
+        }
+        for bad in ["203.0.113.8", "203.0.113.63", "192.0.2.1", "2001:db9::1", "127.0.0.2", "fe80::1", "::ffff:192.0.2.1"] {
+            assert!(!c.source_allowed(ip(bad)), "{bad}");
+        }
+        assert!(c.validate().is_ok());
+        c.allow.push("203.0.113.1/24".into());
+        assert!(c.validate().unwrap_err().contains("允许列表"), "无效条目是配置错误");
+        // 单端口模式：两个端口相同。
+        let mut s = ServerConfig { domain: "pm.example.com".into(), lan: vec!["198.51.100.0/24".into()], ..Default::default() };
+        assert!(!s.single_port() && s.service_ports() == vec![443, 8443]);
+        s.web_port = 8121;
+        s.agent_port = 8121;
+        assert!(s.validate().is_ok() && s.single_port() && s.service_ports() == vec![8121]);
+        s.agent_port = 0;
+        assert!(s.validate().is_err());
+    }
+
+    #[test]
     fn server_config_defaults_and_validation() {
         // 默认值不含任何站点信息：域名与网段为空，校验失败（服务拒绝启动网络监听）。
         let d = ServerConfig::default();
@@ -487,8 +623,10 @@ mod tests {
             ServerConfig { domain: "nodot".into(), ..c.clone() },
             ServerConfig { domain: "a..b".into(), ..c.clone() },
             ServerConfig { domain: "a b.c".into(), ..c.clone() },
-            ServerConfig { web_port: 8443, ..c.clone() },
+            ServerConfig { web_port: 0, ..c.clone() },
             ServerConfig { agent_port: 0, ..c.clone() },
+            ServerConfig { allow: vec!["203.0.113.0/16".into()], ..c.clone() },
+            ServerConfig { allow: vec!["not-an-ip".into()], ..c.clone() },
             ServerConfig { bind: "::".into(), ..c.clone() },
             ServerConfig { lan: vec![], ..c.clone() },
             ServerConfig { lan: vec!["198.51.100.0/33".into()], ..c.clone() },
@@ -499,6 +637,8 @@ mod tests {
         ] {
             assert!(bad.validate().is_err(), "{bad:?}");
         }
+        // 0.3.5 起两个端口相同表示单端口模式（之前是错误）。
+        assert!(ServerConfig { web_port: 8443, ..c.clone() }.validate().is_ok());
         ServerConfig { tpm_socket: Some("/run/swtpm/tpm.sock".into()), ..c }.validate().unwrap();
     }
 

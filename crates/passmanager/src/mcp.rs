@@ -15,6 +15,7 @@ const SUPPORTED: &[&str] = &["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-
 
 const INSTRUCTIONS: &str = "PassManager uses stored secrets for you; you never see them. \
 http: write {{secret}} where the secret goes, e.g. header Authorization: Bearer {{secret}}. \
+If an entry has a base_url field, use {{entry.base_url}} as the URL (optionally followed by a path), e.g. {{ai.base_url}}/models. \
 ssh/scp: use user@host as usual. \
 If a result says LOCKED, NOT_READY or HOST_KEY_CHANGED, tell the user the command in the message.";
 
@@ -27,12 +28,12 @@ fn tools() -> Value {
         },
         {
             "name": "http",
-            "description": "HTTPS request. Write {{secret}} where the secret goes (header, body or query); the secret stored for the URL's host is filled in. Secrets in the response are shown as [REDACTED].",
+            "description": "HTTPS request. Write {{secret}} where the secret goes (header, body or query); the secret stored for the URL's host is filled in. If an entry has a base_url field, use {{entry.base_url}} as the URL, optionally followed by a path or query (e.g. {{ai.base_url}}/models). Secrets in the response are shown as [REDACTED].",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "method": {"type": "string", "description": "GET, POST, PUT, PATCH, DELETE ..."},
-                    "url": {"type": "string", "description": "https:// URL"},
+                    "url": {"type": "string", "description": "https:// URL, or {{entry.base_url}} followed by an optional path"},
                     "headers": {"type": "object", "additionalProperties": {"type": "string"}},
                     "body": {"type": "string"}
                 },

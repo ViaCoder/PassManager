@@ -76,9 +76,9 @@ S="$R/etc/sysctl.d/99-disable-ipv6.conf"
 check "sysctl 配置" 'grep -qx "net.ipv6.conf.all.disable_ipv6 = 1" "$S" && grep -qx "net.ipv6.conf.default.disable_ipv6 = 1" "$S" && grep -qx "net.ipv6.conf.lo.disable_ipv6 = 1" "$S"'
 check "sysctl 已应用" 'grep -q "^sysctl -p $S$" "$LOG"'
 N="$R/etc/nftables.d/passmanager.nft"
-check "nft：只放行给定网段的 22/443/8443" 'grep -q "ip saddr { 198.51.100.0/24, 203.0.113.0/24 } tcp dport { 22, 443, 8443 } ct state new accept" "$N"'
+check "nft：局域网可访问 22 与 443/8443" 'grep -qx "		ip saddr { 198.51.100.0/24, 203.0.113.0/24 } tcp dport 22 ct state new accept" "$N" && grep -qx "		ip saddr { 198.51.100.0/24, 203.0.113.0/24 } tcp dport { 443, 8443 } ct state new accept" "$N"'
 check "nft：默认丢弃、丢弃 IPv6" 'grep -q "policy drop;" "$N" && grep -q "meta nfproto ipv6 drop" "$N"'
-check "nft：没有其他放行端口" '[ "$(grep -c "dport" "$N")" = 1 ]'
+check "nft：没有其他放行端口" '[ "$(grep -c "dport" "$N")" = 2 ]'
 check "nft：先检查再加载、持久化" 'grep -q "^nft -c -f $N$" "$LOG" && grep -q "^nft -f $N$" "$LOG" && grep -q "^systemctl enable nftables.service$" "$LOG"'
 check "nftables.conf 包含 include" '[ "$(grep -c "^include \"/etc/nftables.d/\*.nft\"" "$R/etc/nftables.conf")" = 1 ]'
 U="$R/etc/systemd/system/passmanager.service"
@@ -140,7 +140,7 @@ fi
 check "提示 reseal" 'grep -q "passmanager reseal" "$T/out3.txt"'
 check "没有 TPM 时不安装运行库" '! grep -q "^apt-get" "$LOG"'
 check "没有 token 文件" '[ ! -f "$R2/var/lib/passmanager-dryrun/data/cf-token.sealed" ]'
-check "站点文件：域名、网段、端口生效" 'grep -q "ip saddr { 192.0.2.0/24, 198.51.100.0/25 } tcp dport { 22, 8444, 8443 }" "$R2/etc/nftables.d/passmanager.nft" && grep -q "\"pm2.example.com\"" "$R2/var/lib/passmanager-dryrun/data/install.json"'
+check "站点文件：域名、网段、端口生效" 'grep -q "ip saddr { 192.0.2.0/24, 198.51.100.0/25 } tcp dport 22 ct state new accept" "$R2/etc/nftables.d/passmanager.nft" && grep -q "ip saddr { 192.0.2.0/24, 198.51.100.0/25 } tcp dport { 8444, 8443 } ct state new accept" "$R2/etc/nftables.d/passmanager.nft" && grep -q "\"pm2.example.com\"" "$R2/var/lib/passmanager-dryrun/data/install.json"'
 check "站点文件不会被当作脚本执行" '[ ! -e "$T/pwned" ]'
 check "没有配置 TPM 套接字" '! grep -q "tpm_socket" "$R2/var/lib/passmanager-dryrun/data/install.json"'
 AB="$R2/var/lib/passmanager-dryrun/data/agent-bin"
@@ -148,6 +148,46 @@ check "发布包：校验通过的 macOS 程序已解出" '[ "$(cat "$AB/PassMan
 # 与服务器架构无关：aarch64 包要么因校验不一致被跳过，要么（aarch64 服务器上）让位给本机程序；内容都不会被安装。
 check "发布包：校验不一致的跳过并警告" '! grep -q arm-client "$AB"/* && grep -Eq "跳过 PassManager-0.3.0-aarch64-unknown-linux-gnu.tar.gz|PassManager-0.3.0-aarch64-unknown-linux-gnu.tar.gz：使用本机程序" "$T/out3.txt"'
 check "发布包：Windows 包与未知文件忽略" '[ ! -e "$AB/PassManager-x86_64-pc-windows-msvc" ] && [ -z "$(find "$AB" -type f ! -name PassManager-x86_64-unknown-linux-gnu ! -name PassManager-aarch64-unknown-linux-gnu ! -name PassManager-universal-apple-darwin)" ]'
+
+echo "== 单端口模式与允许列表"
+RP="$T/root-port"
+# 先以两端口模式安装，再以单端口 + 允许列表重新运行：旧规则被整体替换，不留下 443/8443。
+DRY_RUN=1 ROOT="$RP" PATH="$F:$PATH" bash "$PKG/install-server.sh" --domain pm.example.com --lan-cidr 198.51.100.0/24 --skip-acme < /dev/null > /dev/null 2>&1
+check "两端口：443 与 8443" 'grep -q "tcp dport { 443, 8443 }" "$RP/etc/nftables.d/passmanager.nft"'
+if DRY_RUN=1 ROOT="$RP" PATH="$F:$PATH" bash "$PKG/install-server.sh" --domain pm.example.com --port 8121 --lan-cidr 198.51.100.0/24 --lan-cidr 192.0.2.0/24 \
+     --allow "203.0.113.7 203.0.113.64/26" --allow 2001:db8::/32 --skip-acme < /dev/null > "$T/out-port.txt" 2>&1; then
+  NP="$RP/etc/nftables.d/passmanager.nft"
+  JP="$RP/var/lib/passmanager-dryrun/data/install.json"
+  check "单端口：22 只对局域网开放" 'grep -qx "		ip saddr { 198.51.100.0/24, 192.0.2.0/24 } tcp dport 22 ct state new accept" "$NP"'
+  check "单端口：8121 对局域网与允许列表开放" 'grep -qx "		ip saddr { 198.51.100.0/24, 192.0.2.0/24, 203.0.113.7, 203.0.113.64/26 } tcp dport { 8121 } ct state new accept" "$NP"'
+  check "单端口：没有 443 / 8443，只有两条 IPv4 放行规则" '! grep -Eq "443|8443" "$NP" && [ "$(grep -c "ip saddr" "$NP")" = 2 ]'
+  check "IPv6 条目：规则在丢弃 IPv6 之前，并给出不起作用的警告" 'grep -n "ip6 saddr { 2001:db8::/32 } tcp dport { 8121 } ct state new accept" "$NP" | cut -d: -f1 | { read -r a; b=$(grep -n "meta nfproto ipv6 drop" "$NP" | cut -d: -f1); [ "$a" -lt "$b" ]; } && grep -q "IPv6 条目" "$T/out-port.txt"'
+  check "配置：单端口与允许列表写入 install.json" 'grep -q "\"web_port\": 8121" "$JP" && grep -q "\"agent_port\": 8121" "$JP" && grep -q "203.0.113.64/26" "$JP" && grep -q "2001:db8::/32" "$JP"'
+  check "单元文件照常生成" '[ -s "$RP/etc/systemd/system/passmanager.service" ]'
+else
+  bad "单端口安装失败"; cat "$T/out-port.txt"
+fi
+# 去掉允许列表与单端口：重新运行后规则与配置都回到只有局域网。
+DRY_RUN=1 ROOT="$RP" PATH="$F:$PATH" bash "$PKG/install-server.sh" --domain pm.example.com --lan-cidr 198.51.100.0/24 --skip-acme < /dev/null > /dev/null 2>&1
+check "重新运行：允许列表被清空、恢复两端口" '! grep -q "203.0.113" "$RP/etc/nftables.d/passmanager.nft" && ! grep -q "ip6 saddr" "$RP/etc/nftables.d/passmanager.nft" && ! grep -q "203.0.113" "$RP/var/lib/passmanager-dryrun/data/install.json" && grep -q "\"agent_port\": 8443" "$RP/var/lib/passmanager-dryrun/data/install.json"'
+# 站点文件：PORT 与 ALLOW_IPS（一行、空格分隔）。
+SP="$T/site-port.env"
+printf 'DOMAIN=pm.example.com\nLAN_CIDRS=198.51.100.0/24\nPORT=8121\nALLOW_IPS="203.0.113.7 203.0.113.9"\n' > "$SP"
+if DRY_RUN=1 ROOT="$T/root-sp" PATH="$F:$PATH" bash "$PKG/install-server.sh" --site-file "$SP" --skip-acme < /dev/null > "$T/out-sp.txt" 2>&1; then
+  check "站点文件：PORT 与 ALLOW_IPS" 'grep -q "ip saddr { 198.51.100.0/24, 203.0.113.7, 203.0.113.9 } tcp dport { 8121 }" "$T/root-sp/etc/nftables.d/passmanager.nft"'
+else
+  bad "站点文件（单端口）安装失败"; cat "$T/out-sp.txt"
+fi
+# 无效条目与冲突的参数：在修改任何东西之前以非 0 退出，并说明原因。
+for a in "--allow 203.0.113.1/24" "--allow not-an-ip" "--allow 203.0.113.300" "--lan-cidr 2001:db8::/32" "--port 8121 --web-port 443" "--port 0" "--port 70000"; do
+  RX="$T/root-x"; rm -rf "$RX"
+  # shellcheck disable=SC2086
+  if DRY_RUN=1 ROOT="$RX" PATH="$F:$PATH" bash "$PKG/install-server.sh" --domain pm.example.com --lan-cidr 198.51.100.0/24 $a --skip-acme < /dev/null > "$T/out-x.txt" 2>&1; then
+    bad "拒绝 $a"
+  else
+    check "拒绝 $a（有说明、没有写入任何文件）" '[ -s "$T/out-x.txt" ] && [ ! -e "$RX/etc" ]'
+  fi
+done
 
 echo "== swtpm 套接字只对某个组开放：服务账户加入该组（不修改套接字权限）"
 GS="$T/gsock/tpm.sock"

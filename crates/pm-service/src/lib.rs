@@ -280,6 +280,7 @@ impl Shared {
             web_port: on.map(|o| o.cfg.web_port).unwrap_or(0),
             agent_port: on.map(|o| o.cfg.agent_port).unwrap_or(0),
             lan: on.map(|o| o.cfg.lan.clone()).unwrap_or_default(),
+            allow: on.map(|o| o.cfg.allow.clone()).unwrap_or_default(),
             locked,
             initialized: self.vault_exists(),
             vault_mode: if on.is_some() { "无口令（设备密钥）".into() } else { "口令".into() },
@@ -1043,7 +1044,8 @@ impl Shared {
             .await;
     }
 
-    async fn pin_mismatch(&self, kind: PinKind, host_port: &str, old: &str, new: &str) -> ApiErr {
+    /// `display`：对 Agent 的消息与日志中使用的名称（通常就是 host_port；URL 来自条目里的基础地址时是占位符）。
+    async fn pin_mismatch(&self, kind: PinKind, host_port: &str, display: &str, old: &str, new: &str) -> ApiErr {
         let mut inner = self.inner.lock().await;
         inner.pending.retain(|p| p.host_port != host_port);
         inner.pending.push(PendingPinView {
@@ -1053,13 +1055,21 @@ impl Shared {
             new_fingerprint: new.into(),
             seen_at: pm_vault::now(),
         });
-        log(&format!("host key changed for {host_port}"));
+        log(&format!("host key changed for {display}"));
+        let what = if kind == PinKind::Ssh { "SSH host key" } else { "TLS certificate" };
+        if display != host_port {
+            return err(
+                "HOST_KEY_CHANGED",
+                format!(
+                    "The {what} fingerprint of the host in {display} changed. Nothing was sent. Ask the user to check and trust the new fingerprint in the PassManager web UI."
+                ),
+            );
+        }
         let host = host_port.rsplit_once(':').map(|(h, _)| h).unwrap_or(host_port);
         err(
             "HOST_KEY_CHANGED",
             format!(
-                "The {} fingerprint of {host_port} changed (old {old}, new {new}). Nothing was sent. If the host was reinstalled, ask the user to run: PassManager trust {host}",
-                if kind == PinKind::Ssh { "SSH host key" } else { "TLS certificate" }
+                "The {what} fingerprint of {host_port} changed (old {old}, new {new}). Nothing was sent. If the host was reinstalled, ask the user to run: PassManager trust {host}"
             ),
         )
     }
@@ -1073,6 +1083,8 @@ impl Shared {
             (p, expected, inner.redactor.clone())
         };
         let host_port = prepared.host_port();
+        // URL 来自条目里的基础地址时，对 Agent 的消息与日志只提占位符，不提真实主机。
+        let display = prepared.label.clone().unwrap_or_else(|| host_port.clone());
         let self_signed = prepared.self_signed;
         match http::execute(prepared, expected.clone(), &redactor).await? {
             http::Outcome::Done { result, observed_pin } => {
@@ -1085,7 +1097,7 @@ impl Shared {
                 ok(result)
             }
             http::Outcome::PinMismatch { observed } => {
-                Err(self.pin_mismatch(PinKind::Https, &host_port, expected.as_deref().unwrap_or("?"), &observed).await)
+                Err(self.pin_mismatch(PinKind::Https, &host_port, &display, expected.as_deref().unwrap_or("?"), &observed).await)
             }
         }
     }
@@ -1101,9 +1113,9 @@ impl Shared {
             (t, expected, inner.redactor.clone())
         };
         match ssh::connect(&target, expected.clone()).await? {
-            ssh::Connected::PinMismatch { observed } => {
-                Err(self.pin_mismatch(PinKind::Ssh, &target.host_port(), expected.as_deref().unwrap_or("?"), &observed).await)
-            }
+            ssh::Connected::PinMismatch { observed } => Err(self
+                .pin_mismatch(PinKind::Ssh, &target.host_port(), &target.host_port(), expected.as_deref().unwrap_or("?"), &observed)
+                .await),
             ssh::Connected::Session { handle, observed } => {
                 if let Some((algo, fp)) = observed
                     && expected.as_deref() != Some(fp.as_str())
@@ -1363,19 +1375,21 @@ fn run_server(layout: Layout) -> Result<(), RunError> {
                 })
             }
         };
-        let web = bind(cfg.web_port).await?;
-        let agents = bind(cfg.agent_port).await?;
-        log(&format!(
-            "server mode: web https://{}:{} , agents :{} (LAN only: {})",
-            cfg.domain,
-            cfg.web_port,
-            cfg.agent_port,
-            cfg.lan.join(", ")
-        ));
+        let allowed =
+            format!("LAN {} ; allow {}", cfg.lan.join(", "), if cfg.allow.is_empty() { "-".into() } else { cfg.allow.join(", ") });
+        if cfg.single_port() {
+            let one = bind(cfg.web_port).await?;
+            log(&format!("server mode (single port): https://{}:{} for web and agents ({allowed})", cfg.domain, cfg.web_port));
+            tokio::spawn(online::serve_single(shared.clone(), one));
+        } else {
+            let web = bind(cfg.web_port).await?;
+            let agents = bind(cfg.agent_port).await?;
+            log(&format!("server mode: web https://{}:{} , agents :{} ({allowed})", cfg.domain, cfg.web_port, cfg.agent_port));
+            tokio::spawn(online::serve_web(shared.clone(), web));
+            tokio::spawn(online::serve_agents(shared.clone(), agents));
+        }
         tokio::spawn(shared.clone().housekeeping());
         tokio::spawn(online::cert_loop(shared.clone()));
-        tokio::spawn(online::serve_web(shared.clone(), web));
-        tokio::spawn(online::serve_agents(shared.clone(), agents));
         server::serve(shared).await.map_err(RunError::transient)
     })
 }
