@@ -76,7 +76,8 @@ passmanager agent-setup --label laptop                                     # pri
 
 Give the printed block to the AI agent on the machine that should use PassManager. It contains a one-time enrollment code
 (10 minutes, single use) and tells the agent to run one command —
-`curl --proto =https --tlsv1.3 -fsSL https://pm.example.com/a/<code> | sh` — which installs the client (SHA-256 verified),
+`sh -c "$(curl --proto '=https' --tlsv1.3 -fsSL https://pm.example.com/a/<code> || echo "exit $?")"` (works in sh, bash and zsh,
+and fails loudly with curl's exit code) — which installs the client (SHA-256 verified),
 enrolls it, configures the MCP server for the detected agents (Claude Code, Codex, Cursor, Gemini CLI, VS Code, Windsurf) and
 adds the usage rules to their global instruction files (`~/.claude/CLAUDE.md`, `~/.codex/AGENTS.md`, …). If the agent's curl
 cannot do post-quantum TLS, the block tells it to build the client from the pinned release source and run `enroll` instead.

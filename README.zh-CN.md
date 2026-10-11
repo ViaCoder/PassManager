@@ -72,7 +72,8 @@ passmanager agent-setup --label laptop --lang zh                           # 打
 ```
 
 把打印出的整段文字交给要使用 PassManager 的那台机器上的 AI Agent。其中有一个一次性注册码（10 分钟、只能用一次），
-并让 Agent 执行一条命令——`curl --proto =https --tlsv1.3 -fsSL https://pm.example.com/a/<注册码> | sh`——它安装客户端（校验 SHA-256）、
+并让 Agent 执行一条命令——`sh -c "$(curl --proto '=https' --tlsv1.3 -fsSL https://pm.example.com/a/<注册码> || echo "exit $?")"`（在 sh、bash、zsh 中都能运行，
+下载失败时以 curl 的退出码报错）——它安装客户端（校验 SHA-256）、
 注册、为检测到的 Agent（Claude Code、Codex、Cursor、Gemini CLI、VS Code、Windsurf）配置 MCP 服务，并把使用规则写入它们的
 全局指令文件（`~/.claude/CLAUDE.md`、`~/.codex/AGENTS.md` 等）。Agent 的 curl 不支持后量子 TLS 时，这段文字会让它从固定的
 发布源码构建客户端再运行 `enroll`。`passmanager agent-instructions` 打印使用规则；`passmanager unenroll` 全部移除。

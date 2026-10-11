@@ -68,7 +68,9 @@ ssh root@pm.example.com passmanager agent-setup --label laptop --lang zh
 它打印一段文字，把它交给 Agent 机器上的 AI Agent（网页"Agent 令牌"页也显示同样的文字）。其中有一个一次性注册码
 （10 分钟、只能用一次），以及：
 
-1. 命令 `curl --proto =https --tlsv1.3 -fsSL https://pm.example.com/a/<注册码> | sh`。服务器返回为该注册码生成的 POSIX sh
+1. 命令 `sh -c "$(curl --proto '=https' --tlsv1.3 -fsSL https://pm.example.com/a/<注册码> || echo "exit $?")"`
+   （`'=https'` 加引号，因为 zsh 会展开未加引号的 `=单词`；与 `curl … | sh` 不同，下载失败时以 curl 的退出码报错——35 表示 TLS
+   握手失败，即客户端的 curl 不支持 X25519MLKEM768）。服务器返回为该注册码生成的 POSIX sh
    脚本：按本机的系统与 CPU 从服务器本身（`/a/<注册码>/bin/<目标>`）下载客户端、校验 SHA-256、装到 `~/.local/bin`（不需要 root），
    然后运行 `enroll`；
 2. 在 TLS 握手失败（curl 不支持 ML-KEM，例如 macOS 或较旧的发行版）或在 Windows 上时：按文字中固定的发布标签与提交从源码构建客户端

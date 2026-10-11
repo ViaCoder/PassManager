@@ -599,6 +599,19 @@ impl Sealer for SystemdCredsSealer {
 pub mod testing {
     use std::path::{Path, PathBuf};
 
+    /// 在 `path` 创建一个"没有人监听"的 Unix 套接字文件（ECONNREFUSED）。由一个短命的子进程绑定后退出，
+    /// 本进程从不持有监听的文件描述符——否则并发测试 fork 出的子进程在 exec 之前会短暂持有它，
+    /// 使套接字在本进程关闭之后仍然接受连接（测试因此不稳定）。
+    pub fn stale_socket(path: &Path) {
+        let _ = std::fs::remove_file(path);
+        let st = std::process::Command::new("python3")
+            .args(["-I", "-c", "import socket,sys; s=socket.socket(socket.AF_UNIX); s.bind(sys.argv[1]); s.close()"])
+            .arg(path)
+            .status()
+            .expect("python3");
+        assert!(st.success(), "创建套接字文件失败");
+    }
+
     /// 写一个假的 systemd-creds（Python）：
     /// - encrypt：输出 base64(凭据类型 ID ‖ 明文)，ID 与真实 systemd 相同；
     /// - 涉及 TPM（host+tpm2 加密，或解密 host+tpm2 凭据）时：`FAKE_FAIL_TPM=1` 模拟没有 TPM；
@@ -914,6 +927,8 @@ mod tests {
         let l = std::os::unix::net::UnixListener::bind(&p).unwrap();
         assert_eq!(socket_state(&p), SocketState::Ready);
         drop(l);
+        // 换成从未在本进程中监听过的套接字文件（见 testing::stale_socket 的说明）。
+        testing::stale_socket(&p);
         assert_eq!(socket_state(&p), SocketState::Refused, "文件还在但没有人监听");
         assert!(SocketState::Refused.describe(&p).contains("ECONNREFUSED"));
         let f = d.path().join("plain");

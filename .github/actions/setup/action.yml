@@ -26,7 +26,7 @@ runs:
     - name: Build tools (Linux)
       if: runner.os == 'Linux'
       shell: bash
-      run: sudo apt-get update -q && sudo apt-get install -y -q cmake clang libclang-dev zip
+      run: sudo apt-get update -q && sudo apt-get install -y -q cmake clang libclang-dev zip zsh
     - name: Build tools (Windows)
       if: runner.os == 'Windows'
       shell: pwsh

@@ -4,6 +4,14 @@ English | [简体中文](CHANGELOG.zh-CN.md)
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.3.4] - 2026-10-11
+
+### Fixed
+
+- **Agent setup one-liner in zsh**: the printed command used `curl --proto =https …`; zsh (the macOS default shell) expands an unquoted `=https` as a command path (`zsh: https not found`) and nothing ran. It is now `sh -c "$(curl --proto '=https' --tlsv1.3 -fsSL https://<domain>/a/<code> || echo "exit $?")"` everywhere (agent-setup text EN/ZH, web page, README, deployment guide).
+- **Failures are no longer silent**: with `curl … | sh` a failed download gave `sh` empty input and exit status 0. The new form prints curl's error and exits with curl's exit code; the setup text tells the AI that exit code 35 (TLS handshake failure — the client's curl lacks X25519MLKEM768) means "use step 2 (build from the pinned source)", and that other errors (22 = code expired or used, 6/7 = server unreachable) must be reported to the user.
+- Tests run the exact printed command through `sh -c`, `bash -c` and `zsh -c` against a local test server, check the failure exit codes (22 for a used code, 35 for a TLS handshake against the post-quantum-only server), and CI installs zsh.
+
 ## [0.3.3] - 2026-10-11
 
 ### Fixed

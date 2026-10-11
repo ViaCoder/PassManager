@@ -84,10 +84,20 @@ pub fn instruction_block(lang: Lang) -> String {
     format!("{BEGIN}\n{title}\n\n{}{END}\n", rules(lang))
 }
 
+/// 第 1 步的一行命令。
+///
+/// - `--proto '=https'` 加引号：zsh（macOS 默认）会把未加引号的 `=https` 当作命令路径展开（EQUALS 选项）而报错；
+/// - 不用 `curl … | sh`：curl 失败时 sh 读到空输入、以 0 退出，错误被吞掉。这里 curl 失败时执行 `exit <curl 的退出码>`，
+///   并且 `-S` 把 curl 的错误打印出来；退出码 35 表示 TLS 握手失败（客户端不支持 X25519MLKEM768）。
+/// - 在 sh、bash、zsh 中行为相同（测试覆盖）。
+pub fn one_liner(origin: &str, code: &str) -> String {
+    format!("sh -c \"$(curl --proto '=https' --tlsv1.3 -fsSL {origin}/a/{code} || echo \"exit $?\")\"")
+}
+
 /// `passmanager agent-setup` 打印的接入说明。`origin` 例如 `https://pm.example.com`；`enroll_url` 是完整的
 /// `pm-enroll://主机:端口/注册码#指纹`。
 pub fn setup_text(lang: Lang, origin: &str, code: &str, enroll_url: &str, build: &BuildInfo, minutes: u64) -> String {
-    let one_liner = format!("curl --proto =https --tlsv1.3 -fsSL {origin}/a/{code} | sh");
+    let one_liner = one_liner(origin, code);
     let source = match (build.pinned(), lang) {
         (Some((tag, commit)), Lang::En) => format!(
             "   Prerequisites: git, a Rust toolchain (rustup, Rust >= 1.88), cmake, a C compiler and libclang (liboqs is built from source).
@@ -130,13 +140,17 @@ pub fn setup_text(lang: Lang, origin: &str, code: &str, enroll_url: &str, build:
             "PassManager agent setup — instructions for the AI agent on the machine that should use PassManager.
 The enrollment code below is valid for {minutes} minutes and works once. Do not store or share this text.
 
-1. Install, enroll and configure (needs curl with TLS 1.3 and X25519MLKEM768):
+1. Install, enroll and configure (needs curl with TLS 1.3 and X25519MLKEM768; works in sh, bash and zsh):
      {one_liner}
    This installs the PassManager client to ~/.local/bin (SHA-256 verified), enrolls it with the server, configures the
    MCP server for the detected agents and adds the rules below to their global instruction files.
+   If the download fails the command prints curl's error and exits with curl's exit code. Exit code 35
+   (`curl: (35)`, TLS handshake failure) means this machine's curl cannot do X25519MLKEM768: go to step 2.
+   Any other error (for example 22: the code expired or was already used; 6 or 7: server unreachable): stop and tell the user.
 
-2. Only if step 1 fails at the TLS handshake (curl without ML-KEM support, e.g. macOS or older distributions) or on
-   Windows: build the client from the pinned source and enroll with it (this configures MCP and the rules as well).
+2. Only if step 1 exits with code 35 (TLS handshake failure; curl without ML-KEM support, e.g. macOS or older
+   distributions) or on Windows: build the client from the pinned source and enroll with it (this configures MCP and the
+   rules as well).
 {source}
 3. Restart the agent so that it loads the PassManager MCP server, then follow these rules:
 {rules}",
@@ -146,12 +160,14 @@ The enrollment code below is valid for {minutes} minutes and works once. Do not 
             "PassManager 接入说明——给需要使用 PassManager 的那台机器上的 AI Agent。
 下面的注册码 {minutes} 分钟内有效，只能使用一次。不要保存或转发这段文字。
 
-1. 安装、注册并配置（需要支持 TLS 1.3 与 X25519MLKEM768 的 curl）：
+1. 安装、注册并配置（需要支持 TLS 1.3 与 X25519MLKEM768 的 curl；在 sh、bash、zsh 中都可以直接运行）：
      {one_liner}
    它把 PassManager 客户端装到 ~/.local/bin（校验 SHA-256），向服务器注册，为检测到的 Agent 配置 MCP 服务，
    并把下面的规则写入它们的全局指令文件。
+   下载失败时命令会打印 curl 的错误，并以 curl 的退出码退出。退出码 35（`curl: (35)`，TLS 握手失败）表示本机的 curl
+   不支持 X25519MLKEM768：转到第 2 步。其他错误（例如 22：注册码已过期或已用过；6 或 7：连不上服务器）：停止并告诉用户。
 
-2. 只有第 1 步在 TLS 握手时失败（curl 不支持 ML-KEM，例如 macOS 或较旧的发行版）或在 Windows 上时：
+2. 只有第 1 步以退出码 35 失败（TLS 握手失败；curl 不支持 ML-KEM，例如 macOS 或较旧的发行版）或在 Windows 上时：
    从固定的源码构建客户端并用它注册（同样会配置 MCP 与规则）。
 {source}
 3. 重启 Agent 使其加载 PassManager MCP 服务，然后遵守以下规则：
@@ -188,7 +204,10 @@ mod tests {
         for lang in [Lang::En, Lang::Zh] {
             let t = setup_text(lang, "https://pm.example.com", "CODE123", URL, &pinned(), 10);
             assert_eq!(t.matches("CODE123").count(), 2, "一行命令与 enroll 各一次");
-            assert!(t.contains("curl --proto =https --tlsv1.3 -fsSL https://pm.example.com/a/CODE123 | sh"));
+            assert!(t.contains("sh -c \"$(curl --proto '=https' --tlsv1.3 -fsSL https://pm.example.com/a/CODE123 || echo \"exit $?\")\""));
+            assert!(t.contains("--proto '=https'") && !t.contains("--proto =https"), "zsh 下必须加引号");
+            assert!(!t.contains("| sh"), "不能用会吞掉错误的 curl | sh");
+            assert!(t.contains("35"), "说明握手失败的退出码");
             assert!(t.contains("--branch v0.3.0") && t.contains("0123456789abcdef0123456789abcdef01234567"));
             assert!(t.contains(&format!("enroll '{URL}'")));
             assert!(t.contains("{{entry.field}}") || t.contains("{{条目.字段}}"));

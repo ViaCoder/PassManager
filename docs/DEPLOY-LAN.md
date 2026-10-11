@@ -45,7 +45,9 @@ ssh root@pm.example.com passmanager agent-setup --label laptop      # --lang zh 
 This prints one block of text; give it to the AI agent on the agent machine (the web UI's "Agent 令牌" page shows the same
 block). The block contains a one-time enrollment code (10 minutes, single use) and:
 
-1. the command `curl --proto =https --tlsv1.3 -fsSL https://pm.example.com/a/<code> | sh`. The server returns a small POSIX sh
+1. the command `sh -c "$(curl --proto '=https' --tlsv1.3 -fsSL https://pm.example.com/a/<code> || echo "exit $?")"`
+   (`'=https'` is quoted because zsh expands an unquoted `=word`; unlike `curl … | sh` it exits with curl's error code when the
+   download fails — 35 means the TLS handshake failed because the client's curl lacks X25519MLKEM768). The server returns a small POSIX sh
    script generated for that code; it downloads the client for the machine's OS/CPU from the server itself
    (`/a/<code>/bin/<target>`), verifies its SHA-256, installs it to `~/.local/bin` (no root), and runs `enroll`;
 2. if that fails at the TLS handshake (curl without ML-KEM, e.g. macOS or older distributions) or on Windows: build the client

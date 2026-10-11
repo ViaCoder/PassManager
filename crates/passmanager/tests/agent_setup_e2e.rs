@@ -115,6 +115,20 @@ fn sh(home: &Path, ca: &Path, cmd: &str) -> Output {
     sh_env(home, ca, cmd, &[])
 }
 
+/// 用指定的 shell（sh / bash / zsh）以 `-c` 运行打印出来的一行命令。
+fn shell(bin: &str, home: &Path, ca: &Path, cmd: &str) -> Output {
+    Command::new(bin)
+        .arg("-c")
+        .arg(cmd)
+        .env_clear()
+        .env("HOME", home)
+        .env("PATH", "/usr/local/bin:/usr/bin:/bin")
+        .env("CURL_CA_BUNDLE", ca)
+        .env("PASSMANAGER_TPM_SOCKET", "/nonexistent")
+        .output()
+        .unwrap()
+}
+
 /// 以干净的环境运行一行命令（只有 HOME、PATH、测试 CA 与 `extra`）。
 fn sh_env(home: &Path, ca: &Path, cmd: &str, extra: &[(&str, &str)]) -> Output {
     let mut c = Command::new("sh");
@@ -149,7 +163,7 @@ fn client_list(home: &Path, env: &[(&str, &str)], remove: &[&str]) -> Output {
 
 /// 从接入说明里取出一行命令与注册码。
 fn one_liner(text: &str) -> (String, String) {
-    let line = text.lines().map(str::trim).find(|l| l.starts_with("curl ")).expect("one-liner").to_string();
+    let line = text.lines().map(str::trim).find(|l| l.starts_with("sh -c ")).expect("one-liner").to_string();
     let url = line.split_whitespace().find(|w| w.starts_with("https://")).unwrap();
     let code = url.rsplit('/').next().unwrap().to_string();
     (line, code)
@@ -179,7 +193,12 @@ fn one_line_agent_setup() {
     let text = stdout(&o);
     outputs += &(text.clone() + &stderr(&o));
     let (line, code) = one_liner(&text);
-    assert_eq!(line, format!("curl --proto =https --tlsv1.3 -fsSL https://pm.test:{}/a/{code} | sh", env.web));
+    assert_eq!(
+        line,
+        format!("sh -c \"$(curl --proto '=https' --tlsv1.3 -fsSL https://pm.test:{}/a/{code} || echo \"exit $?\")\"", env.web)
+    );
+    // 与安装了什么 shell 无关的检查：zsh 会展开未加引号的 =https。
+    assert!(line.contains("--proto '=https'") && !line.contains("--proto =https") && !line.contains("| sh"));
     assert_eq!(code.len(), 43);
     assert_eq!(text.matches(&code).count(), 1, "开发构建只在一行命令里出现注册码");
     assert!(text.contains("development build") && !text.contains("git clone"), "{text}");
@@ -288,6 +307,16 @@ fn one_line_agent_setup() {
     let o = sh(&h3, &pca, &cmd);
     outputs += &(stdout(&o) + &stderr(&o));
     assert!(!h3.join(".local/bin/PassManager").exists(), "注册码已用过：什么都不安装");
+    assert_eq!(o.status.code(), Some(22), "下载失败时大声失败（curl 的退出码）：{}", stderr(&o));
+    assert!(stderr(&o).contains("curl: (22)"), "{}", stderr(&o));
+    // 服务器只接受后量子 TLS：系统 curl 不支持 X25519MLKEM768 时握手失败，退出码 35（说明里让 AI 转到第 2 步）。
+    let direct_cmd = line.replace("https://pm.test:", "https://127.0.0.1:");
+    let o = sh(&h3, &pca, &direct_cmd);
+    let code_seen = o.status.code();
+    assert!(code_seen.is_some_and(|c| c != 0), "握手失败不能被吞掉：{}", stderr(&o));
+    assert!(stderr(&o).contains(&format!("curl: ({})", code_seen.unwrap())), "{}", stderr(&o));
+    assert!(matches!(code_seen, Some(35) | Some(60)), "35 = 握手失败（不支持 ML-KEM）；60 = 支持 ML-KEM 但不信任测试 CA：{code_seen:?}");
+    assert!(!h3.join(".local/bin/PassManager").exists());
     let enroll_url = script.lines().find_map(|l| l.strip_prefix("PM_ENROLL='")).unwrap().trim_end_matches('\'').to_string();
     let direct = |home: &Path, url: &str| {
         Command::new(BIN)
@@ -335,6 +364,31 @@ fn one_line_agent_setup() {
         .unwrap();
     assert!(o.status.success(), "{}", stderr(&o));
     assert!(!h5.join(".gemini/GEMINI.md").exists());
+
+    // ---- 打印出来的一行命令在 bash 与 zsh 中也能直接运行（zsh 会展开未加引号的 =https）----
+    for bin in ["bash", "zsh"] {
+        if !have(bin) {
+            eprintln!("跳过 {bin}：没有安装");
+            continue;
+        }
+        let o = env.run(&["agent-setup", "--label", bin]);
+        let (bline, _) = one_liner(&stdout(&o));
+        let bcmd = bline.replace(&format!("https://pm.test:{}", env.web), &format!("https://127.0.0.1:{pport}"));
+        let hb = env.base.join(format!("home-{bin}"));
+        std::fs::create_dir_all(&hb).unwrap();
+        let o = shell(bin, &hb, &pca, &bcmd);
+        outputs += &(stdout(&o) + &stderr(&o));
+        assert!(o.status.success(), "{bin}: {}{}", stdout(&o), stderr(&o));
+        assert!(hb.join(".config/passmanager/remote.toml").exists(), "{bin}");
+        // 已用过的注册码：同样大声失败。
+        let o = shell(bin, &hb, &pca, &bcmd);
+        assert_eq!(o.status.code(), Some(22), "{bin}: {}", stderr(&o));
+    }
+    if have("zsh") {
+        // 回归保护：未加引号的旧写法在 zsh 中根本不会运行 curl。
+        let o = shell("zsh", &env.base, &pca, "echo curl --proto =https");
+        assert!(!o.status.success() && stderr(&o).contains("not found"), "{}", stderr(&o));
+    }
 
     // ---- unenroll：移除规则（恢复用户原来的内容）、MCP 配置与远程配置 ----
     let o = Command::new(BIN).arg("unenroll").env("HOME", &h2).env_remove("PASSMANAGER_CONFIG_DIR").output().unwrap();

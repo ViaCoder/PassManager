@@ -522,7 +522,7 @@ async fn tokens_show_enroll_command_and_revoke() {
     let r = send(&st, Method::POST, "/tokens", Some(&cookie), Some(&format!("csrf={csrf}&label=laptop")), &[]).await;
     assert_eq!(r.status, StatusCode::OK);
     // 接入说明：一行命令（HTML 转义后浏览器显示为原文）与给 AI 的规则；没有其他安装方式。
-    assert!(r.body.contains("curl --proto =https --tlsv1.3 -fsSL https:&#x2f;&#x2f;pm.test&#x2f;a&#x2f;"), "{}", r.body);
+    assert!(r.body.contains("curl --proto &#x27;=https&#x27; --tlsv1.3 -fsSL https:&#x2f;&#x2f;pm.test&#x2f;a&#x2f;"), "{}", r.body);
     assert!(r.body.contains("PassManager agent setup") && r.body.contains("MCP tools"));
     assert_eq!(r.body.matches(BOOT_CODE).count(), 1, "开发构建：只有一行命令里有注册码");
     assert!(!r.body.contains("install-agent.sh") && !r.body.contains("irm "));

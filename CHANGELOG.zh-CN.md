@@ -4,6 +4,14 @@
 
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.3.4] - 2026-10-11
+
+### 修复
+
+- **zsh 下的接入一行命令**：打印的命令用的是 `curl --proto =https …`；zsh（macOS 默认 shell）会把未加引号的 `=https` 当作命令路径展开（`zsh: https not found`），什么都没运行。现在各处（agent-setup 中英文说明、网页、README、部署说明）都改为 `sh -c "$(curl --proto '=https' --tlsv1.3 -fsSL https://<域名>/a/<注册码> || echo "exit $?")"`。
+- **失败不再无声**：用 `curl … | sh` 时下载失败会让 `sh` 读到空输入并以 0 退出。新写法打印 curl 的错误并以 curl 的退出码退出；说明里告诉 AI：退出码 35（TLS 握手失败——客户端的 curl 不支持 X25519MLKEM768）表示"使用第 2 步（从固定的源码构建）"，其他错误（22 = 注册码过期或已用过，6/7 = 连不上服务器）要告诉用户。
+- 测试把打印出来的命令原样经 `sh -c`、`bash -c`、`zsh -c` 对本地测试服务器运行，并检查失败时的退出码（已用过的注册码为 22，对纯后量子服务器的 TLS 握手为 35）；CI 安装 zsh。
+
 ## [0.3.3] - 2026-10-11
 
 ### 修复

@@ -803,6 +803,7 @@ mod tests {
             // 连接被拒绝（swtpm 没有在监听）也单独说明。
             std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
             drop(_l2);
+            pm_platform::seal::linux::testing::stale_socket(&s2);
             let m = sl::wait_for_tpm(Duration::from_millis(50), Duration::from_millis(10)).unwrap_err();
             assert!(tpm_wait_message(&m, Duration::from_secs(60)).contains("ECONNREFUSED"));
         }
