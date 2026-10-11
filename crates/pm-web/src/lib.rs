@@ -1,6 +1,7 @@
 //! 网页管理界面（服务器模式，443 端口，只对局域网开放）。
 //!
-//! - 服务端渲染，没有 JavaScript；CSP `default-src 'none'`（只允许本站样式表）；
+//! - 服务端渲染，没有 JavaScript；CSP `default-src 'none'`（只允许本站样式表与本站图片，即 favicon）；
+//!   图标是 base.html 里的内联 SVG sprite，不加载任何外部资源；
 //! - 没有任何密码：只能用服务器上 root 运行 `passmanager login` 打印的一次性链接登录
 //!   （2 分钟有效；GET 只显示确认页，POST 才消耗），会话空闲 2 小时、登录满 12 小时失效；
 //! - 会话 cookie 为 `__Host-` 前缀、HttpOnly、Secure、SameSite=Strict；所有修改类请求校验 CSRF 令牌、
@@ -276,6 +277,18 @@ pub fn templates() -> Environment<'static> {
     for (n, s) in TEMPLATES {
         env.add_template(n, s).expect("模板语法");
     }
+    // 距今还有多少天（向下取整；已过去为负数）。
+    env.add_filter("days_left", |ts: i64| {
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
+        (ts - now).div_euclid(86400)
+    });
+    // 图标：只接受 ICONS 里的固定名字（模板里写死的常量），输出引用 base.html 内联 sprite 的 <svg>。
+    env.add_function("icon", |name: &str| match ICONS.iter().find(|n| **n == name) {
+        Some(n) => {
+            Value::from_safe_string(format!(r##"<svg class="i" aria-hidden="true" focusable="false"><use href="#i-{n}"></use></svg>"##))
+        }
+        None => Value::from(""),
+    });
     env.add_filter("datetime", |ts: i64| {
         let d = ts.div_euclid(86400);
         let s = ts.rem_euclid(86400);
@@ -283,6 +296,41 @@ pub fn templates() -> Environment<'static> {
         format!("{y:04}-{m:02}-{dd:02} {:02}:{:02} UTC", s / 3600, s % 3600 / 60)
     });
     env
+}
+
+/// base.html 内联 sprite 里的图标（`<symbol id="i-名字">`）。
+pub const ICONS: &[&str] = &[
+    "shield", "key", "lock", "unlock", "server", "token", "link", "settings", "warning", "check", "copy", "trash", "activity", "plus",
+    "edit", "logout", "info", "clock", "x", "terminal",
+];
+
+/// 网站图标（同源，`img-src 'self'`）：盾牌与锁孔。只有图形元素，没有脚本、样式或外部引用。
+pub const FAVICON_SVG: &str = concat!(
+    r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">"##,
+    r##"<defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#3149c4"/><stop offset="1" stop-color="#6d4ae8"/></linearGradient></defs>"##,
+    r##"<rect width="64" height="64" rx="14" fill="url(#g)"/>"##,
+    r##"<path d="M32 9 15 15.6v12.6c0 10.2 7.1 19.2 17 22.8 9.9-3.6 17-12.6 17-22.8V15.6z" fill="#fff"/>"##,
+    r##"<path d="M32 21.5a5.2 5.2 0 0 0-2.6 9.7L27.8 40h8.4l-1.6-8.8a5.2 5.2 0 0 0-2.6-9.7z" fill="#3149c4"/>"##,
+    "</svg>"
+);
+
+/// 静态资源：(路径, Content-Type, 内容)。都只读、可缓存，不需要会话。
+pub const STATIC: &[(&str, &str, &str)] = &[
+    ("/static/style.css", "text/css; charset=utf-8", include_str!("../static/style.css")),
+    ("/static/icon.svg", "image/svg+xml", FAVICON_SVG),
+];
+
+/// 模板对应的导航项（顶栏高亮当前页面，`aria-current="page"`）。
+fn nav_of(template: &str) -> &'static str {
+    match template {
+        "dashboard.html" => "home",
+        "entries.html" | "entry_form.html" => "entries",
+        "tokens.html" => "tokens",
+        "pins.html" => "pins",
+        "settings.html" => "settings",
+        "security.html" => "security",
+        _ => "",
+    }
 }
 
 pub const TEMPLATES: &[(&str, &str)] = &[
@@ -314,8 +362,11 @@ pub fn civil(z: i64) -> (i64, u32, u32) {
 }
 
 pub fn router(st: St) -> Router {
-    Router::new()
-        .route("/", get(dashboard))
+    let mut r = Router::new();
+    for (path, ctype, body) in STATIC {
+        r = r.route(path, get(move || async move { ([(header::CONTENT_TYPE, *ctype), (header::CACHE_CONTROL, "max-age=3600")], *body) }));
+    }
+    r.route("/", get(dashboard))
         .route("/login", get(login_page))
         .route("/l/{token}", get(link_page).post(link_post))
         .route("/logout", post(logout))
@@ -335,15 +386,6 @@ pub fn router(st: St) -> Router {
         .route("/security", get(security))
         .route("/a/{code}", get(boot_script))
         .route("/a/{code}/bin/{target}", get(boot_bin))
-        .route(
-            "/static/style.css",
-            get(|| async {
-                (
-                    [(header::CONTENT_TYPE, "text/css; charset=utf-8"), (header::CACHE_CONTROL, "max-age=3600")],
-                    include_str!("../static/style.css"),
-                )
-            }),
-        )
         .fallback(|| async { (StatusCode::NOT_FOUND, "not found") })
         .layer(axum::extract::DefaultBodyLimit::max(FORM_LIMIT))
         .layer(axum::middleware::from_fn_with_state(st.clone(), request_guard))
@@ -409,7 +451,10 @@ pub fn host_ok(domain: &str, port: u16, host: &str) -> bool {
     port_ok && name.eq_ignore_ascii_case(domain)
 }
 
-pub const CSP: &str = "default-src 'none'; style-src 'self'; img-src 'self' data:; form-action 'self'; frame-ancestors 'none'; base-uri 'none'; require-trusted-types-for 'script'; trusted-types 'none'";
+/// 与 base.html 的 `<meta name="referrer">` 一致。
+pub const REFERRER_POLICY: &str = "same-origin";
+
+pub const CSP: &str = "default-src 'none'; style-src 'self'; img-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'; require-trusted-types-for 'script'; trusted-types 'none'";
 
 async fn security_headers(req: Request, next: axum::middleware::Next) -> Response {
     let mut r = next.run(req).await;
@@ -418,7 +463,9 @@ async fn security_headers(req: Request, next: axum::middleware::Next) -> Respons
         ("content-security-policy", CSP),
         ("strict-transport-security", "max-age=31536000"),
         ("x-content-type-options", "nosniff"),
-        ("referrer-policy", "no-referrer"),
+        // same-origin：发往本站的请求带完整来源（浏览器提交表单时 Origin 才是真实来源；no-referrer 会让
+        // 浏览器发送 "Origin: null"，被入口检查拒绝），发往其他站点的请求不带 Referer。
+        ("referrer-policy", REFERRER_POLICY),
         ("x-frame-options", "DENY"),
         ("cross-origin-opener-policy", "same-origin"),
         ("cross-origin-resource-policy", "same-origin"),
@@ -482,7 +529,7 @@ fn render(st: &AppState, name: &str, ctx: Value) -> Response {
 }
 
 fn page(st: &AppState, c: &Ctx, name: &str, extra: Value) -> Response {
-    let base = context! { csrf => c.csrf.clone(), conn => sv(&c.conn) };
+    let base = context! { csrf => c.csrf.clone(), conn => sv(&c.conn), nav => nav_of(name) };
     render(st, name, context! { ..extra, ..base })
 }
 

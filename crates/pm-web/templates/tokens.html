@@ -1,37 +1,81 @@
 {% extends "base.html" %}
+{% block title %}Agent 令牌 · PassManager{% endblock %}
 {% block body %}
-<h1>Agent 令牌</h1>
-{% if enroll %}
-<div class="flash ok">
-  已为 <b>{{ enroll.label }}</b> 生成接入说明（含一次性注册码：{{ enroll.minutes }} 分钟内有效，只能使用一次，只显示这一次）。
-  把下面整段文字交给要使用 PassManager 的那台机器上的 AI Agent，它会自行安装客户端、注册并配置 MCP：
-  <pre class="token">{{ enroll.text }}</pre>
+<div class="page-head">
+  <div>
+    <h1>{{ icon("token") }}Agent 令牌</h1>
+    <p class="lede">令牌本身只在 Agent 注册时生成，并经双层加密通道送达，不会出现在网页上。</p>
+  </div>
 </div>
+{% if enroll %}
+<section class="callout ok" aria-labelledby="enroll-title">
+  {{ icon("check") }}
+  <div>
+    <p class="callout-title" id="enroll-title">已为 <b>{{ enroll.label }}</b> 生成接入说明</p>
+    <p>含一次性注册码：{{ enroll.minutes }} 分钟内有效，只能使用一次，<strong>只显示这一次</strong>。把下面整段文字交给要使用 PassManager 的那台机器上的 AI Agent，它会自行安装客户端、注册并配置 MCP。</p>
+    <p class="hint">{{ icon("copy") }}选中下面的全部文字后复制（页面没有脚本，无法一键复制）。</p>
+    <pre class="token" tabindex="0">{{ enroll.text }}</pre>
+  </div>
+</section>
 {% endif %}
-<form method="post" action="/tokens" class="card">
+<form method="post" action="/tokens" class="card form">
   <input type="hidden" name="csrf" value="{{ csrf }}">
-  <label>标签（例如机器名或 Agent 名）<input name="label" required maxlength="64"></label>
-  <label>说明语言 <select name="lang"><option value="en">English</option><option value="zh">中文</option></select></label>
-  <button>生成接入说明</button>
+  <h2 class="card-title">{{ icon("plus") }}接入新的 Agent</h2>
+  <div class="field-row">
+    <div class="field grow">
+      <label for="f-label">标签</label>
+      <input id="f-label" name="label" required maxlength="64" aria-describedby="h-label">
+      <p class="hint" id="h-label">例如机器名或 Agent 名。</p>
+    </div>
+    <div class="field">
+      <label for="f-lang">说明语言</label>
+      <select id="f-lang" name="lang"><option value="en">English</option><option value="zh">中文</option></select>
+    </div>
+  </div>
+  <div class="form-actions"><button>{{ icon("token") }}生成接入说明</button></div>
 </form>
-<h2>已注册的令牌</h2>
-<div class="table-wrap"><table class="list">
-  <tr><th>标签</th><th>ID</th><th>创建</th><th>最后使用</th><th></th></tr>
+
+<h2 class="section-title">已注册的令牌</h2>
+{% if tokens %}
+<div class="table-wrap"><table class="list stack">
+  <thead><tr><th scope="col">标签</th><th scope="col">ID</th><th scope="col">状态</th><th scope="col">创建</th><th scope="col">最后使用</th><th scope="col"><span class="sr-only">操作</span></th></tr></thead>
+  <tbody>
   {% for t in tokens %}
-  <tr><td>{{ t.label }}</td><td><code>{{ t.id }}</code></td><td>{{ t.created | datetime }}</td><td>{% if t.last_used %}{{ t.last_used | datetime }}{% else %}从未{% endif %}</td>
-  <td><form method="post" action="/tokens/{{ t.id | urlencode }}/revoke" class="inline"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="danger small">吊销</button></form></td></tr>
-  {% else %}
-  <tr><td colspan="5" class="muted">没有令牌。</td></tr>
+  <tr>
+    <td data-label="标签"><strong>{{ t.label }}</strong></td>
+    <td data-label="ID"><code>{{ t.id }}</code></td>
+    <td data-label="状态">{% if t.last_used %}<span class="badge ok">{{ icon("check") }}已使用</span>{% else %}<span class="badge neutral">{{ icon("clock") }}从未使用</span>{% endif %}</td>
+    <td data-label="创建" class="nowrap">{{ t.created | datetime }}</td>
+    <td data-label="最后使用" class="nowrap">{% if t.last_used %}{{ t.last_used | datetime }}{% else %}<span class="muted">从未</span>{% endif %}</td>
+    <td class="actions-cell">
+      <details class="confirm">
+        <summary class="btn danger-outline small">{{ icon("x") }}吊销</summary>
+        <form method="post" action="/tokens/{{ t.id | urlencode }}/revoke" class="confirm-box"><input type="hidden" name="csrf" value="{{ csrf }}"><span>吊销 <b>{{ t.label }}</b> 的令牌？立即失效。</span><button class="danger small">{{ icon("x") }}确认吊销</button></form>
+      </details>
+    </td>
+  </tr>
   {% endfor %}
+  </tbody>
 </table></div>
-<h2>尚未使用的注册码</h2>
-<div class="table-wrap"><table class="list">
-  <tr><th>标签</th><th>剩余</th><th></th></tr>
+{% else %}
+<div class="empty compact">{{ icon("token") }}<p class="empty-title">没有令牌</p><p class="muted">用上面的表单生成接入说明，Agent 注册后会出现在这里。</p></div>
+{% endif %}
+
+<h2 class="section-title">尚未使用的注册码</h2>
+{% if pending %}
+<div class="table-wrap"><table class="list stack">
+  <thead><tr><th scope="col">标签</th><th scope="col">剩余</th><th scope="col"><span class="sr-only">操作</span></th></tr></thead>
+  <tbody>
   {% for p in pending %}
-  <tr><td>{{ p.label }}</td><td>{{ p.expires_in_secs // 60 }} 分 {{ p.expires_in_secs % 60 }} 秒</td>
-  <td><form method="post" action="/enrollments/{{ p.id | urlencode }}/cancel" class="inline"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="secondary small">作废</button></form></td></tr>
-  {% else %}
-  <tr><td colspan="3" class="muted">没有。</td></tr>
+  <tr>
+    <td data-label="标签">{{ p.label }}</td>
+    <td data-label="剩余"><span class="badge warn">{{ icon("clock") }}{{ p.expires_in_secs // 60 }} 分 {{ p.expires_in_secs % 60 }} 秒</span></td>
+    <td class="actions-cell"><form method="post" action="/enrollments/{{ p.id | urlencode }}/cancel" class="inline"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="secondary small">{{ icon("x") }}作废</button></form></td>
+  </tr>
   {% endfor %}
+  </tbody>
 </table></div>
+{% else %}
+<div class="empty compact">{{ icon("check") }}<p class="muted">没有尚未使用的注册码。</p></div>
+{% endif %}
 {% endblock %}

@@ -1,6 +1,12 @@
 {% extends "base.html" %}
+{% block title %}{{ heading }} · PassManager{% endblock %}
 {% block body %}
-<h1>{{ heading }}</h1>
-<p>{{ message }}</p>
-<p><a href="/">返回首页</a></p>
+<div class="auth">
+  <section class="card auth-card">
+    <div class="auth-icon warn">{{ icon("warning") }}</div>
+    <h1>{{ heading }}</h1>
+    <p>{{ message }}</p>
+    <p><a class="btn secondary" href="/">返回首页</a></p>
+  </section>
+</div>
 {% endblock %}

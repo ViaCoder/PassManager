@@ -1,9 +1,20 @@
 {% extends "base.html" %}
+{% block title %}设置 · PassManager{% endblock %}
 {% block body %}
-<h1>设置</h1>
-<form method="post" action="/settings" class="card">
+<div class="page-head">
+  <div>
+    <h1>{{ icon("settings") }}设置</h1>
+    <p class="lede">网页管理与密码库的运行参数。</p>
+  </div>
+</div>
+<form method="post" action="/settings" class="card form">
   <input type="hidden" name="csrf" value="{{ csrf }}">
-  <label>空闲多少小时后自动锁定（0 = 不自动锁定；锁定后在"状态"页或用 root 命令解锁）<input name="auto_lock_hours" type="number" min="0" max="720" value="{{ settings.auto_lock_hours }}"></label>
-  <button>保存</button>
+  <h2 class="card-title">{{ icon("lock") }}自动锁定</h2>
+  <div class="field">
+    <label for="f-autolock">空闲多少小时后自动锁定</label>
+    <div class="input-unit"><input id="f-autolock" name="auto_lock_hours" type="number" min="0" max="720" step="1" required inputmode="numeric" value="{{ settings.auto_lock_hours }}" aria-describedby="h-autolock"><span>小时</span></div>
+    <p class="hint" id="h-autolock">0～720；0 表示不自动锁定。锁定后在"状态"页或用 root 命令解锁。</p>
+  </div>
+  <div class="form-actions"><button>{{ icon("check") }}保存</button></div>
 </form>
 {% endblock %}

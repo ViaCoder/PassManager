@@ -4,6 +4,25 @@
 
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.3.6] - 2026-10-11
+
+### 变更
+
+- **网页管理界面重新设计**（仍是服务端渲染、没有 JavaScript、不加载外部资源）：统一的间距与字号层级；每页有带图标的标题、说明与主要操作；导航高亮当前页面（`aria-current`），窄屏时自动换行；状态磁贴与徽章显示密码库锁定状态、封存等级（L1/L2/L3）、证书到期（剩余天数；≤ 21 天为琥珀色，≤ 7 天或已过期为红色）、安全检查结果（未通过的项目直接列在状态页）、令牌状态（已使用 / 从未使用）与注册码倒计时；表单的标签与说明分开（`aria-describedby`），`:user-invalid` 错误样式，保存失败后明确提示"需要重新输入密钥"；条目表单用 CSS `:has()` 隐藏与所选类型无关的输入（不支持时全部显示，服务端仍会忽略它们）；删除与吊销通过 `<details>` 二次确认（无脚本）；条目、令牌、注册码、指纹与检查项都有空状态；窄于 720 px 时表格变为卡片式堆叠；跳到正文链接、`:focus-visible` 焦点框、支持 `prefers-reduced-motion` 与 `forced-colors`；浅色与深色两套配色按 WCAG AA 检查（所有文字 / 背景组合 ≥ 5.8:1）。
+- **图标**：一套线性小图标（盾牌、钥匙、锁 / 解锁、服务器、令牌、链接、设置、警告、对勾、复制、删除等），以内联 SVG sprite 放在页面里；模板通过 `icon("名字")` 引用，只接受固定列表里的名字。新增同源 favicon `/static/icon.svg`。
+- **CSP 收紧**：`img-src 'self' data:` → `img-src 'self'`（`data:` 从未使用；favicon 是同源的）。其他 CSP 指令不变。
+
+### 修复
+
+- **真实浏览器里网页表单全部被拒绝**（网页界面推出以来一直存在）：`Referrer-Policy: no-referrer` 让浏览器在表单 POST 中发送 `Origin: null`，入口检查（正确地）返回 403——登录确认、保存条目、锁定等全部失败。现在策略改为 `same-origin`（响应头与 `<meta>`）：同源请求带真实的 Origin / Referer，跨站请求仍然不带 Referer。入口检查不变，仍然拒绝 `Origin: null`、外站 Origin、错误的 Host 与跨站 Fetch Metadata。已在 Chrome 中端到端验证（一次性链接登录、条目新增 / 编辑 / 删除、令牌生成 / 吊销、锁定 / 解锁）；登录链接里的令牌只会发回同源，并在 POST 时被消耗。
+
+### 测试
+
+- 离线保证：模板、样式表与 favicon 不得引用外部地址（http/https、协议相对地址、`@import`、字体、`data:`），不得包含 `<script>`、事件处理属性、`javascript:` URL、可嵌入内容的元素或内联样式；链接、表单地址与资源只能是本站路径或页内片段。
+- favicon / CSP 测试：CSP 字符串完全固定，favicon 的响应头（`image/svg+xml`、`nosniff`、CORP `same-origin`、CSP），静态文件同样经过 Host 校验，导航高亮。
+- 图标测试（用到的名字都有定义，未知或注入的名字渲染为空）；XSS 注入测试覆盖新的模板变量（`nav`、`st.ready`、`st.issues`、`st.allow`）与新分支（空状态、证书到期、封存等级）。
+- Referrer-Policy 测试：响应头与 `<meta>` 固定为 `same-origin`；入口检查仍然拒绝 `Origin: null` 与外站 Origin；浏览器式的同源 POST（`Origin: https://pm.test:8121`、`Sec-Fetch-Site: same-origin`、正确的 CSRF）在登录确认、保存条目、锁定上成功，同样的请求带 `Origin: null` 则被拒绝且不消耗登录链接。
+
 ## [0.3.5] - 2026-10-11
 
 ### 新增

@@ -1,30 +1,65 @@
 {% extends "base.html" %}
+{% block title %}安全状态 · PassManager{% endblock %}
 {% block body %}
-<h1>安全状态</h1>
-<div class="card">
+<div class="page-head">
+  <div>
+    <h1>{{ icon("shield") }}安全状态</h1>
+    <p class="lede">设备密钥的封存方式与启动时的安全检查结果。</p>
+  </div>
+</div>
+<div class="tiles">
+  <section class="tile">
+    <h2 class="tile-title">{{ icon("check") }}安全检查</h2>
+    <p class="tile-value">{% if st.ready %}<span class="badge ok">{{ icon("check") }}全部通过</span>{% else %}<span class="badge bad">{{ icon("warning") }}未通过，密码库保持锁定</span>{% endif %}</p>
+  </section>
+  <section class="tile">
+    <h2 class="tile-title">{{ icon("shield") }}设备密钥封存</h2>
+    <p class="tile-value">{% if sec.level >= 3 %}<span class="badge ok">{{ icon("check") }}L{{ sec.level }}</span>{% elif sec.level == 2 %}<span class="badge info">{{ icon("shield") }}L2</span>{% else %}<span class="badge bad">{{ icon("warning") }}L{{ sec.level }}</span>{% endif %}</p>
+    <p class="tile-sub">{{ sec.description }}</p>
+  </section>
+  <section class="tile">
+    <h2 class="tile-title">{{ icon("server") }}TPM</h2>
+    <p class="tile-value">{% if st.tpm_device %}<span class="badge ok">{{ icon("check") }}已发现</span>{% else %}<span class="badge neutral">没有</span>{% endif %}</p>
+    <p class="tile-sub">{% if st.tpm_device %}/dev/tpmrm0 或配置的 swtpm 套接字{% else %}有可用的 TPM 后运行 <code>passmanager reseal</code> 升级到 L3{% endif %}</p>
+  </section>
+</div>
+{% if sec.l1_reason %}
+<div class="callout bad" role="alert">{{ icon("warning") }}<div><p class="callout-title">L1 原因</p><p>{{ sec.l1_reason }}</p></div></div>
+{% endif %}
+{% if st.vault_recovered_from_backup %}
+<div class="callout warn" role="alert">{{ icon("warning") }}<div><p class="callout-title">已从备份恢复</p><p>主库文件损坏，已从 .bak 恢复（下次保存时修复）。</p></div></div>
+{% endif %}
+{% if sec.runtime_issues %}
+<div class="callout bad" role="alert">{{ icon("warning") }}<div><p class="callout-title">运行时问题</p><ul>{% for i in sec.runtime_issues %}<li>{{ i }}</li>{% endfor %}</ul></div></div>
+{% endif %}
+<section class="card">
+  <h2 class="card-title">{{ icon("info") }}详情</h2>
   <dl class="kv">
     <dt>设备密钥封存</dt><dd>L{{ sec.level }}：{{ sec.description }}</dd>
-    {% if sec.l1_reason %}<dt>L1 原因</dt><dd class="bad-text">{{ sec.l1_reason }}</dd>{% endif %}
-    <dt>TPM</dt><dd>{% if st.tpm_device %}已发现（/dev/tpmrm0 或配置的 swtpm 套接字）{% else %}没有（有可用的 TPM 后运行 passmanager reseal 升级到 L3）{% endif %}</dd>
     <dt>TPM 随机数源</dt><dd>{{ st.tpm_rng }}</dd>
     <dt>密码库模式</dt><dd>{{ st.vault_mode }}</dd>
-    <dt>内层通道公钥指纹（SHA-384）</dt><dd><code>{{ st.server_key_fingerprint }}</code></dd>
-    {% if st.vault_recovered_from_backup %}<dt>恢复</dt><dd class="bad-text">主库文件损坏，已从 .bak 恢复（下次保存时修复）</dd>{% endif %}
+    <dt>内层通道公钥指纹（SHA-384）</dt><dd><code class="fp">{{ st.server_key_fingerprint }}</code></dd>
   </dl>
-</div>
-<p>安全检查：{% if st.ready %}<span class="ok-text">全部通过</span>{% else %}<span class="bad-text">未通过，密码库保持锁定</span>{% endif %}</p>
-{% if sec.runtime_issues %}
-<h2>运行时问题</h2>
-<ul>{% for i in sec.runtime_issues %}<li class="bad-text">{{ i }}</li>{% endfor %}</ul>
-{% endif %}
-<h2>检查项</h2>
-{% if sec.report.skipped %}<p class="muted">{{ sec.report.skipped }}</p>{% endif %}
-<div class="table-wrap"><table class="list small">
-  <tr><th>项目</th><th>结果</th><th>说明</th></tr>
+</section>
+<h2 class="section-title">检查项</h2>
+{% if sec.report.skipped %}<p class="note">{{ icon("info") }}<span>{{ sec.report.skipped }}</span></p>{% endif %}
+{% if sec.report.findings %}
+<div class="table-wrap"><table class="list stack small">
+  <thead><tr><th scope="col">项目</th><th scope="col">结果</th><th scope="col">说明</th></tr></thead>
+  <tbody>
   {% for f in sec.report.findings %}
-  <tr><td>{{ f.title }}</td><td>{% if f.ok %}<span class="ok-text">通过</span>{% else %}<span class="bad-text">未通过</span>{% endif %}</td><td>{{ f.detail }}{% if f.steps %}<br>{{ f.steps }}{% endif %}</td></tr>
+  <tr><td data-label="项目">{{ f.title }}</td><td data-label="结果" class="nowrap">{% if f.ok %}<span class="badge ok">{{ icon("check") }}通过</span>{% else %}<span class="badge bad">{{ icon("warning") }}未通过</span>{% endif %}</td><td data-label="说明">{{ f.detail }}{% if f.steps %}<div class="sub">{{ f.steps }}</div>{% endif %}</td></tr>
   {% endfor %}
+  </tbody>
 </table></div>
-<h2>说明</h2>
-<p class="muted">无口令模式：拿到服务器的 root（没有 TPM 时还包括磁盘镜像或备份）就等于拿到密码库。L3（TPM）可以防止磁盘镜像与备份被带走解密，但防不住正在运行的系统里的 root。没有任何恢复途径。</p>
+{% else %}
+<div class="empty compact">{{ icon("info") }}<p class="muted">没有检查项。</p></div>
+{% endif %}
+<section class="callout info">
+  {{ icon("info") }}
+  <div>
+    <p class="callout-title">威胁模型</p>
+    <p>无口令模式：拿到服务器的 root（没有 TPM 时还包括磁盘镜像或备份）就等于拿到密码库。L3（TPM）可以防止磁盘镜像与备份被带走解密，但防不住正在运行的系统里的 root。没有任何恢复途径。</p>
+  </div>
+</section>
 {% endblock %}

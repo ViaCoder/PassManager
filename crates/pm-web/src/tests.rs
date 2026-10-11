@@ -204,11 +204,13 @@ struct Resp2 {
 }
 
 async fn send(st: &St, method: Method, uri: &str, cookie: Option<&str>, form: Option<&str>, extra: &[(&str, &str)]) -> Resp2 {
-    let mut b = axum::http::Request::builder().method(method).uri(uri).header("host", "pm.test");
+    // extra 里可以用 ("host", …) 替换默认的 Host。
+    let host = extra.iter().find(|(k, _)| *k == "host").map_or("pm.test", |(_, v)| *v);
+    let mut b = axum::http::Request::builder().method(method).uri(uri).header("host", host);
     if let Some(c) = cookie {
         b = b.header("cookie", format!("{COOKIE}={c}"));
     }
-    for (k, v) in extra {
+    for (k, v) in extra.iter().filter(|(k, _)| *k != "host") {
         b = b.header(*k, *v);
     }
     let body = match form {
@@ -688,10 +690,11 @@ fn every_template_escapes_injected_values() {
     let key_entry = serde_json::json!({"name": P, "domains": [], "note": P, "self_signed": false, "auto_accept_host_key": false, "private_key": true, "created": 0, "updated": 0, "kind": "ssh-key", "fields": [], "public_key": P});
     let status = serde_json::json!({"domain": P, "web_port": 443, "agent_port": 8443, "lan": [P], "locked": false, "initialized": true,
         "vault_mode": P, "level": 2, "seal_method": P, "tpm_device": false, "tpm_rng": P, "cert_not_after": 0, "cert_error": P,
-        "tokens": 1, "pending_enrollments": 1, "server_key_fingerprint": P, "vault_recovered_from_backup": true});
+        "tokens": 1, "pending_enrollments": 1, "server_key_fingerprint": P, "vault_recovered_from_backup": true,
+        "allow": [P, P], "ready": false, "issues": [P, P]});
     let finding = serde_json::json!({"id": P, "title": P, "ok": false, "auto_fix": false, "detail": P, "steps": P, "advisory": false});
     let base = serde_json::json!({
-        "csrf": P, "conn": {"group": P, "suite": P, "peer": P}, "flash": P, "flash_kind": P, "heading": P, "message": P, "token": P,
+        "csrf": P, "nav": P, "conn": {"group": P, "suite": P, "peer": P}, "flash": P, "flash_kind": P, "heading": P, "message": P, "token": P,
         "st": status.clone(), "entries": [entry.clone(), key_entry], "form": {"name": P, "domains": P, "note": P, "self_signed": true, "auto_accept_host_key": true, "kind": P, "fields": [P, P], "new_rows": [2, 3], "host_keys": P, "ops": [P]}, "public_key": P,
         "original": P, "enroll": {"label": P, "url": P, "text": P, "minutes": 10},
         "tokens": [{"id": P, "label": P, "created": 0, "last_used": 0}], "pending": [{"id": P, "label": P, "expires_in_secs": 70,
@@ -704,6 +707,41 @@ fn every_template_escapes_injected_values() {
     let mut locked = base.clone();
     locked["st"]["locked"] = true.into();
     locked["st"]["initialized"] = false.into();
+    // 证书有效 / 已过期、检查全部通过、各导航项高亮、空列表（空状态）与出错时的条目页。
+    let with = |name: &'static str, f: &dyn Fn(&mut serde_json::Value)| {
+        let mut b = base.clone();
+        f(&mut b);
+        (name, b)
+    };
+    let extra = [
+        with("dashboard.html", &|b| {
+            b["st"]["cert_not_after"] = 4_102_444_800i64.into();
+            b["st"]["ready"] = true.into();
+            b["nav"] = "home".into();
+        }),
+        with("dashboard.html", &|b| b["st"]["cert_not_after"] = 1.into()),
+        with("security.html", &|b| {
+            b["st"]["ready"] = true.into();
+            b["st"]["tpm_device"] = true.into();
+            b["sec"]["level"] = 3.into();
+            b["nav"] = "security".into();
+        }),
+        with("entries.html", &|b| {
+            b["entries"] = serde_json::json!([]);
+            b["flash_kind"] = "err".into();
+            b["nav"] = "entries".into();
+        }),
+        with("entries.html", &|b| b["entries"] = serde_json::json!([])),
+        with("tokens.html", &|b| {
+            b["tokens"] = serde_json::json!([]);
+            b["pending"] = serde_json::json!([]);
+            b["enroll"] = serde_json::Value::Null;
+        }),
+        with("pins.html", &|b| {
+            b["pins"] = serde_json::json!([]);
+            b["pending"] = serde_json::json!([]);
+        }),
+    ];
     let cases: Vec<(&str, serde_json::Value)> = TEMPLATES
         .iter()
         .map(|(n, _)| (*n, base.clone()))
@@ -715,6 +753,7 @@ fn every_template_escapes_injected_values() {
                 b
             }),
         ])
+        .chain(extra)
         .collect();
     for (name, ctx) in cases {
         let out = env.get_template(name).unwrap().render(sv(&ctx)).unwrap_or_else(|e| panic!("{name}: {e:#}"));
@@ -725,7 +764,10 @@ fn every_template_escapes_injected_values() {
             assert!(out.contains("&lt;script&gt;") || out.contains("%3Cscript%3E"), "{name} 应渲染到注入值（并已转义）");
         }
         assert!(!out.contains(">49<") && !out.contains(" 49 "), "{name}: 模板语法不能被求值");
-        assert!(!out.contains("<svg"), "{name}");
+        // 页面里的 <svg> / <use> 只能是自己的图标标记（注入值里的 <svg 已被转义）；没有任何外部地址。
+        assert!(out.match_indices("<svg").all(|(i, _)| out[i..].starts_with("<svg class=\"")), "{name}: 未知的 <svg");
+        assert!(out.match_indices("<use").all(|(i, _)| out[i..].starts_with("<use href=\"#i-")), "{name}: 未知的 <use");
+        assert!(!out.contains("http://") && !out.contains("https://"), "{name}: 外部地址");
     }
     let _ = p;
 }
@@ -787,4 +829,274 @@ async fn bootstrap_routes() {
     // 没有配置程序目录：一律 404。
     let st3 = AppState::new(mock.clone(), LoginLinks::new(), WebConfig { domain: "pm.test".into(), port: 443, agent_bin_dir: None });
     assert_eq!(boot(&st3, Method::GET, &format!("/a/{BOOT_CODE}")).await.0, StatusCode::NOT_FOUND);
+}
+
+/// 离线保证：模板、样式表与 favicon 不引用任何外部地址（http/https、协议相对地址、@import、外部字体），
+/// 不含脚本、事件处理属性、`javascript:` URL 或可嵌入外部内容的元素；也不含会被 CSP 拦下的内联样式。
+#[test]
+fn assets_are_offline_and_script_free() {
+    fn handler_attr(s: &str) -> Option<String> {
+        let b = s.as_bytes();
+        for i in 1..b.len().saturating_sub(2) {
+            if !(b[i] == b'o' && b[i + 1] == b'n') || !(b[i - 1].is_ascii_whitespace() || b"/\"'".contains(&b[i - 1])) {
+                continue;
+            }
+            let mut j = i + 2;
+            while j < b.len() && b[j].is_ascii_lowercase() {
+                j += 1;
+            }
+            let name_len = j - i - 2;
+            while j < b.len() && b[j].is_ascii_whitespace() {
+                j += 1;
+            }
+            if name_len >= 3 && j < b.len() && b[j] == b'=' {
+                return Some(s[i..j].to_string());
+            }
+        }
+        None
+    }
+    let mut files: Vec<(&str, &str)> = TEMPLATES.to_vec();
+    files.extend(STATIC.iter().map(|(p, _, b)| (*p, *b)));
+    assert!(files.iter().any(|(n, _)| *n == "/static/style.css") && files.iter().any(|(n, _)| *n == "/static/icon.svg"));
+    for (name, src) in files {
+        let l = src.to_ascii_lowercase();
+        // 独立 SVG 文件必需的命名空间声明只是标识符，不会被请求；只允许在 favicon 里出现这一处。
+        let l = if name == "/static/icon.svg" {
+            assert_eq!(l.matches("xmlns=").count(), 1);
+            l.replacen("xmlns=\"http://www.w3.org/2000/svg\"", "", 1)
+        } else {
+            l
+        };
+        for bad in [
+            "http:",
+            "https:",
+            "ftp:",
+            "ws:",
+            "wss:",
+            "javascript:",
+            "vbscript:",
+            "data:",
+            "blob:",
+            "file:",
+            "<script",
+            "<iframe",
+            "<frame",
+            "<object",
+            "<embed",
+            "<img",
+            "<audio",
+            "<video",
+            "<source",
+            "<base",
+            "<meta http-equiv",
+            "<style",
+            "style=\"",
+            "style='",
+            "srcset",
+            "@import",
+            "@font-face",
+            "src=\"//",
+            "href=\"//",
+            "url(//",
+            "xlink:href",
+            "<foreignobject",
+            "<animate",
+            "<set ",
+            "<handler",
+            "rel=\"preconnect",
+            "rel=\"prefetch",
+            "rel=\"preload",
+            "rel=\"dns-prefetch",
+            "rel=\"manifest",
+        ] {
+            assert!(!l.contains(bad), "{name} 含有 {bad:?}");
+        }
+        assert_eq!(handler_attr(&l), None, "{name} 含有事件处理属性");
+        // CSS / SVG 里的 url() 只能引用同一文档内的片段。
+        for (i, _) in l.match_indices("url(") {
+            assert!(l[i..].starts_with("url(#"), "{name}: {}", &l[i..(i + 20).min(l.len())]);
+        }
+        // 模板里的链接、表单与资源地址只能是本站路径或页内片段（`{` 开头的是模板表达式，拼出来的也是本站路径）。
+        for attr in ["href=\"", "src=\"", "action=\"", "formaction=\""] {
+            for (i, _) in l.match_indices(attr) {
+                let v = &l[i + attr.len()..];
+                assert!(
+                    v.starts_with('/') && !v.starts_with("//") || v.starts_with('#') || v.starts_with('{'),
+                    "{name}: {attr}{}",
+                    &v[..20.min(v.len())]
+                );
+            }
+        }
+    }
+    // 自检：检查器确实能发现这些写法。
+    assert!(handler_attr("<svg onload=x()>").is_some() && handler_attr("<a\nonclick = x>").is_some() && handler_attr("<button>").is_none());
+}
+
+/// favicon 与图标：同源 `/static/icon.svg`（CSP 的 `img-src 'self'` 允许，不需要放宽任何指令）；
+/// CSP 与其他安全头保持原样；页面图标全部是内联 SVG，不发起额外请求。
+#[tokio::test]
+async fn favicon_is_same_origin_and_csp_is_unchanged() {
+    // CSP 整体固定：没有 script-src、没有 'unsafe-*'、没有 data:/外部来源；图片只允许本站（favicon）。
+    assert_eq!(
+        CSP,
+        "default-src 'none'; style-src 'self'; img-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'; require-trusted-types-for 'script'; trusted-types 'none'"
+    );
+    for bad in ["unsafe", "script-src", "data:", "http", "*", "blob:"] {
+        assert!(!CSP.contains(bad), "{bad}");
+    }
+    let (st, _) = state();
+    let page = send(&st, Method::GET, "/login", None, None, &[]).await;
+    assert_eq!(page.headers.get("content-security-policy").unwrap(), CSP);
+    assert!(page.body.contains(r#"<link rel="icon" href="/static/icon.svg" type="image/svg+xml">"#));
+    assert!(page.body.contains(r#"<symbol id="i-terminal""#) && page.body.contains(r##"<use href="#i-terminal">"##));
+    let r = send(&st, Method::GET, "/static/icon.svg", None, None, &[]).await;
+    assert_eq!(r.status, StatusCode::OK);
+    assert_eq!(r.body, FAVICON_SVG);
+    for (k, v) in [
+        ("content-type", "image/svg+xml"),
+        ("x-content-type-options", "nosniff"),
+        ("cross-origin-resource-policy", "same-origin"),
+        ("content-security-policy", CSP),
+        ("cache-control", "max-age=3600"),
+    ] {
+        assert_eq!(r.headers.get(k).unwrap(), v, "{k}");
+    }
+    assert!(r.body.starts_with("<svg xmlns=") && r.body.ends_with("</svg>"));
+    // 静态资源也经过入口检查（Host 必须正确）。
+    let req = axum::http::Request::builder().uri("/static/icon.svg").header("host", "evil.example").body(Body::empty()).unwrap();
+    assert_eq!(router(st.clone()).oneshot(req).await.unwrap().status(), StatusCode::FORBIDDEN);
+    // 导航高亮当前页面。
+    let (cookie, _) = login(&st).await;
+    for (p, href) in
+        [("/", "/"), ("/entries", "/entries"), ("/entries/new", "/entries"), ("/tokens", "/tokens"), ("/security", "/security")]
+    {
+        let r = send(&st, Method::GET, p, Some(&cookie), None, &[]).await;
+        assert!(r.body.contains(&format!(r#"<a href="{href}" aria-current="page">"#)), "{p}");
+        assert_eq!(r.body.matches("aria-current").count(), 1, "{p}");
+    }
+}
+
+/// 图标：模板里用到的名字都有定义，sprite 里的定义都在白名单里；未知名字（包括注入尝试）渲染为空。
+#[test]
+fn icons_are_defined_and_safe() {
+    let base = TEMPLATES.iter().find(|(n, _)| *n == "base.html").unwrap().1;
+    for n in ICONS {
+        assert_eq!(base.matches(&format!(r#"<symbol id="i-{n}" viewBox="0 0 24 24">"#)).count(), 1, "{n}");
+    }
+    assert_eq!(base.matches("<symbol ").count(), ICONS.len());
+    let mut used = std::collections::BTreeSet::new();
+    for (name, src) in TEMPLATES {
+        for (i, _) in src.match_indices("icon(\"") {
+            let n = src[i + 6..].split('"').next().unwrap();
+            assert!(ICONS.contains(&n), "{name}: 未定义的图标 {n}");
+            used.insert(n);
+        }
+    }
+    assert_eq!(used.len(), ICONS.len(), "没用到的图标：{:?}", ICONS.iter().filter(|n| !used.contains(*n)).collect::<Vec<_>>());
+    let env = templates();
+    assert_eq!(
+        env.render_str(r#"{{ icon("key") }}"#, ()).unwrap(),
+        r##"<svg class="i" aria-hidden="true" focusable="false"><use href="#i-key"></use></svg>"##
+    );
+    for bad in ["nope", "\"><script>", "key\"", "", "../key"] {
+        assert_eq!(env.render_str("{{ icon(n) }}", context! { n => bad }).unwrap(), "", "{bad}");
+    }
+}
+
+/// 浏览器表单提交：Referrer-Policy 必须是 same-origin（响应头与 <meta> 一致）。no-referrer 会让浏览器在
+/// 表单 POST 里发送 "Origin: null"，入口检查（正确地）拒绝，网页上的所有表单都无法使用。
+#[tokio::test]
+async fn referrer_policy_is_same_origin_and_browser_posts_work() {
+    assert_eq!(REFERRER_POLICY, "same-origin");
+    let (st, _) = state();
+    let page = send(&st, Method::GET, "/login", None, None, &[]).await;
+    assert_eq!(page.headers.get("referrer-policy").unwrap(), "same-origin");
+    assert!(page.body.contains(r#"<meta name="referrer" content="same-origin">"#));
+    assert_eq!(page.body.matches("name=\"referrer\"").count(), 1);
+    let base = TEMPLATES.iter().find(|(n, _)| *n == "base.html").unwrap().1;
+    assert!(!base.contains("no-referrer"));
+
+    // 入口检查仍然严格：Origin: null、外站、错误端口、缺少端口的 Host、跨站 Fetch Metadata 都拒绝。
+    let o = "https://pm.test:8121".to_string();
+    let hdr = |pairs: &[(&str, &str)]| {
+        let mut h = HeaderMap::new();
+        for (k, v) in pairs {
+            h.insert(axum::http::HeaderName::from_bytes(k.as_bytes()).unwrap(), HeaderValue::from_str(v).unwrap());
+        }
+        h
+    };
+    let g = |h: &HeaderMap| guard_check("pm.test", 8121, &o, &Method::POST, &"/lock".parse::<Uri>().unwrap(), h);
+    let same =
+        [("host", "pm.test:8121"), ("sec-fetch-site", "same-origin"), ("sec-fetch-mode", "navigate"), ("sec-fetch-dest", "document")];
+    assert!(g(&hdr(&[&same[..], &[("origin", "https://pm.test:8121")]].concat())).is_ok());
+    for bad in [
+        "null",
+        "https://evil.example",
+        "https://pm.test",
+        "https://pm.test:443",
+        "http://pm.test:8121",
+        "https://pm.test:8121.evil.example",
+    ] {
+        assert!(g(&hdr(&[&same[..], &[("origin", bad)]].concat())).is_err(), "{bad}");
+    }
+    assert!(g(&hdr(&[("host", "pm.test"), ("origin", "https://pm.test:8121")])).is_err(), "Host 缺少端口");
+    assert!(g(&hdr(&[("host", "evil.example:8121"), ("origin", "https://pm.test:8121")])).is_err(), "Host 不对");
+    let cross =
+        [("host", "pm.test:8121"), ("sec-fetch-site", "cross-site"), ("sec-fetch-mode", "navigate"), ("sec-fetch-dest", "document")];
+    assert!(g(&hdr(&[&cross[..], &[("origin", "https://pm.test:8121")]].concat())).is_err(), "跨站表单");
+
+    // 真实浏览器在 same-origin 策略下发送的同源 POST（非 443 端口）：登录确认、保存条目、锁定都成功。
+    let mock = Arc::new(Mock::default());
+    let st = AppState::new(mock.clone(), LoginLinks::new(), WebConfig { domain: "pm.test".into(), port: 8121, agent_bin_dir: None });
+    let browser = [
+        ("host", "pm.test:8121"),
+        ("origin", "https://pm.test:8121"),
+        ("sec-fetch-site", "same-origin"),
+        ("sec-fetch-mode", "navigate"),
+        ("sec-fetch-dest", "document"),
+    ];
+    let t = st.links.create();
+    // 同样的请求带 Origin: null（no-referrer 时浏览器的行为）被拒绝，且不消耗链接。
+    let mut null = browser;
+    null[1] = ("origin", "null");
+    assert_eq!(send(&st, Method::POST, &format!("/l/{t}"), None, Some(""), &null).await.status, StatusCode::FORBIDDEN);
+    assert!(st.links.valid(&t));
+    let r = send(&st, Method::POST, &format!("/l/{t}"), None, Some(""), &browser).await;
+    assert_eq!(r.status, StatusCode::SEE_OTHER);
+    assert!(!st.links.valid(&t), "POST 消耗链接");
+    assert_eq!(send(&st, Method::POST, &format!("/l/{t}"), None, Some(""), &browser).await.status, StatusCode::NOT_FOUND, "只能用一次");
+    let cookie = r
+        .headers
+        .get(header::SET_COOKIE)
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .strip_prefix(&format!("{COOKIE}="))
+        .unwrap()
+        .to_string();
+    let page = send(&st, Method::GET, "/entries/new", Some(&cookie), None, &browser[..1]).await;
+    assert_eq!(page.status, StatusCode::OK);
+    let i = page.body.find("name=\"csrf\" value=\"").unwrap() + 19;
+    let csrf = page.body[i..].split('"').next().unwrap().to_string();
+    let form = format!("csrf={csrf}&name=gh&domains=api.example.com&kind=password&secret={}", enc(SECRET));
+    let r = send(&st, Method::POST, "/entries", Some(&cookie), Some(&form), &browser).await;
+    assert_eq!((r.status, r.headers.get("location").unwrap().to_str().unwrap()), (StatusCode::SEE_OTHER, "/entries?done=saved"));
+    assert_eq!(mock.entries.lock().unwrap()[0].1, SECRET);
+    let r = send(&st, Method::POST, "/lock", Some(&cookie), Some(&format!("csrf={csrf}")), &browser).await;
+    assert_eq!(r.status, StatusCode::SEE_OTHER);
+    assert!(*mock.locked.lock().unwrap());
+    // 同样的保存请求带 Origin: null 或外站 Origin：拒绝（即使 CSRF 令牌正确）。
+    for bad in ["null", "https://evil.example"] {
+        let mut h = browser;
+        h[1] = ("origin", bad);
+        assert_eq!(
+            send(&st, Method::POST, "/unlock", Some(&cookie), Some(&format!("csrf={csrf}")), &h).await.status,
+            StatusCode::FORBIDDEN,
+            "{bad}"
+        );
+    }
+    assert!(*mock.locked.lock().unwrap());
 }

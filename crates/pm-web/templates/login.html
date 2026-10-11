@@ -1,10 +1,17 @@
 {% extends "base.html" %}
 {% block title %}登录 · PassManager{% endblock %}
 {% block body %}
-<h1>登录</h1>
-<div class="card narrow">
-  <p>网页管理没有密码。请在服务器上以 root 运行：</p>
-  <p><code>passmanager login</code></p>
-  <p>然后在 2 分钟内打开它输出的一次性链接。</p>
+<div class="auth">
+  <section class="card auth-card">
+    <div class="auth-icon">{{ icon("terminal") }}</div>
+    <h1>登录</h1>
+    <p class="lede">网页管理没有密码，只能用服务器上生成的一次性链接登录。</p>
+    <ol class="steps">
+      <li>在服务器上以 root 运行：
+        <div class="cmd">{{ icon("copy") }}<code>passmanager login</code></div>
+      </li>
+      <li>在 2 分钟内打开它输出的一次性链接（只能使用一次）。</li>
+    </ol>
+  </section>
 </div>
 {% endblock %}

@@ -4,6 +4,25 @@ English | [简体中文](CHANGELOG.zh-CN.md)
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.3.6] - 2026-10-11
+
+### Changed
+
+- **Web admin UI redesign** (still server-rendered, no JavaScript, no external resources): consistent spacing and type scale; page headers with icon, description and primary action; navigation highlights the current page (`aria-current`) and wraps on narrow screens; status tiles and badges for vault lock state, seal level (L1/L2/L3), certificate expiry (days left; amber at ≤ 21 days, red at ≤ 7 days or expired), security-check result (failing checks are listed on the status page), token state (used / never used) and enrollment-code countdown; forms with separate labels, hints (`aria-describedby`), `:user-invalid` styling and an explicit "re-enter the secret" hint after a failed save; the entry form hides inputs that do not apply to the selected type via CSS `:has()` (everything stays visible without it; the server still ignores them); delete and revoke ask for confirmation through `<details>` (no script); empty states for entries, tokens, enrollment codes, pins and checks; tables become stacked cards below 720 px; skip link, `:focus-visible` outlines, `prefers-reduced-motion` and `forced-colors` support; light and dark palettes checked against WCAG AA (every text/background pair ≥ 5.8:1).
+- **Icons**: a small stroke icon set (shield, key, lock/unlock, server, token, link, settings, warning, check, copy, trash, …) as an inline SVG sprite in the page; templates call `icon("name")`, which only accepts names from a fixed list. New same-origin favicon `/static/icon.svg`.
+- **CSP tightened**: `img-src 'self' data:` → `img-src 'self'` (`data:` was never used; the favicon is same-origin). Other CSP directives unchanged.
+
+### Fixed
+
+- **Web forms were rejected in real browsers** (since the web UI was introduced): with `Referrer-Policy: no-referrer` browsers send `Origin: null` on form POSTs, which the request guard (correctly) rejects with 403 — login confirmation, saving entries, locking, etc. all failed. The policy is now `same-origin` (response header and `<meta>`): same-origin requests carry the real Origin/Referer, cross-origin requests still get no Referer. The guard is unchanged and still rejects `Origin: null`, foreign origins, wrong Host and cross-site Fetch Metadata. Verified end-to-end in Chrome (one-time-link login, entry create/edit/delete, token create/revoke, lock/unlock); the login-link token is only ever sent back to the same origin and is consumed by the POST.
+
+### Tests
+
+- Offline guarantee: templates, stylesheet and favicon must not reference external URLs (http/https, protocol-relative, `@import`, fonts, `data:`), contain `<script>`, event-handler attributes, `javascript:` URLs, embedding elements or inline styles; links, form actions and resources must be same-site paths or fragments.
+- Favicon/CSP test: exact CSP string, favicon headers (`image/svg+xml`, `nosniff`, CORP `same-origin`, CSP), Host check also applies to static files, navigation highlight.
+- Icon test (every used name is defined, unknown or injected names render nothing); the XSS injection test covers the new template variables (`nav`, `st.ready`, `st.issues`, `st.allow`) and the new branches (empty states, certificate expiry, seal levels).
+- Referrer-Policy test: header and `<meta>` pinned to `same-origin`; the guard still rejects `Origin: null` and foreign origins; same-origin browser POSTs (`Origin: https://pm.test:8121`, `Sec-Fetch-Site: same-origin`, valid CSRF) succeed for login confirmation, entry save and lock, while the same requests with `Origin: null` are rejected without consuming the link.
+
 ## [0.3.5] - 2026-10-11
 
 ### Added

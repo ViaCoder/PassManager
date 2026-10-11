@@ -1,24 +1,50 @@
 {% extends "base.html" %}
+{% block title %}条目 · PassManager{% endblock %}
 {% block body %}
-<h1>条目</h1>
-<p class="muted">密钥只能写入，任何页面都不会显示。Agent 用 <code>{{ "{{secret}}" }}</code> 占位，服务端按主机自动填入并对结果脱敏。</p>
-<p><a href="/entries/new"><button class="small">新增条目</button></a></p>
-<div class="table-wrap"><table class="list">
-  <tr><th>引用名</th><th>域名</th><th>说明</th><th>类型</th><th>更新</th><th></th></tr>
+<div class="page-head">
+  <div>
+    <h1>{{ icon("key") }}条目</h1>
+    <p class="lede">密钥只能写入，任何页面都不会显示。Agent 用 <code>{{ "{{secret}}" }}</code> 占位，服务端按主机自动填入并对结果脱敏。</p>
+  </div>
+  <div class="actions"><a class="btn" href="/entries/new">{{ icon("plus") }}新增条目</a></div>
+</div>
+{% if entries %}
+<div class="table-wrap"><table class="list stack">
+  <thead><tr><th scope="col">引用名</th><th scope="col">域名</th><th scope="col">说明</th><th scope="col">类型</th><th scope="col">更新</th><th scope="col"><span class="sr-only">操作</span></th></tr></thead>
+  <tbody>
   {% for e in entries %}
   <tr>
-    <td><code>{{ e.name }}</code></td>
-    <td>{% for d in e.domains %}<code>{{ d }}</code> {% else %}<span class="tag">未绑定域名</span>{% endfor %}</td>
-    <td>{{ e.note }}</td>
-    <td>{% if e.kind == "ssh-key" %}<span class="tag">SSH 私钥</span>{% if e.public_key %}<br><code>{{ e.public_key }}</code>{% endif %}{% elif e.kind == "fields" %}<span class="tag">字段</span> {% for f in e.fields %}<code>{{ f }}</code> {% endfor %}{% else %}<span class="tag">密钥</span>{% endif %}{% if e.self_signed %} <span class="tag">自签证书</span>{% endif %}{% if e.ops %} <span class="tag">仅 {{ e.ops | join("、") }}</span>{% endif %}</td>
-    <td>{{ e.updated | datetime }}</td>
-    <td class="row">
-      <a href="/entries/{{ e.name | urlencode }}/edit"><button class="secondary small">编辑</button></a>
-      <form method="post" action="/entries/{{ e.name | urlencode }}/delete" class="inline"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="danger small">删除</button></form>
+    <td data-label="引用名"><code class="strong">{{ e.name }}</code></td>
+    <td data-label="域名">{% for d in e.domains %}<code>{{ d }}</code> {% else %}<span class="badge warn">{{ icon("warning") }}未绑定域名</span>{% endfor %}</td>
+    <td data-label="说明">{% if e.note %}{{ e.note }}{% else %}<span class="muted">—</span>{% endif %}</td>
+    <td data-label="类型"><div class="tags">{% if e.kind == "ssh-key" %}<span class="tag">{{ icon("key") }}SSH 私钥</span>{% elif e.kind == "fields" %}<span class="tag">字段</span> {% for f in e.fields %}<code>{{ f }}</code> {% endfor %}{% else %}<span class="tag">{{ icon("lock") }}密钥</span>{% endif %}{% if e.self_signed %} <span class="tag">自签证书</span>{% endif %}{% if e.ops %} <span class="tag info">仅 {{ e.ops | join("、") }}</span>{% endif %}</div>{% if e.kind == "ssh-key" and e.public_key %}<div class="sub"><code>{{ e.public_key }}</code></div>{% endif %}</td>
+    <td data-label="更新" class="nowrap">{{ e.updated | datetime }}</td>
+    <td class="actions-cell">
+      <div class="row">
+        <a class="btn secondary small" href="/entries/{{ e.name | urlencode }}/edit">{{ icon("edit") }}编辑</a>
+        <details class="confirm">
+          <summary class="btn danger-outline small">{{ icon("trash") }}删除</summary>
+          <form method="post" action="/entries/{{ e.name | urlencode }}/delete" class="confirm-box"><input type="hidden" name="csrf" value="{{ csrf }}"><span>删除 <code>{{ e.name }}</code>？此操作无法撤销。</span><button class="danger small">{{ icon("trash") }}确认删除</button></form>
+        </details>
+      </div>
     </td>
   </tr>
-  {% else %}
-  <tr><td colspan="6" class="muted">还没有条目。</td></tr>
   {% endfor %}
+  </tbody>
 </table></div>
+{% elif flash_kind == "err" %}
+<div class="empty">
+  {{ icon("lock") }}
+  <p class="empty-title">条目暂时无法显示</p>
+  <p class="muted">原因见上方提示。</p>
+  <a class="btn secondary" href="/">{{ icon("activity") }}前往状态页</a>
+</div>
+{% else %}
+<div class="empty">
+  {{ icon("key") }}
+  <p class="empty-title">还没有条目</p>
+  <p class="muted">新增一个条目后，Agent 就能在请求里用占位符引用它，密钥本身不会离开服务器。</p>
+  <a class="btn" href="/entries/new">{{ icon("plus") }}新增条目</a>
+</div>
+{% endif %}
 {% endblock %}

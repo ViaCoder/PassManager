@@ -1,27 +1,50 @@
 {% extends "base.html" %}
+{% block title %}主机指纹 · PassManager{% endblock %}
 {% block body %}
-<h1>主机指纹</h1>
+<div class="page-head">
+  <div>
+    <h1>{{ icon("server") }}主机指纹</h1>
+    <p class="lede">首次连接时记录的 TLS 证书与 SSH 主机密钥指纹。指纹变化时服务端拒绝发送凭据，直到你确认。</p>
+  </div>
+</div>
 {% if pending %}
-<h2>指纹已变更（已阻止发送凭据）</h2>
-<div class="table-wrap"><table class="list">
-  <tr><th>类型</th><th>主机</th><th>原指纹</th><th>新指纹</th><th>时间</th></tr>
+<section class="callout bad" aria-labelledby="pending-title">
+  {{ icon("warning") }}
+  <div>
+    <p class="callout-title" id="pending-title">指纹已变更（已阻止发送凭据）</p>
+    <p>确认是你自己更换了证书或主机密钥后，再用下面的表单信任新指纹。</p>
+  </div>
+</section>
+<div class="table-wrap"><table class="list stack">
+  <thead><tr><th scope="col">类型</th><th scope="col">主机</th><th scope="col">原指纹</th><th scope="col">新指纹</th><th scope="col">时间</th></tr></thead>
+  <tbody>
   {% for p in pending %}
-  <tr><td>{{ p.kind }}</td><td><code>{{ p.host_port }}</code></td><td><code>{{ p.old_fingerprint }}</code></td><td><code>{{ p.new_fingerprint }}</code></td><td>{{ p.seen_at | datetime }}</td></tr>
+  <tr><td data-label="类型"><span class="tag">{{ p.kind }}</span></td><td data-label="主机"><code>{{ p.host_port }}</code></td><td data-label="原指纹"><code class="fp">{{ p.old_fingerprint }}</code></td><td data-label="新指纹"><code class="fp bad-text">{{ p.new_fingerprint }}</code></td><td data-label="时间" class="nowrap">{{ p.seen_at | datetime }}</td></tr>
   {% endfor %}
+  </tbody>
 </table></div>
 {% endif %}
-<form method="post" action="/pins/trust" class="card">
+<form method="post" action="/pins/trust" class="card form">
   <input type="hidden" name="csrf" value="{{ csrf }}">
-  <label>信任新指纹：主机名（清除该主机所有端口）、<code>*.domain</code>，或 <code>host:port</code><input name="pattern" required maxlength="253"></label>
-  <button>清除记录并在下次连接时重新记录</button>
+  <h2 class="card-title">{{ icon("check") }}信任新指纹</h2>
+  <div class="field">
+    <label for="f-pattern">主机</label>
+    <input id="f-pattern" name="pattern" required maxlength="253" spellcheck="false" aria-describedby="h-pattern">
+    <p class="hint" id="h-pattern">主机名（清除该主机所有端口）、<code>*.domain</code>，或 <code>host:port</code>。</p>
+  </div>
+  <div class="form-actions"><button>清除记录并在下次连接时重新记录</button></div>
 </form>
-<h2>已记录的指纹</h2>
-<div class="table-wrap"><table class="list small">
-  <tr><th>类型</th><th>主机</th><th>算法</th><th>指纹</th><th>首次记录</th></tr>
+<h2 class="section-title">已记录的指纹</h2>
+{% if pins %}
+<div class="table-wrap"><table class="list stack small">
+  <thead><tr><th scope="col">类型</th><th scope="col">主机</th><th scope="col">算法</th><th scope="col">指纹</th><th scope="col">首次记录</th></tr></thead>
+  <tbody>
   {% for p in pins %}
-  <tr><td>{{ p.kind }}</td><td><code>{{ p.host_port }}</code></td><td>{{ p.algo }}</td><td><code>{{ p.fingerprint }}</code></td><td>{{ p.first_seen | datetime }}</td></tr>
-  {% else %}
-  <tr><td colspan="5" class="muted">没有。</td></tr>
+  <tr><td data-label="类型"><span class="tag">{{ p.kind }}</span></td><td data-label="主机"><code>{{ p.host_port }}</code></td><td data-label="算法">{{ p.algo }}</td><td data-label="指纹"><code class="fp">{{ p.fingerprint }}</code></td><td data-label="首次记录" class="nowrap">{{ p.first_seen | datetime }}</td></tr>
   {% endfor %}
+  </tbody>
 </table></div>
+{% else %}
+<div class="empty compact">{{ icon("server") }}<p class="empty-title">还没有记录</p><p class="muted">Agent 第一次连接某个主机时会在这里记录它的指纹。</p></div>
+{% endif %}
 {% endblock %}

@@ -1,10 +1,13 @@
 {% extends "base.html" %}
 {% block title %}确认登录 · PassManager{% endblock %}
 {% block body %}
-<h1>确认登录</h1>
-<form method="post" action="/l/{{ token }}" class="card narrow">
-  <p>这个一次性链接来自服务器上的 <code>passmanager login</code>（root），2 分钟内有效，只能使用一次。</p>
-  <p class="muted">会话空闲 2 小时或登录满 12 小时后失效。</p>
-  <button autofocus>登录</button>
-</form>
+<div class="auth">
+  <form method="post" action="/l/{{ token }}" class="card auth-card">
+    <div class="auth-icon">{{ icon("link") }}</div>
+    <h1>确认登录</h1>
+    <p>这个一次性链接来自服务器上的 <code>passmanager login</code>（root），2 分钟内有效，只能使用一次。</p>
+    <p class="hint">{{ icon("clock") }}会话空闲 2 小时或登录满 12 小时后失效。</p>
+    <button class="block" autofocus>{{ icon("unlock") }}登录</button>
+  </form>
+</div>
 {% endblock %}
