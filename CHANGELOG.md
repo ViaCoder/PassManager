@@ -4,7 +4,14 @@ English | [简体中文](CHANGELOG.zh-CN.md)
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow [Semantic Versioning](https://semver.org/).
 
-## [0.3.0] - Unreleased
+## [0.3.1] - 2026-10-11
+
+### Fixed
+
+- **Agent configuration location**: `enroll` now always writes the agent's remote configuration to `~/.config/passmanager` (Windows: `%APPDATA%\PassManager`) instead of following `XDG_CONFIG_HOME`, and later use looks there first (then in the `XDG_CONFIG_HOME` location used by 0.3.0 and earlier). Before, an agent enrolled from one environment (for example the `curl … | sh` terminal) could not find its configuration when started with a different `XDG_CONFIG_HOME` (for example as an MCP server, or on CI runners) and fell back to local mode (`NO_TOKEN`). `unenroll` cleans up both locations. `PASSMANAGER_CONFIG_DIR` still overrides everything.
+- **CI / release on Windows arm64**: the LLVM installer is awaited (exit code checked) and its removal from `RUNNER_TEMP` is best-effort, so the setup no longer fails with "access denied" (v0.3.0 had no GitHub Release because of this).
+
+## [0.3.0] - 2026-10-11
 
 ### Added
 

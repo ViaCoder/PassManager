@@ -4,7 +4,14 @@
 
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
-## [0.3.0] - 未发布
+## [0.3.1] - 2026-10-11
+
+### 修复
+
+- **Agent 配置的位置**：`enroll` 现在总是把远程配置写到 `~/.config/passmanager`（Windows：`%APPDATA%\PassManager`），不再跟随 `XDG_CONFIG_HOME`；之后使用时先找这里，再找 0.3.0 及更早版本按 `XDG_CONFIG_HOME` 写入的位置。此前在一种环境里注册（例如执行 `curl … | sh` 的终端），而在 `XDG_CONFIG_HOME` 不同的环境里启动（例如作为 MCP 服务，或在 CI 运行器上）时找不到配置，会退回单机模式（`NO_TOKEN`）。`unenroll` 清理两个位置。`PASSMANAGER_CONFIG_DIR` 仍然优先。
+- **Windows arm64 的 CI 与发布**：等待 LLVM 安装程序结束并检查退出码，从 `RUNNER_TEMP` 删除安装包改为尽力而为，不再因"拒绝访问"失败（v0.3.0 因此没有生成 GitHub Release）。
+
+## [0.3.0] - 2026-10-11
 
 ### 新增
 

@@ -112,16 +112,39 @@ fn proxy(env: &Env, tamper: Arc<AtomicBool>) -> (u16, std::path::PathBuf) {
 }
 
 fn sh(home: &Path, ca: &Path, cmd: &str) -> Output {
-    Command::new("sh")
-        .arg("-c")
+    sh_env(home, ca, cmd, &[])
+}
+
+/// 以干净的环境运行一行命令（只有 HOME、PATH、测试 CA 与 `extra`）。
+fn sh_env(home: &Path, ca: &Path, cmd: &str, extra: &[(&str, &str)]) -> Output {
+    let mut c = Command::new("sh");
+    c.arg("-c")
         .arg(cmd)
         .env_clear()
         .env("HOME", home)
         .env("PATH", "/usr/local/bin:/usr/bin:/bin")
         .env("CURL_CA_BUNDLE", ca)
-        .env("PASSMANAGER_TPM_SOCKET", "/nonexistent")
-        .output()
-        .unwrap()
+        .env("PASSMANAGER_TPM_SOCKET", "/nonexistent");
+    for (k, v) in extra {
+        c.env(k, v);
+    }
+    c.output().unwrap()
+}
+
+/// （说明，要设置的环境变量，要移除的环境变量）。
+type EnvVariant<'a> = (&'a str, Vec<(&'a str, &'a str)>, Vec<&'a str>);
+
+/// 以给定的环境运行注册后的客户端（模拟 Agent 启动 MCP / CLI 时与安装时不同的环境）。
+fn client_list(home: &Path, env: &[(&str, &str)], remove: &[&str]) -> Output {
+    let mut c = Command::new(BIN);
+    c.arg("list").env("HOME", home).env_remove("PASSMANAGER_CONFIG_DIR").env_remove("PASSMANAGER_HOME");
+    for k in remove {
+        c.env_remove(k);
+    }
+    for (k, v) in env {
+        c.env(k, v);
+    }
+    c.output().unwrap()
 }
 
 /// 从接入说明里取出一行命令与注册码。
@@ -204,10 +227,59 @@ fn one_line_agent_setup() {
     assert!(std::fs::read_to_string(h2.join(".codex/AGENTS.md")).unwrap().contains("<!-- passmanager:end -->"));
     assert_eq!(std::fs::read_to_string(h2.join(".claude/CLAUDE.md.passmanager.bak")).unwrap(), "# my own rules\n");
     assert!(std::fs::read_to_string(h2.join(".claude.json")).unwrap().contains("passmanager"), "MCP 配置");
-    // 注册后的客户端可以使用。
-    let o = Command::new(BIN).arg("list").env("HOME", &h2).env_remove("PASSMANAGER_CONFIG_DIR").output().unwrap();
-    assert!(o.status.success(), "{}{}", stdout(&o), stderr(&o));
+    // 注册后的客户端可以使用——无论之后的环境里 XDG_* 是否设置、是否与安装时不同（CI 运行器会设置 XDG_CONFIG_HOME）。
+    let xdg = env.base.join("xdg-other");
+    let xdg_s = xdg.to_str().unwrap().to_string();
+    let variants: Vec<EnvVariant> = vec![
+        ("继承测试进程的环境", vec![], vec![]),
+        ("没有任何 XDG_*", vec![], vec!["XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_RUNTIME_DIR"]),
+        ("XDG_CONFIG_HOME 指向别处", vec![("XDG_CONFIG_HOME", xdg_s.as_str())], vec![]),
+        (
+            "全部 XDG_* 指向别处",
+            vec![("XDG_CONFIG_HOME", xdg_s.as_str()), ("XDG_DATA_HOME", xdg_s.as_str()), ("XDG_STATE_HOME", xdg_s.as_str())],
+            vec![],
+        ),
+        ("最小 PATH", vec![("PATH", "/usr/bin:/bin")], vec![]),
+    ];
+    for (what, set, remove) in &variants {
+        let o = client_list(&h2, set, remove);
+        assert!(o.status.success(), "{what}: {}{}", stdout(&o), stderr(&o));
+    }
     let token = std::fs::read_to_string(h2.join(".config/passmanager/token")).unwrap();
+
+    // ---- 安装时设置了 XDG_*（与之后的使用不同）：配置仍写到固定位置，之后在任何环境下都能找到 ----
+    let o = env.run(&["agent-setup", "--label", "xdg"]);
+    let (xline, _) = one_liner(&stdout(&o));
+    let xcmd = xline.replace(&format!("https://pm.test:{}", env.web), &format!("https://127.0.0.1:{pport}"));
+    let h6 = env.base.join("h6");
+    std::fs::create_dir_all(&h6).unwrap();
+    let install_xdg = env.base.join("xdg-install");
+    let ix = install_xdg.to_str().unwrap();
+    let o = sh_env(&h6, &pca, &xcmd, &[("XDG_CONFIG_HOME", ix), ("XDG_DATA_HOME", ix), ("XDG_STATE_HOME", ix)]);
+    outputs += &(stdout(&o) + &stderr(&o));
+    assert!(o.status.success(), "{}{}", stdout(&o), stderr(&o));
+    assert!(h6.join(".config/passmanager/remote.toml").exists() && !install_xdg.join("passmanager").exists(), "写入位置与 XDG 无关");
+    for (what, set, remove) in &variants {
+        let o = client_list(&h6, set, remove);
+        assert!(o.status.success(), "安装时有 XDG，使用时{what}: {}{}", stdout(&o), stderr(&o));
+    }
+    // 0.3.0 及更早版本按 XDG_CONFIG_HOME 写入的配置仍能读取；unenroll 清理所有位置。
+    let legacy = env.base.join("xdg-legacy");
+    std::fs::create_dir_all(legacy.join("passmanager")).unwrap();
+    for f in ["remote.toml", "token", "server-keys.bin"] {
+        std::fs::rename(h6.join(".config/passmanager").join(f), legacy.join("passmanager").join(f)).unwrap();
+    }
+    let lx = legacy.to_str().unwrap();
+    let o = client_list(&h6, &[("XDG_CONFIG_HOME", lx)], &[]);
+    assert!(o.status.success(), "旧位置：{}{}", stdout(&o), stderr(&o));
+    let o = Command::new(BIN)
+        .arg("unenroll")
+        .env("HOME", &h6)
+        .env("XDG_CONFIG_HOME", lx)
+        .env_remove("PASSMANAGER_CONFIG_DIR")
+        .output()
+        .unwrap();
+    assert!(o.status.success() && !legacy.join("passmanager/remote.toml").exists(), "{}", stdout(&o));
 
     // ---- 只能用一次：脚本已消耗 → /a/ 404，直接 enroll 失败 ----
     assert_eq!(pq_get(&env, "GET", &format!("/a/{code}")).0, 404);

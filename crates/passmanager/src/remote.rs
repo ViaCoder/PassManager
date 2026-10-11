@@ -30,7 +30,13 @@ pub struct RemoteConfig {
     pub ca_file: Option<PathBuf>,
 }
 
+/// 读取用的配置目录（已注册时是保存 `remote.toml` 的目录，见 `pm_platform::paths::client_config_dir`）。
 pub fn dir() -> PathBuf {
+    pm_platform::paths::client_config_read_dir(CONFIG_FILE)
+}
+
+/// 注册时写入的目录（固定，不受 XDG_CONFIG_HOME 影响）。
+pub fn write_dir() -> PathBuf {
     pm_platform::paths::client_config_dir()
 }
 
@@ -153,7 +159,7 @@ pub fn enroll(url: &str, o: &EnrollOpts) -> Result<RemoteConfig, String> {
     })?;
     let stream = pm_net::client::connect(&target, &public).map_err(|e| format!("建立加密会话失败：{e}"))?;
     let token = Zeroizing::new(Client::enroll_stream(stream, &u.code, &u.host).map_err(|e| e.message)?);
-    let d = dir();
+    let d = write_dir();
     std::fs::create_dir_all(&d).map_err(|e| e.to_string())?;
     #[cfg(unix)]
     {
@@ -207,14 +213,17 @@ pub fn enroll_cmd(url: &str, o: EnrollOpts) -> ExitCode {
 
 /// `passmanager unenroll`：删除远程配置与令牌，移除 MCP 配置与写入的使用规则。服务器上的令牌请在网页里吊销。
 pub fn unenroll() -> ExitCode {
-    let d = dir();
-    let mut removed = 0;
-    for f in [CONFIG_FILE, TOKEN_FILE, KEYS_FILE, "git-proxy.token"] {
-        if std::fs::remove_file(d.join(f)).is_ok() {
-            removed += 1;
+    for d in pm_platform::paths::client_config_dirs() {
+        let mut removed = 0;
+        for f in [CONFIG_FILE, TOKEN_FILE, KEYS_FILE, "git-proxy.token"] {
+            if std::fs::remove_file(d.join(f)).is_ok() {
+                removed += 1;
+            }
+        }
+        if removed > 0 {
+            println!("已删除远程配置（{} 个文件，{}）", removed, d.display());
         }
     }
-    println!("已删除远程配置（{} 个文件，{}）", removed, d.display());
     for a in pm_tui::agents::ADAPTERS.iter().filter(|a| a.configured()) {
         match a.disconnect() {
             Ok(()) => println!("  · {}：已移除 MCP 配置", a.name),

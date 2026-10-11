@@ -4,7 +4,7 @@
 //! - 用户模式（无管理员权限时的降级方案，L1）：服务以当前用户运行。
 //! - `PASSMANAGER_HOME`：测试/开发用覆盖，所有文件放在该目录下（视为用户模式）。
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -179,23 +179,45 @@ impl Layout {
 }
 
 /// Agent 端（远程模式）的配置目录：`remote.toml`、令牌文件、缓存的服务端公钥。
-/// `PASSMANAGER_CONFIG_DIR` 可覆盖（测试用）。
+///
+/// 注册（写入）与之后的使用（读取）必须找到同一个目录，而 `XDG_CONFIG_HOME` 等环境变量在不同的启动方式之间常常不同
+/// （例如 `curl | sh` 的终端、Agent 启动 MCP 子进程、CI 运行器）。因此：
+/// - 写入固定在 `~/.config/passmanager`（Unix）/ `%APPDATA%\PassManager`（Windows），不受 `XDG_CONFIG_HOME` 影响；
+/// - 读取先找该目录，再兼容 0.3.0 及更早版本按 `XDG_CONFIG_HOME` 写入的位置；
+/// - `PASSMANAGER_CONFIG_DIR` 覆盖以上全部（测试与特殊部署用）。
 pub fn client_config_dir() -> PathBuf {
-    if let Some(d) = std::env::var_os("PASSMANAGER_CONFIG_DIR").filter(|d| !d.is_empty()) {
-        return PathBuf::from(d);
+    client_config_dirs_with(|k| std::env::var_os(k), &home()).0
+}
+
+/// 读取时使用的目录：第一个含有 `probe` 文件的候选目录；都没有时为写入目录。
+pub fn client_config_read_dir(probe: &str) -> PathBuf {
+    let (write, candidates) = client_config_dirs_with(|k| std::env::var_os(k), &home());
+    candidates.into_iter().find(|d| d.join(probe).is_file()).unwrap_or(write)
+}
+
+/// 所有可能的客户端配置目录（写入目录在前），用于取消注册时全部清理。
+pub fn client_config_dirs() -> Vec<PathBuf> {
+    client_config_dirs_with(|k| std::env::var_os(k), &home()).1
+}
+
+/// 纯函数：由环境变量与主目录得到（写入目录，读取候选目录）。
+pub fn client_config_dirs_with(get: impl Fn(&str) -> Option<std::ffi::OsString>, home: &Path) -> (PathBuf, Vec<PathBuf>) {
+    let nonempty = |k: &str| get(k).filter(|d| !d.is_empty()).map(PathBuf::from);
+    if let Some(d) = nonempty("PASSMANAGER_CONFIG_DIR") {
+        return (d.clone(), vec![d]);
     }
-    #[cfg(windows)]
+    if cfg!(windows) {
+        let d = nonempty("APPDATA").unwrap_or_else(|| home.join("AppData").join("Roaming")).join(APP);
+        return (d.clone(), vec![d]);
+    }
+    let canonical = home.join(".config").join("passmanager");
+    let mut candidates = vec![canonical.clone()];
+    if let Some(x) = nonempty("XDG_CONFIG_HOME").map(|x| x.join("passmanager"))
+        && x != canonical
     {
-        std::env::var_os("APPDATA").map(PathBuf::from).unwrap_or_else(|| home().join("AppData").join("Roaming")).join(APP)
+        candidates.push(x);
     }
-    #[cfg(not(windows))]
-    {
-        std::env::var_os("XDG_CONFIG_HOME")
-            .filter(|d| !d.is_empty())
-            .map(PathBuf::from)
-            .unwrap_or_else(|| home().join(".config"))
-            .join("passmanager")
-    }
+    (canonical, candidates)
 }
 
 /// 局域网在线版（服务器模式）的配置。写在 root 所有的 install.json 里，服务只读。
@@ -410,6 +432,34 @@ pub fn write_atomic(path: &std::path::Path, data: &[u8], #[allow(unused_variable
 
 #[cfg(test)]
 mod tests {
+
+    /// 注册与使用必须找到同一个目录：写入不受 XDG_CONFIG_HOME 影响；读取兼容旧位置；PASSMANAGER_CONFIG_DIR 优先。
+    #[cfg(not(windows))]
+    #[test]
+    fn client_config_dir_ignores_xdg_for_writing() {
+        let home = Path::new("/home/u");
+        let env = |pairs: &'static [(&'static str, &'static str)]| {
+            move |k: &str| pairs.iter().find(|(a, _)| *a == k).map(|(_, v)| std::ffi::OsString::from(v))
+        };
+        let canonical = PathBuf::from("/home/u/.config/passmanager");
+        let (w, c) = client_config_dirs_with(env(&[]), home);
+        assert_eq!((w.clone(), c), (canonical.clone(), vec![canonical.clone()]));
+        for xdg in [
+            &[("XDG_CONFIG_HOME", "/ci/.config")][..],
+            &[("XDG_CONFIG_HOME", "/ci/.config"), ("XDG_DATA_HOME", "/ci/data"), ("XDG_STATE_HOME", "/ci/state")],
+        ] {
+            let (w2, c2) = client_config_dirs_with(env(xdg), home);
+            assert_eq!(w2, canonical, "写入目录与 XDG_CONFIG_HOME 无关");
+            assert_eq!(c2, vec![canonical.clone(), PathBuf::from("/ci/.config/passmanager")], "读取兼容旧位置");
+        }
+        let (w3, c3) = client_config_dirs_with(env(&[("XDG_CONFIG_HOME", "/home/u/.config")]), home);
+        assert_eq!((w3, c3.len()), (canonical.clone(), 1), "XDG 与默认相同时只有一个候选");
+        let (w4, c4) = client_config_dirs_with(env(&[("XDG_CONFIG_HOME", "")]), home);
+        assert_eq!((w4, c4.len()), (canonical, 1));
+        let (w5, c5) = client_config_dirs_with(env(&[("PASSMANAGER_CONFIG_DIR", "/opt/pm"), ("XDG_CONFIG_HOME", "/x")]), home);
+        assert_eq!((w5, c5), (PathBuf::from("/opt/pm"), vec![PathBuf::from("/opt/pm")]));
+    }
+
     use super::*;
 
     #[test]
