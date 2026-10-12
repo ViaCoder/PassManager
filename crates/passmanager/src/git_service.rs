@@ -640,7 +640,9 @@ mod tests {
         let (msgs, running) = install_service(&c);
         let msgs = msgs.join("\n");
         assert!(running);
-        let plist = d.path().join("Library/LaunchAgents/com.passmanager.git-proxy.plist");
+        // 用代码自己算出的路径（分隔符因平台而异：这个测试在 Windows 上也会运行）。
+        let plist = c.service_path().unwrap();
+        assert!(plist.starts_with(d.path()) && plist.ends_with("Library/LaunchAgents/com.passmanager.git-proxy.plist"));
         assert!(msgs.contains("已加载") && plist.exists(), "{msgs}");
         assert_eq!(
             *fake.calls.borrow(),
