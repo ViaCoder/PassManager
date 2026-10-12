@@ -36,7 +36,7 @@ Check: `passmanager status`, `ss -tlnp`, `nft list table inet passmanager`, `sys
 When only one port can reach the server (for example a forwarder that passes a single TCP port), use single-port mode: one TLS
 listener serves the web UI and the agent channel and tells them apart by the TLS ALPN protocol (`pm-inner/1` for agents; `h2`,
 `http/1.1` or no ALPN for browsers). All generated addresses then carry the port (`https://pm.example.com:8121`,
-`pm-enroll://pm.example.com:8121/…`, the agent-setup one-liner, the login link).
+`pm-enroll://pm.example.com:8121/…`, the `show --label` one-liner, the login link).
 
 ```sh
 ./install-server.sh --domain pm.example.com --port 8121 \
@@ -56,7 +56,7 @@ listener serves the web UI and the agent channel and tells them apart by the TLS
   `--web-port/--agent-port` to `--port` (or back) leaves no old rules or listeners behind.
 - Already enrolled agents keep working after the port changes once their configuration points to the new port: either edit
   `port = 8121` in `~/.config/passmanager/remote.toml` (the pinned server fingerprint does not change), or enroll again with a new
-  `passmanager agent-setup` text.
+  `passmanager show --label` text.
 
 ## 2. Web admin
 
@@ -66,11 +66,14 @@ Secrets are write-only. Sessions expire after 2 h idle / 12 h absolute.
 ## 3. Agents (any platform)
 
 ```sh
-ssh root@pm.example.com passmanager agent-setup --label laptop      # --lang zh for Chinese
+ssh root@pm.example.com passmanager show --label laptop --lang en   # Chinese is the default
+ssh root@pm.example.com passmanager show --label laptop --url       # only the pm-enroll:// code (for a source-built client)
+passmanager show [--rules]                                          # anywhere: the public guide without a code / only the rules
 ```
 
-This prints one block of text; give it to the AI agent on the agent machine (the web UI's "Agent 令牌" page shows the same
-block). The block contains a one-time enrollment code (10 minutes, single use) and:
+`show --label` prints one block of text; give it to the AI agent on the agent machine (the web UI's "Agent 令牌" page shows the same
+block). Without `--label`, or when not run by root on the server, `show` prints only the public guide (no code, no secret); on an
+enrolled machine it also names the server. The block contains a one-time enrollment code (10 minutes, single use) and:
 
 1. the command `sh -c "$(curl --proto '=https' --tlsv1.3 -fsSL https://pm.example.com/a/<code> || echo "exit $?")"`
    (`'=https'` is quoted because zsh expands an unquoted `=word`; unlike `curl … | sh` it exits with curl's error code when the
@@ -84,10 +87,25 @@ block). The block contains a one-time enrollment code (10 minutes, single use) a
 
 `enroll` verifies the pinned server key fingerprint, stores the token in a private file, writes the MCP config of detected
 agents (without the token) and the usage rules between `<!-- passmanager:begin -->` / `<!-- passmanager:end -->` in their global
-instruction files (backup `*.passmanager.bak`; `--no-instructions` skips this). Fetching the script does not consume the code;
-`enroll` does. Unknown or expired codes return 404; `/a/` requests are rate-limited, audited and, like the whole web port, only
-accepted from the configured CIDRs. `passmanager unenroll` removes the configuration, MCP entries and rules from the agent machine;
-revoke the token in the web UI or with `passmanager token revoke <id>`.
+instruction files (backup `*.passmanager.bak`; `--no-instructions` skips this), and sets up git over HTTPS (`--no-git-proxy` skips
+this): it installs `passmanager git-proxy` as a per-user service — `~/.config/systemd/user/passmanager-git-proxy.service`
+(`systemctl --user enable` + restart; it tries `loginctl enable-linger` without prompting so the proxy starts at boot, otherwise
+it starts at login and the output says to run `sudo loginctl enable-linger <user>`), a LaunchAgent
+`~/Library/LaunchAgents/com.passmanager.git-proxy.plist` on macOS, printed `schtasks` steps on Windows — and writes one global
+`url."http://127.0.0.1:7878/<path-token>/https/<host>/".insteadOf "https://<host>/"` per host of every entry with the `git` op
+(GitHub, a self-hosted forge, … — all treated the same). The path token is stored persistently (0600) next to the token, so the
+lines stay valid across restarts. The lines are only written once the service runs (without a systemd user instance, or on
+Windows, git stays unchanged until the proxy runs and `--install` is re-run). Re-run `passmanager git-proxy --install` after adding git entries (it replaces, never duplicates);
+`passmanager git-proxy --uninstall` removes the service and the lines. The PAT never reaches the agent machine.
+
+Enrollment codes: 256-bit random, only their SHA-256 is kept (in memory), 10 minutes, single use (taking a code out and invalidating
+it is one atomic step, so of concurrent attempts exactly one succeeds). Failed enrollments are rate-limited per source address
+(10 failures in 10 minutes → 15 minutes lockout, during which even a valid code is refused and not consumed). The audit log records
+only the label, the source address and the result, never the code. Fetching the script does not consume the code; `enroll` does.
+Unknown or expired codes return 404; `/a/` requests are rate-limited, audited and, like the whole web port, only accepted from the
+configured CIDRs. `passmanager unenroll` removes the configuration, MCP entries, rules and the git-proxy service from the agent
+machine; revoke the token in the web UI or with `passmanager token revoke <id>` (pending codes are listed by `token list` and can
+be revoked the same way).
 
 The installer copies its own binary into `/var/lib/passmanager/agent-bin/`; for other platforms pass
 `--agent-bundle <dir>` with the release archives (`PassManager-<version>-<target>.tar.gz`, optionally `SHA256SUMS`); an archive for

@@ -68,15 +68,23 @@ Agent 与服务器之间是 TLS 1.3 混合后量子密钥交换，内层再叠�
 # 服务器（root；Debian 13 或其他 systemd ≥ 250 的发行版）
 ./install-server.sh --domain pm.example.com --lan-cidr 198.51.100.0/24 < cloudflare-token
 passmanager import --name github --domain api.github.com < token.txt     # 密钥从标准输入读入，不回显
-passmanager agent-setup --label laptop --lang zh                           # 打印一段给 AI Agent 的文字
+passmanager import --name forge --ops git --domain github.com < pat.txt  # git 用途的条目：HTTPS 的 git 直接可用
+passmanager show --label laptop                                            # 打印一段给 AI Agent 的文字
 ```
 
 把打印出的整段文字交给要使用 PassManager 的那台机器上的 AI Agent。其中有一个一次性注册码（10 分钟、只能用一次），
 并让 Agent 执行一条命令——`sh -c "$(curl --proto '=https' --tlsv1.3 -fsSL https://pm.example.com/a/<注册码> || echo "exit $?")"`（在 sh、bash、zsh 中都能运行，
 下载失败时以 curl 的退出码报错）——它安装客户端（校验 SHA-256）、
 注册、为检测到的 Agent（Claude Code、Codex、Cursor、Gemini CLI、VS Code、Windsurf）配置 MCP 服务，并把使用规则写入它们的
-全局指令文件（`~/.claude/CLAUDE.md`、`~/.codex/AGENTS.md` 等）。Agent 的 curl 不支持后量子 TLS 时，这段文字会让它从固定的
-发布源码构建客户端再运行 `enroll`。`passmanager agent-instructions` 打印使用规则；`passmanager unenroll` 全部移除。
+全局指令文件（`~/.claude/CLAUDE.md`、`~/.codex/AGENTS.md` 等），并配置基于 HTTPS 的 git：`git-proxy` 成为开机或登录时自动启动的
+用户服务（systemd 用户单元；macOS 上是 LaunchAgent；Windows 上打印手动步骤），每个有 `git` 用途条目的主机（GitHub、自建的 git
+服务器等）都写入一行 `insteadOf`，普通的 `git clone https://…` 即可使用，令牌留在服务器上。Agent 的 curl 不支持后量子 TLS
+（退出码 35）时，这段文字会让它从固定的发布源码构建客户端再运行 `enroll`，效果相同。
+
+`passmanager show` 是唯一的接入命令：`show --label 名称`（服务器上的 root）打印带新注册码的完整说明，`show --label 名称 --url`
+只打印 `pm-enroll://` 注册码，`show --rules` 只打印使用规则，不带参数的 `show`（或任何非 root 用户）打印不含注册码的公开说明——
+在已注册的机器上还会写出连接的服务器。`passmanager token list|revoke` 管理令牌与未使用的注册码；`passmanager unenroll`
+全部移除（包括 git-proxy 服务与 `insteadOf` 行）。
 
 0.2.0 在 `http` / `ssh` / `scp` 之外新增：
 
@@ -88,9 +96,10 @@ passmanager agent-setup --label laptop --lang zh                           # 打
   `hmac-sha2-512-etm@openssh.com`、`AuthenticationMethods publickey`）。
 - **`PassManager ssh-agent`**（Agent 机器）：OpenSSH agent 套接字，让普通的 `ssh`、`scp`、`git` 使用服务器上的私钥。
   私钥不离开服务器；服务器只为绑定到条目主机密钥（OpenSSH ≥ 8.9 的 `session-bind`）的 `publickey` 认证请求签名，限速并记审计。
-- **`PassManager git-proxy`**（Agent 机器）：只监听回环地址的 git smart-HTTP 代理。配置
-  `git config --global url."http://127.0.0.1:7878/<令牌>/https/github.com/".insteadOf "https://github.com/"`（命令会打印准确的一行）后，
-  git clone / push 经服务器转发，由服务器加上保存的令牌（`Authorization: Basic x-access-token:<PAT>`）。
+- **`PassManager git-proxy`**（Agent 机器）：只监听回环地址的 git smart-HTTP 代理。注册时装成用户服务，并为每个 git 条目的主机写入
+  `url."http://127.0.0.1:7878/<路径令牌>/https/<主机>/".insteadOf "https://<主机>/"`（新增 git 条目后重新运行
+  `passmanager git-proxy --install`；`--uninstall` 移除），git clone / push 经服务器转发，由服务器加上保存的令牌
+  （`Authorization: Basic x-access-token:<PAT>`）。路径令牌持久保存（0600）。
   Agent 机器拿不到令牌；只允许 HTTPS、只用于条目的域名、不跟随重定向。
 
 - **单端口模式与 IP 允许列表**：`install-server.sh --port 8121` 在一个端口上同时提供网页与 Agent 通道（按 TLS ALPN 分流），

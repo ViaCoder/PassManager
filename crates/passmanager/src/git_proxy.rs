@@ -4,7 +4,8 @@
 //! `http://127.0.0.1:<端口>/<路径令牌>/https/<主机>/…`。代理把每个 smart-HTTP 请求（请求体与响应体都是流式的）
 //! 经双层加密通道交给服务器；服务器带上条目里的访问令牌（PAT）请求上游。本机从不接触 PAT。
 //!
-//! - 路径令牌：随机 128 位，保存在配置目录（0600），防止本机其他程序借用代理；
+//! - 路径令牌：随机 128 位，持久保存在配置目录（0600；insteadOf 配置在重启后仍然有效），防止本机其他程序借用代理；
+//! - 常驻服务与 git 配置见 `git_service`（`enroll` 与 `git-proxy --install` 自动完成）；
 //! - 只接受回环地址的连接；只接受 `https` 目标；服务器端再检查主机是否属于条目的域名、请求是否是 smart-HTTP。
 
 use std::io::{BufRead, BufReader, Read, Write};
@@ -253,16 +254,23 @@ pub fn serve_conn(mut s: TcpStream, token: &str, connect: &dyn Fn() -> Option<Re
     }
 }
 
+/// 配置错误（服务管理器不再重启）。
+fn fail_config(msg: impl AsRef<str>) -> ExitCode {
+    eprintln!("错误：{}", msg.as_ref());
+    ExitCode::from(crate::git_service::EXIT_CONFIG)
+}
+
+/// 前台运行代理。`hosts` 为空时打印服务器上有 `git` 用途的所有条目的主机的 git 配置命令。
 pub fn run(listen: Option<String>, hosts: Vec<String>) -> ExitCode {
     let addr: SocketAddr = match listen.as_deref().unwrap_or(DEFAULT_LISTEN).parse() {
         Ok(a) => a,
-        Err(_) => return crate::install::fail("--listen 必须是 IP:端口，例如 127.0.0.1:7878"),
+        Err(_) => return fail_config("--listen 必须是 IP:端口，例如 127.0.0.1:7878"),
     };
     if !addr.ip().is_loopback() {
-        return crate::install::fail("git-proxy 只能监听本机回环地址（127.0.0.1 / ::1）");
+        return fail_config("git-proxy 只能监听本机回环地址（127.0.0.1 / ::1）");
     }
     if crate::remote::load_in(&crate::remote::dir()).is_none() {
-        return crate::install::fail("没有远程配置：先运行 passmanager enroll '<注册码>'");
+        return fail_config("没有远程配置：先运行 passmanager enroll '<注册码>'");
     }
     let token = match path_token(&crate::remote::dir()) {
         Ok(t) => t,
@@ -270,11 +278,26 @@ pub fn run(listen: Option<String>, hosts: Vec<String>) -> ExitCode {
     };
     let l = match TcpListener::bind(addr) {
         Ok(l) => l,
-        Err(e) => return crate::install::fail(format!("监听 {addr} 失败：{e}")),
+        Err(e) => {
+            return crate::install::fail(format!(
+                "监听 {addr} 失败：{e}（git-proxy 服务可能已在运行：systemctl --user status {}）",
+                crate::git_service::UNIT
+            ));
+        }
     };
     let base = format!("http://{addr}/{token}/https");
-    println!("PassManager git-proxy 监听 {addr}。配置 git（每个主机一次）：");
-    if hosts.is_empty() {
+    let (hosts, note) = if hosts.is_empty() {
+        match crate::git_service::default_hosts() {
+            Ok(h) if h.is_empty() => (h, Some("服务器上还没有 git 用途的条目".to_string())),
+            Ok(h) => (h, None),
+            Err(e) => (vec![], Some(format!("无法读取条目列表：{e}"))),
+        }
+    } else {
+        (hosts, None)
+    };
+    println!("PassManager git-proxy 监听 {addr}。配置 git（每个主机一次；passmanager git-proxy --install 会自动写入）：");
+    if let Some(n) = note {
+        println!("  （{n}）");
         println!("  git config --global url.\"{base}/<主机>/\".insteadOf \"https://<主机>/\"");
     }
     for h in &hosts {

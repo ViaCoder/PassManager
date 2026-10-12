@@ -1,5 +1,5 @@
 //! 局域网在线版端到端测试（本机、用户模式、真实进程）：
-//! `init` → 导入证书 → 启动服务（自动解锁无口令库）→ root 的 `token add` → Agent `enroll`（双层加密）→
+//! `init` → 导入证书 → 启动服务（自动解锁无口令库）→ root 的 `show --label --url` → Agent `enroll`（双层加密）→
 //! 网页一次性链接登录并新增条目（密钥只写不读）→ MCP `list` 与 `http`（打本地自签 HTTPS 回显）全程脱敏 →
 //! 网络上的口令 / 首次设置 / root 握手被静默拒绝 → 非允许网段的来源被拒 → 吊销令牌立即失效 →
 //! kill -9 后重启自动解锁、主库文件损坏时从 .bak 恢复 → 配置错误以 78 退出。
@@ -265,7 +265,7 @@ fn lan_server_end_to_end() {
     assert!(stdout(&st).contains("已解锁") && stdout(&st).contains("全部通过"), "{}{}", stdout(&st), stderr(&st));
 
     // ---- 注册 ----
-    let o = env.run(&["token", "add", "laptop"]);
+    let o = env.run(&["show", "--label", "laptop", "--url"]);
     assert!(o.status.success(), "{}", stderr(&o));
     let url = stdout(&o).trim().to_string();
     assert!(url.starts_with(&format!("pm-enroll://pm.test:{a}/")), "{url}");

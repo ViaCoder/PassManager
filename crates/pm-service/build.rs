@@ -1,11 +1,11 @@
-//! 构建信息：只有从与版本号一致的发布标签构建时才记录（标签，提交），用于 `agent-setup` 的源码构建固定值。
+//! 构建信息：只有从与版本号一致的发布标签构建时才记录（标签，提交），用于 `show --label` 的源码构建固定值。
 //!
 //! 来源（按顺序）：
 //! 1. `PASSMANAGER_RELEASE_TAG` + `PASSMANAGER_RELEASE_COMMIT`（显式指定，例如从发布源码包构建时）；
 //! 2. GitHub Actions 的标签构建（`GITHUB_REF_TYPE=tag`、`GITHUB_REF_NAME`、`GITHUB_SHA`）；
 //! 3. 本地 git：HEAD 恰好是标签 `v<版本>` 且工作区没有已跟踪文件的改动。
 //!
-//! 标签必须等于 `v<版本>`、提交必须是 40 位十六进制，否则不记录（`agent-setup` 会说明这是开发构建）。
+//! 标签必须等于 `v<版本>`、提交必须是 40 位十六进制，否则不记录（`show --label` 会说明这是开发构建）。
 
 use std::path::Path;
 use std::process::Command;

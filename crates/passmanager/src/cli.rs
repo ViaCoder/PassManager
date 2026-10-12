@@ -162,4 +162,55 @@ mod tests {
             assert!(crate::Cli::try_parse_from(&argv).is_ok(), "failed to parse {argv:?}");
         }
     }
+
+    /// `show` 的各种形式；被它取代的命令不再存在。
+    #[test]
+    fn clap_show_and_removed_commands() {
+        use clap::Parser;
+        let parse = |argv: &[&str]| crate::Cli::try_parse_from(argv);
+        let show = |argv: &[&str]| match parse(argv).unwrap_or_else(|e| panic!("{argv:?}: {e}")).cmd {
+            Some(crate::Cmd::Show { label, url, rules, lang }) => (label, url, rules, lang),
+            _ => panic!("not show: {argv:?}"),
+        };
+        assert_eq!(show(&["PassManager", "show"]), (None, false, false, "zh".to_string()), "默认中文");
+        assert_eq!(show(&["PassManager", "show", "--label", "laptop"]), (Some("laptop".into()), false, false, "zh".into()));
+        assert_eq!(show(&["PassManager", "show", "--label", "laptop", "--lang", "en"]), (Some("laptop".into()), false, false, "en".into()));
+        assert_eq!(show(&["PassManager", "show", "--label", "laptop", "--url"]), (Some("laptop".into()), true, false, "zh".into()));
+        assert_eq!(show(&["PassManager", "show", "--rules", "--lang", "en"]), (None, false, true, "en".into()));
+        for bad in [
+            &["PassManager", "show", "--url"][..],
+            &["PassManager", "show", "--rules", "--label", "x"],
+            &["PassManager", "show", "--rules", "--url"],
+            &["PassManager", "show", "--label"],
+            &["PassManager", "agent-setup", "--label", "x"],
+            &["PassManager", "agent-instructions"],
+            &["PassManager", "token", "add", "laptop"],
+        ] {
+            assert!(parse(bad).is_err(), "should be rejected: {bad:?}");
+        }
+        for ok in [
+            &["PassManager", "token", "list"][..],
+            &["PassManager", "token", "revoke", "1a2b3c4d"],
+            &["PassManager", "enroll", "pm-enroll://x"],
+        ] {
+            assert!(parse(ok).is_ok(), "{ok:?}");
+        }
+        // enroll 与 git-proxy 的新选项。
+        match parse(&["PassManager", "enroll", "--no-git-proxy", "--git-proxy-listen", "127.0.0.1:7000", "pm-enroll://x"]).unwrap().cmd {
+            Some(crate::Cmd::Enroll { no_git_proxy, git_proxy_listen, .. }) => {
+                assert!(no_git_proxy && git_proxy_listen.as_deref() == Some("127.0.0.1:7000"))
+            }
+            _ => panic!(),
+        }
+        match parse(&["PassManager", "git-proxy", "--install", "--host", "github.com"]).unwrap().cmd {
+            Some(crate::Cmd::GitProxy { install, uninstall, hosts, .. }) => assert!(install && !uninstall && hosts == ["github.com"]),
+            _ => panic!(),
+        }
+        assert!(parse(&["PassManager", "git-proxy", "--uninstall"]).is_ok());
+        assert!(parse(&["PassManager", "git-proxy", "--install", "--uninstall"]).is_err());
+        assert!(parse(&["PassManager", "git-proxy", "--uninstall", "--host", "x"]).is_err());
+        // 帮助里有新命令、没有旧命令。
+        let help = crate::Cli::try_parse_from(["PassManager", "--help"]).err().unwrap().to_string();
+        assert!(help.contains("show") && !help.contains("agent-setup") && !help.contains("agent-instructions"), "{help}");
+    }
 }

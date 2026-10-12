@@ -3,9 +3,9 @@
 #
 # 用法：scripts/package-lan.sh [输出目录]          （默认 dist）
 #
-# 发布版必须固定到公开的源码（agent-setup 的源码构建回退会打印它）：在标签 v<版本> 的干净检出上运行，
+# 发布版必须固定到公开的源码（passmanager show --label 的源码构建回退会打印它）：在标签 v<版本> 的干净检出上运行，
 # 或设置 PASSMANAGER_RELEASE_TAG=v<版本> 与 PASSMANAGER_RELEASE_COMMIT=<40 位提交>。否则得到开发构建
-# （agent-setup 会说明没有固定的源码）。离线构建可设置 CARGO_NET_OFFLINE=true。
+# （show --label 会说明没有固定的源码）。离线构建可设置 CARGO_NET_OFFLINE=true。
 # 构建路径经 --remap-path-prefix / -ffile-prefix-map 改写，程序里不含本机目录。
 set -euo pipefail
 

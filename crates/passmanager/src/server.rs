@@ -1,4 +1,4 @@
-//! 服务器模式（局域网在线版）的 root 命令：`init`、`login`、`token`、`status`、`lock`/`unlock`、`reseal`、
+//! 服务器模式（局域网在线版）的 root 命令：`init`、`login`、`show --label`、`token`、`status`、`lock`/`unlock`、`reseal`、
 //! 以及 systemd 的 `ExecStartPre=+… service-prepare` 中服务器模式的部分。只支持 Linux。
 
 use std::path::{Path, PathBuf};
@@ -220,7 +220,7 @@ fn init_inner(o: &InitOpts) -> Result<(), String> {
     }
     println!("\n{GREEN}完成。{RESET}接下来：");
     println!("  passmanager login              # 输出网页的一次性登录链接（2 分钟有效）");
-    println!("  passmanager token add <标签>    # 为一个 Agent 生成一次性注册码（10 分钟有效）");
+    println!("  passmanager show --label <名称> # 为一台 Agent 机器生成接入说明与一次性注册码（10 分钟有效）");
     println!("  passmanager status             # 查看状态（封存等级、证书、令牌）");
     if sealer.level() < 3 {
         println!(
@@ -257,25 +257,36 @@ pub fn login() -> ExitCode {
     }
 }
 
-/// `passmanager agent-setup`：新建一次性注册码并打印给 AI Agent 的接入说明（标准输出只有这段文字）。
-pub fn agent_setup(label: &str, lang: &str) -> ExitCode {
+/// 是否可以作为服务器上的 root 管理（`show --label` 据此决定是否生成注册码）。
+pub fn is_admin() -> bool {
+    need_root(&layout()).is_ok()
+}
+
+/// `passmanager show --label`：新建一次性注册码并打印给 AI Agent 的接入说明（标准输出只有这段文字）。
+pub fn show_code(label: &str, lang: &str) -> ExitCode {
     match root_call::<pm_proto::AgentSetupView>(Request::AgentSetup { label: label.into(), lang: lang.into() }) {
         Ok(v) => {
             print!("{}", v.text);
-            eprintln!("（注册码 {} 分钟内有效、只能使用一次；可在网页\"Agent 令牌\"页作废。）", v.expires_in_secs / 60);
+            eprintln!(
+                "（注册码 {} 分钟内有效、只能使用一次；可用 passmanager token revoke {} 或在网页\"Agent 令牌\"页作废。）",
+                v.expires_in_secs / 60,
+                v.id
+            );
             ExitCode::SUCCESS
         }
         Err(e) => fail(e),
     }
 }
 
-pub fn token_add(label: &str) -> ExitCode {
+/// `passmanager show --label --url`：只打印 `pm-enroll://…` 注册码（从源码构建的客户端用 `enroll` 注册）。
+pub fn show_url(label: &str) -> ExitCode {
     match root_call::<EnrollView>(Request::EnrollCreate { label: label.into() }) {
         Ok(v) => {
             println!("{}", v.url);
             eprintln!(
-                "一次性注册码（{} 分钟内有效，只能使用一次）。给 AI Agent 的完整接入说明请用：passmanager agent-setup",
-                v.expires_in_secs / 60
+                "（一次性注册码，{} 分钟内有效、只能使用一次；在 Agent 机器上运行：passmanager enroll '<注册码>'。可用 passmanager token revoke {} 作废。）",
+                v.expires_in_secs / 60,
+                v.id
             );
             ExitCode::SUCCESS
         }

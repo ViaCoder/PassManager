@@ -21,6 +21,8 @@ pub(crate) struct Peer {
     pub allowed: bool,
     /// 来自网络（服务器模式的 Agent 通道）：只接受令牌与注册握手。
     pub network: bool,
+    /// 网络连接的来源地址（审计与注册失败的限速）；本地连接为 None。
+    pub addr: Option<std::net::IpAddr>,
 }
 
 async fn read_frame<S: AsyncRead + Unpin>(s: &mut S, max: usize) -> std::io::Result<Vec<u8>> {
@@ -76,7 +78,7 @@ pub(crate) async fn handle_conn<S: AsyncRead + AsyncWrite + Unpin + Send + 'stat
         Some(Hello::Root { v }) if v == PROTO_V && server_mode && (peer.elevated || shared.layout.mode == Mode::User) => {
             Some(Session::Root)
         }
-        Some(Hello::Enroll { v, code, .. }) if v == PROTO_V && peer.network => match shared.enroll(&code) {
+        Some(Hello::Enroll { v, code, .. }) if v == PROTO_V && peer.network => match shared.enroll(&code, peer.addr) {
             Some(token) => {
                 let ack = serde_json::json!({"ok": true, "token": token.as_str()});
                 let _ = write_frame(&mut s, ack.to_string().as_bytes()).await;
@@ -178,7 +180,7 @@ pub(crate) async fn serve(shared: Arc<Shared>) -> Result<(), String> {
                     Mode::System => uid == 0 || client_uid.is_none_or(|c| c == uid),
                     Mode::User => uid == my_uid,
                 };
-                let peer = Peer { elevated: uid == 0, allowed, network: false };
+                let peer = Peer { elevated: uid == 0, allowed, network: false, addr: None };
                 tokio::spawn(handle_conn(shared.clone(), stream, peer));
             }
         }
@@ -223,7 +225,7 @@ pub(crate) async fn serve(shared: Arc<Shared>) -> Result<(), String> {
                 let info = pipe_client(HANDLE(connected.as_raw_handle()));
                 let (elevated, sid) = info.unwrap_or((true, String::new()));
                 let allowed = shared.layout.mode == Mode::User || sid == client || elevated;
-                tokio::spawn(handle_conn(shared.clone(), connected, Peer { elevated, allowed, network: false }));
+                tokio::spawn(handle_conn(shared.clone(), connected, Peer { elevated, allowed, network: false, addr: None }));
             }
         }
     }

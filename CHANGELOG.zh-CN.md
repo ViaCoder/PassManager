@@ -4,6 +4,27 @@
 
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.3.8] - 2026-10-12
+
+### 变更
+
+- **唯一的接入命令：`passmanager show`。** `show --label 名称`（服务器上的 root）生成 10 分钟有效、只能使用一次的注册码，并打印给 AI Agent 的完整说明——一行命令 `sh -c "$(curl --proto '=https' --tlsv1.3 -fsSL https://<地址>/a/<注册码> || echo "exit $?")"`、curl 不支持后量子 TLS 时的备用方式（退出码 35：按固定的发布标签与提交从源码构建，再运行 `PassManager enroll '<pm-enroll://…>'`）以及使用规则。`show --label 名称 --url` 只打印 `pm-enroll://` 注册码，`show --rules` 只打印使用规则。不带参数的 `show`，或不是服务器上的 root 的任何用户，得到不含注册码的公开说明（已注册的机器上会写出连接的服务器）。默认中文，`--lang en` 为英文。文字仍然只有一个来源（`pm_proto::agent_text`）。
+- **移除** `passmanager agent-setup`、`passmanager agent-instructions`、`passmanager token add` 与 `scripts/install-agent.sh`；改用 `show --label`、`show --rules`、`show --label --url` 与一行命令。`token list` / `token revoke`、`enroll`、`import` 不变。
+- **使用规则 v3**：基于 HTTPS 的 git 直接使用 `https://` 地址，经常驻的 `git-proxy` 服务访问；`passmanager git-proxy --install` 刷新。
+
+### 新增
+
+- **注册后 git 直接可用**，适用于每个有 `git` 用途的条目（GitHub、自建的 git 服务器等一视同仁）：`enroll`——一行命令与源码构建的备用方式都用它——把 `git-proxy` 装成开机或登录时自动启动的用户服务（systemd 用户单元 `passmanager-git-proxy.service`，以不询问口令的方式尝试 `loginctl enable-linger`，没有权限时给出说明；macOS 上是 LaunchAgent `com.passmanager.git-proxy`；Windows 上打印 `schtasks` 步骤），并为每个 git 主机写入一行全局的 `url."http://127.0.0.1:7878/<路径令牌>/https/<主机>/".insteadOf "https://<主机>/"`。路径令牌持久保存（0600），重启后这些行仍然有效；重复运行只替换、不重复；只有服务已经运行时才写入这些行，没有用户服务管理器的机器上 git 保持可用。PAT 从不到达 Agent 机器。新选项：`enroll --no-git-proxy`、`enroll --git-proxy-listen 地址`、`git-proxy --install`、`git-proxy --uninstall`；`unenroll` 移除服务与这些行。
+- `git-proxy` 不带 `--host` 时打印服务器上有 `git` 用途的所有条目的主机的配置（来自 `list` 调用）。配置错误（没有远程配置、`--listen` 不是回环地址）以 78 退出，服务管理器不再重启。
+
+### 安全
+
+- **注册码**：Agent 通道上的兑换失败现在按来源地址限速（10 分钟内失败 10 次 → 锁定 15 分钟；锁定期间有效的注册码也不受理、不被消耗）。审计日志记录每次兑换的标签、来源地址与结果（`enroll: ok …`、`enroll: rejected …`），从不记录注册码。确认不变：256 位随机注册码、只在内存里保存 SHA-256、10 分钟过期、只能使用一次（取出与作废是同一个原子操作）。
+
+### 测试
+
+- clap 解析 `show` 的每种形式与 `enroll` / `git-proxy` 的新选项，被移除的命令被拒绝；公开说明（不带 `--label`、不是 root）不含 `pm-enroll://` 注册码与 `/a/<注册码>`；注册码强度与只保存哈希、过期、重复使用、16 个线程并发兑换同一注册码（恰好一个成功）、按来源锁定；`agent_setup_e2e` 改用 `show`（包括经网络并发 `enroll` 同一注册码与锁定）；新的端到端测试运行 `show` → 在临时 HOME 里（替身 `systemctl` / `loginctl`）运行安装脚本 → 检查单元文件、调用与 `insteadOf` 行（`git-proxy --install` 可重复运行），按单元的 `ExecStart` 启动代理，对本地 git HTTP 服务器的 `git push` / `git ls-remote` 成功，临时 HOME 与输出里都没有 PAT，`token revoke` 之后 git 失败；systemd 单元 / LaunchAgent 的生成与安装步骤（替身服务管理器）、`systemd-analyze verify`；真实 git 下替换 `insteadOf` 并保留用户自己的配置；对生成的安装脚本运行 `shellcheck`；`install_scripts_test.sh` 用替身服务管理器覆盖 `git-proxy --install/--uninstall`。
+
 ## [0.3.7] - 2026-10-11
 
 ### 修复

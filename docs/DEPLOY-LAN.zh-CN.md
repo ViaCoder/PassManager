@@ -54,7 +54,7 @@ systemd-analyze security passmanager; journalctl -u passmanager -n 30 --no-pager
 
 只有一个端口能到达服务器时（例如只转发一个 TCP 端口的转发器），用单端口模式：一个 TLS 监听同时提供网页与 Agent 通道，
 按 TLS 的 ALPN 区分（Agent 用 `pm-inner/1`；浏览器用 `h2`、`http/1.1` 或不带 ALPN）。所有生成的地址都带这个端口
-（`https://pm.example.com:8121`、`pm-enroll://pm.example.com:8121/…`、接入说明的一行命令、登录链接）。
+（`https://pm.example.com:8121`、`pm-enroll://pm.example.com:8121/…`、`show --label` 接入说明的一行命令、登录链接）。
 
 ```sh
 ./install-server.sh --domain pm.example.com --port 8121 \
@@ -70,7 +70,7 @@ systemd-analyze security passmanager; journalctl -u passmanager -n 30 --no-pager
 - IPv6 条目：安装脚本关闭了 IPv6 并丢弃全部 IPv6，所以在你自行启用 IPv6 之前它们不起作用（脚本会给出警告）。
 - 重新运行安装脚本会整体替换 `inet passmanager` 表与服务配置：从 `--web-port/--agent-port` 换成 `--port`（或反过来）不会留下旧的规则或监听。
 - 已注册的 Agent：端口变更后，把 `~/.config/passmanager/remote.toml` 里的 `port` 改成新端口（固定的服务端指纹不变），
-  或者用新的 `passmanager agent-setup` 文字重新注册。
+  或者用新的 `passmanager show --label` 文字重新注册。
 
 ## 2. 网页管理
 
@@ -84,11 +84,14 @@ ssh root@pm.example.com passmanager login     # 输出 https://pm.example.com/l/
 ## 3. Agent 机器
 
 ```sh
-ssh root@pm.example.com passmanager agent-setup --label laptop --lang zh
+ssh root@pm.example.com passmanager show --label laptop            # 默认中文；--lang en 为英文
+ssh root@pm.example.com passmanager show --label laptop --url      # 只打印 pm-enroll:// 注册码（给从源码构建的客户端）
+passmanager show [--rules]                                         # 任何机器：不含注册码的公开说明 / 只打印使用规则
 ```
 
-它打印一段文字，把它交给 Agent 机器上的 AI Agent（网页"Agent 令牌"页也显示同样的文字）。其中有一个一次性注册码
-（10 分钟、只能用一次），以及：
+`show --label` 打印一段文字，把它交给 Agent 机器上的 AI Agent（网页"Agent 令牌"页也显示同样的文字）。不带 `--label`、
+或不是服务器上的 root 运行时，`show` 只打印公开说明（没有注册码，也没有任何秘密）；在已注册的机器上还会写出连接的服务器。
+这段文字里有一个一次性注册码（10 分钟、只能用一次），以及：
 
 1. 命令 `sh -c "$(curl --proto '=https' --tlsv1.3 -fsSL https://pm.example.com/a/<注册码> || echo "exit $?")"`
    （`'=https'` 加引号，因为 zsh 会展开未加引号的 `=单词`；与 `curl … | sh` 不同，下载失败时以 curl 的退出码报错——35 表示 TLS
@@ -102,9 +105,21 @@ ssh root@pm.example.com passmanager agent-setup --label laptop --lang zh
 
 `enroll` 核对注册码里的服务端公钥指纹，令牌存到本人可读的配置目录（Linux `~/.config/passmanager`，0600），为检测到的 Agent 写入
 MCP 配置（不含令牌），并把使用规则写入它们的全局指令文件中 `<!-- passmanager:begin -->` 与 `<!-- passmanager:end -->` 之间
-（备份为 `*.passmanager.bak`；`--no-instructions` 跳过）。获取脚本不消耗注册码，`enroll` 才消耗。未知或过期的注册码返回 404；
-`/a/` 请求限速、记审计日志，并且和整个网页端口一样只接受配置的网段。`passmanager unenroll` 从 Agent 机器上移除配置、MCP 项与使用规则；
-令牌请在网页"Agent 令牌"页或用 `passmanager token revoke <ID>` 吊销。
+（备份为 `*.passmanager.bak`；`--no-instructions` 跳过），然后配置基于 HTTPS 的 git（`--no-git-proxy` 跳过）：把
+`passmanager git-proxy` 装成用户服务——Linux 上是 `~/.config/systemd/user/passmanager-git-proxy.service`（`systemctl --user enable`
+并重启；以不询问口令的方式尝试 `loginctl enable-linger`，成功时开机即启动，否则登录后启动，输出会说明由管理员运行
+`sudo loginctl enable-linger <用户>`），macOS 上是 LaunchAgent `~/Library/LaunchAgents/com.passmanager.git-proxy.plist`，Windows 上
+打印 `schtasks` 的手动步骤——并为每个有 `git` 用途条目的主机（GitHub、自建的 git 服务器等，一视同仁）写入一行全局的
+`url."http://127.0.0.1:7878/<路径令牌>/https/<主机>/".insteadOf "https://<主机>/"`。路径令牌持久保存在令牌旁边（0600），重启后这些行仍然有效。
+只有服务已经运行时才写入这些行（没有 systemd 用户实例或在 Windows 上时，git 配置保持不变，直到代理运行后再运行 `--install`）。
+新增 git 条目后重新运行 `passmanager git-proxy --install`（整体替换，不会重复）；`passmanager git-proxy --uninstall` 移除服务与这些行。
+PAT 从不到达 Agent 机器。
+
+注册码：256 位随机数，服务端只在内存里保存 SHA-256，10 分钟有效，只能用一次（取出与作废是同一个原子操作，并发兑换时恰好一个成功）。
+注册失败按来源地址限速（10 分钟内失败 10 次 → 锁定 15 分钟，锁定期间有效的注册码也不受理、不被消耗）。审计日志只记录标签、来源地址与结果，
+从不记录注册码。获取脚本不消耗注册码，`enroll` 才消耗。未知或过期的注册码返回 404；`/a/` 请求限速、记审计日志，并且和整个网页端口一样
+只接受配置的网段。`passmanager unenroll` 从 Agent 机器上移除配置、MCP 项、使用规则与 git-proxy 服务；令牌请在网页"Agent 令牌"页或用
+`passmanager token revoke <ID>` 吊销（未使用的注册码由 `token list` 列出，也用同样的方式作废）。
 
 安装脚本把自身的程序复制到 `/var/lib/passmanager/agent-bin/`；其他平台用 `--agent-bundle <目录>` 提供发布包
 （`PassManager-<版本>-<目标>.tar.gz`，可附 `SHA256SUMS`）；与服务器同一目标的发布包不会替换服务器自身的程序。服务器在请求时从不联网下载。

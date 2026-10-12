@@ -289,7 +289,7 @@ frame = u32 len ‖ ChaCha20-Poly1305(k_dir, nonce = dir ‖ 0³ ‖ counter_u64
 - Each direction has its own key and an implicit counter (not transmitted): replayed, reordered, dropped or reflected frames fail authentication and close the connection. The outer layer is AES-GCM and the inner layer ChaCha20-Poly1305 (different algorithms).
 - The server wraps the inner session as an `AsyncRead + AsyncWrite` (a duplex pipe with two pumps) and hands it to the unchanged `handle_conn`; the agent side wraps it as `Read + Write` for the existing blocking client, so MCP and CLI usage are unchanged.
 
-Enrollment: `passmanager token add <label>` (root) prints `pm-enroll://<domain>:<port>/<code>#<fpr>` (32 random bytes, 10 minutes, single use, only its SHA-256 is kept, in memory). `passmanager enroll <code>` fetches the bundle, verifies `fpr`, opens an inner session, exchanges the code for a fresh token, and writes `remote.toml`, `token` (0600) and `server-keys.bin` under `~/.config/passmanager` plus the MCP config of detected agents (without the token).
+Enrollment: `passmanager show --label <label> --url` (root) prints `pm-enroll://<domain>:<port>/<code>#<fpr>` (32 random bytes, 10 minutes, single use — taken out and invalidated atomically, so of concurrent redeems exactly one succeeds — only its SHA-256 is kept, in memory; failed redeems are rate-limited per source address, 10 per 10 minutes → 15 minutes lockout; the audit log records label, source address and result, never the code). `show --label <label>` prints the full agent guide around such a code (§10.10). `passmanager enroll <code>` fetches the bundle, verifies `fpr`, opens an inner session, exchanges the code for a fresh token, and writes `remote.toml`, `token` (0600) and `server-keys.bin` under `~/.config/passmanager` plus the MCP config of detected agents (without the token).
 
 ### 10.3 Passwordless vault mode — and its trade-offs
 
@@ -322,14 +322,15 @@ header v2 = v1 fields + mode byte (device-only); the header hash remains the AAD
 |---|---|---|
 | server (root) | `passmanager init [--cf-token-stdin] [--skip-acme] …` | device key, inner keys, passwordless vault, certificate, systemd unit (idempotent) |
 | server (root) | `passmanager login` | one-time web login link |
-| server (root) | `passmanager token add <label>` / `list` / `revoke <id>` | enrollment codes and tokens |
+| server (root) | `passmanager token list` / `revoke <id>` | tokens and pending enrollment codes |
 | server (root) | `passmanager status` / `lock` / `unlock` / `reseal` | status, lock, unlock, L2 → L3 |
 | server (root) | `passmanager import --name <n> [--domain …] [--kind ssh-key] [--fields a,b] [--replace]` | import a secret from stdin |
-| server (root) | `passmanager agent-setup [--label N] [--lang zh]` | one-time code + the text block for an AI agent |
-| agent | `passmanager enroll 'pm-enroll://…' [--no-instructions]` | join the server; configures MCP and the usage rules |
-| agent | `passmanager unenroll` / `agent-instructions` | remove the configuration / print the rules |
+| server (root) | `passmanager show --label N [--url] [--lang en]` | one-time code + the text block for an AI agent (`--url`: only the code) |
+| anywhere | `passmanager show [--rules] [--lang en]` | public guide without a code (names the server when enrolled) / only the rules |
+| agent | `passmanager enroll 'pm-enroll://…' [--no-instructions] [--no-git-proxy]` | join the server; configures MCP, the usage rules and the git-proxy service |
+| agent | `passmanager unenroll` | remove the configuration, rules and git-proxy service |
 | agent | `passmanager ssh-agent [--socket PATH]` | OpenSSH agent bridge (Unix) |
-| agent | `passmanager git-proxy [--listen 127.0.0.1:PORT]` | git credential-injecting proxy |
+| agent | `passmanager git-proxy [--listen 127.0.0.1:PORT] [--install \| --uninstall]` | git credential-injecting proxy; `--install`: user service + `insteadOf` lines |
 | server | `scripts/install-server.sh` | one-step server installer (`DRY_RUN=1` for tests) |
 
 ### 10.7 Entries: multi-field secrets and SSH keys
@@ -369,8 +370,10 @@ like HTTPS entries. The audit log records entry, host, service, status and byte 
 
 ### 10.10 One-step agent onboarding
 
-`passmanager agent-setup` creates an ordinary enrollment code and prints one block of text for an AI agent. Nothing in it is
-secret except that code (10 minutes, single use, only its SHA-256 is kept in memory).
+`passmanager show --label <name>` (root on the server) creates an ordinary enrollment code and prints one block of text for an AI
+agent. Nothing in it is secret except that code (10 minutes, single use, only its SHA-256 is kept in memory). The text comes from a
+single source (`pm_proto::agent_text`); without `--label`, or for anyone but root on the server, `show` prints the public variant
+of the same guide with placeholders instead of a code.
 
 - `GET /a/<code>` on the web port returns a POSIX sh script generated for that code: it embeds the full `pm-enroll://…#<fpr>` URL
   and the SHA-256 of every client binary in `/var/lib/passmanager/agent-bin/` (copied there by the installer; nothing is downloaded at
@@ -388,3 +391,12 @@ secret except that code (10 minutes, single use, only its SHA-256 is kept in mem
   files of detected agents (Claude Code `~/.claude/CLAUDE.md`, Codex `~/.codex/AGENTS.md`, Gemini CLI `~/.gemini/GEMINI.md`,
   Windsurf `global_rules.md`): updated in place, never duplicated, previous content kept as `*.passmanager.bak`, refused when the
   markers are damaged, removed by `unenroll` / `uninstall`.
+- `enroll` (both the one-liner and the source-build fallback) also makes git over HTTPS work for every entry the agent can use
+  that has the `git` op — GitHub, self-hosted forges and others are treated identically: it installs `git-proxy` as a per-user
+  service (systemd user unit with `Restart=on-failure` and `RestartPreventExitStatus=78`, `loginctl enable-linger` attempted with
+  `--no-ask-password` and documented when not permitted; a LaunchAgent on macOS; printed `schtasks` steps on Windows) and replaces
+  the PassManager-managed `url.<loopback proxy>/<path-token>/https/<host>/.insteadOf` lines in the global git configuration. The
+  128-bit path token is stored persistently (0600) in the client configuration directory, so the lines survive restarts; managed
+  lines are recognised by a loopback address plus a 32-hex path token, so re-running replaces and never duplicates. The host list
+  comes from the ordinary `list` call (entries whose `ops` include `git`); `git-proxy` without `--host` uses the same list. The
+  PAT stays on the server.

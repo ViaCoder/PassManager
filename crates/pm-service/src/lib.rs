@@ -259,13 +259,31 @@ impl Shared {
         Ok(())
     }
 
-    /// 消耗注册码并为该 Agent 生成访问令牌（只经双层加密通道返回这一次）。
-    pub(crate) fn enroll(&self, code: &str) -> Option<Zeroizing<String>> {
+    /// 消耗注册码并为该 Agent 生成访问令牌（只经双层加密通道返回这一次）。按来源限速；
+    /// 审计只记录标签、来源地址与结果，从不记录注册码。
+    pub(crate) fn enroll(&self, code: &str, source: Option<std::net::IpAddr>) -> Option<Zeroizing<String>> {
         let on = self.online.as_ref()?;
-        let label = on.enroll_consume(code)?;
-        let (id, token) = self.tokens.lock().unwrap().create(&label).ok()?;
-        log(&format!("agent enrolled: token {id} ({label})"));
-        Some(Zeroizing::new(token))
+        let src = source.map(|a| a.to_string()).unwrap_or_else(|| "unknown".into());
+        match on.enroll_redeem(code, &src) {
+            online::Redeem::Ok(label) => match self.tokens.lock().unwrap().create(&label) {
+                Ok((id, token)) => {
+                    log(&format!("enroll: ok, token {id} (\"{label}\") from {src}"));
+                    Some(Zeroizing::new(token))
+                }
+                Err(_) => {
+                    log(&format!("enroll: failed to create a token (\"{label}\") from {src}"));
+                    None
+                }
+            },
+            online::Redeem::Invalid => {
+                log(&format!("enroll: rejected (unknown, used or expired code) from {src}"));
+                None
+            }
+            online::Redeem::Blocked => {
+                log(&format!("enroll: rejected (too many failed attempts) from {src}"));
+                None
+            }
+        }
     }
 
     fn server_status(&self, locked: bool) -> ServerStatusView {
@@ -524,7 +542,7 @@ impl Shared {
             _ if server && matches!(req, Request::Reveal { .. }) => Err(err("FORBIDDEN", "secrets are write-only in server mode")),
             _ if server && matches!(req, Request::ChangePassword { .. }) => Err(err("BAD_REQUEST", "server mode has no password")),
             _ if server && matches!(req, Request::CreateToken { .. }) => {
-                Err(err("FORBIDDEN", "use an enrollment code (passmanager token add <label>) to create tokens in server mode"))
+                Err(err("FORBIDDEN", "use an enrollment code (passmanager show --label <name>) to create tokens in server mode"))
             }
             _ if !server
                 && matches!(
@@ -852,7 +870,9 @@ impl Shared {
             }
             Request::EnrollCreate { label } => {
                 let on = self.online.as_ref().ok_or_else(|| err("BAD_REQUEST", "only available in server mode"))?;
-                ok(on.enroll_create(&label).map_err(|m| err("BAD_REQUEST", m))?)
+                let v = on.enroll_create(&label).map_err(|m| err("BAD_REQUEST", m))?;
+                log(&format!("enrollment code {} created for \"{}\"", v.id, v.label));
+                ok(v)
             }
             Request::AgentSetup { label, lang } => {
                 let on = self.online.as_ref().ok_or_else(|| err("BAD_REQUEST", "only available in server mode"))?;
@@ -861,7 +881,7 @@ impl Shared {
                 let v = on.enroll_create(&label).map_err(|m| err("BAD_REQUEST", m))?;
                 let code = pm_net::enroll::EnrollUrl::parse(&v.url).map_err(|m| err("INTERNAL", m))?.code;
                 let text = pm_proto::agent_text::setup_text(lang, &on.web_origin(), &code, &v.url, &build_info(), v.expires_in_secs / 60);
-                log(&format!("agent-setup: enrollment code {} created for \"{}\"", v.id, v.label));
+                log(&format!("enrollment code {} created for \"{}\" (setup text)", v.id, v.label));
                 ok(pm_proto::AgentSetupView { id: v.id, label: v.label, text, expires_in_secs: v.expires_in_secs })
             }
             Request::EnrollPeek { code, what, peer } => {

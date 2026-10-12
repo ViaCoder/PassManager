@@ -1,11 +1,12 @@
-//! 给 AI Agent 的文字：`passmanager agent-setup` 打印的一段可直接粘贴的接入说明，以及写入 Agent 全局指令文件的使用规则。
+//! 给 AI Agent 的文字（唯一来源）：`passmanager show` 打印的接入说明——服务器上的 root 加 `--label` 时含一次性注册码，
+//! 否则是不含注册码的公开版本——以及写入 Agent 全局指令文件的使用规则（`show --rules`）。
 //!
-//! - 接入说明只包含一个一次性注册码（10 分钟、只能用一次）与服务端公钥指纹，没有其他秘密；
+//! - 接入说明只包含一个一次性注册码（10 分钟、只能用一次）与服务端公钥指纹，没有其他秘密；公开版本两者都没有；
 //! - 源码构建路径固定到服务器自身的构建信息（发布标签 + 提交）；开发构建没有对应的公开标签时给出明确说明，不给错误的固定值；
 //! - 使用规则写在 `<!-- passmanager:begin -->` 与 `<!-- passmanager:end -->` 之间，原地更新、不重复。
 
 /// 使用规则的版本（规则内容变化时加 1）。
-pub const INSTRUCTIONS_VERSION: u32 = 2;
+pub const INSTRUCTIONS_VERSION: u32 = 3;
 pub const BEGIN: &str = "<!-- passmanager:begin -->";
 pub const END: &str = "<!-- passmanager:end -->";
 /// 公开的源码仓库。
@@ -45,7 +46,7 @@ impl BuildInfo {
     }
 }
 
-/// 使用规则（写入 Agent 全局指令文件，也是接入说明的第 3 部分）。
+/// 使用规则（写入 Agent 全局指令文件，也是接入说明的最后一部分）。
 pub fn rules(lang: Lang) -> &'static str {
     match lang {
         Lang::En => {
@@ -56,8 +57,11 @@ pub fn rules(lang: Lang) -> &'static str {
   `{{entry.field}}`, or `{{field}}`. PassManager fills them in on the server and redacts the results.
   If an entry has a `base_url` field, use `{{entry.base_url}}` as the URL (optionally followed by a path, e.g.
   `{{ai.base_url}}/models`); the base URL itself stays secret.
-- For plain `ssh`/`scp`/`git` over SSH run `passmanager ssh-agent` and use the printed `SSH_AUTH_SOCK`; for git over HTTPS run
-  `passmanager git-proxy` and apply the `git config` line it prints. Private keys and tokens never leave the server.
+- For plain `ssh`/`scp`/`git` over SSH run `passmanager ssh-agent` and use the printed `SSH_AUTH_SOCK`.
+- git over HTTPS: use ordinary `https://` URLs. For every host that has an entry with the `git` op, the
+  `passmanager git-proxy` user service routes git through the server, which adds the token. If git asks for
+  credentials, run `passmanager git-proxy --install` (also after git entries were added) and retry.
+  Private keys and tokens never leave the server.
 - Errors: `LOCKED`/`NOT_READY` → ask the user to unlock or fix the server; `DOMAIN_MISMATCH` or an unbound entry → ask the user
   to bind the entry to that host in the PassManager web UI; `NO_CREDENTIAL` → ask the user to add one; `HOST_KEY_CHANGED` →
   ask the user to verify and trust the new key. Do not try to work around these errors.
@@ -69,8 +73,10 @@ pub fn rules(lang: Lang) -> &'static str {
 - 永远不要向用户索要口令、令牌或私钥，也不要打印、记录或保存明文。只在 `http`、`ssh`、`scp` 请求里用占位符引用：
   `{{secret}}`（目标主机对应的条目）、`{{条目}}`、`{{条目.字段}}` 或 `{{字段}}`。PassManager 在服务器上代入并对结果脱敏。
   条目有 `base_url` 字段时，用 `{{条目.base_url}}` 作为 URL（后面可以接路径，例如 `{{ai.base_url}}/models`）；基础地址本身也是秘密。
-- 普通的 `ssh`/`scp`/基于 SSH 的 `git`：运行 `passmanager ssh-agent` 并使用它打印的 `SSH_AUTH_SOCK`；基于 HTTPS 的 git：
-  运行 `passmanager git-proxy` 并执行它打印的 `git config`。私钥与令牌不会离开服务器。
+- 普通的 `ssh`/`scp`/基于 SSH 的 `git`：运行 `passmanager ssh-agent` 并使用它打印的 `SSH_AUTH_SOCK`。
+- 基于 HTTPS 的 git：直接使用普通的 `https://` 地址。对每个有 `git` 用途条目的主机，`passmanager git-proxy` 用户服务
+  让 git 经服务器访问，由服务器带上令牌。git 要求输入凭据时，运行 `passmanager git-proxy --install`
+  （新增 git 条目之后也要运行）再重试。私钥与令牌不会离开服务器。
 - 错误：`LOCKED`/`NOT_READY` → 请用户解锁或处理服务器；`DOMAIN_MISMATCH` 或条目未绑定域名 → 请用户在 PassManager 网页里
   把条目绑定到该主机；`NO_CREDENTIAL` → 请用户添加；`HOST_KEY_CHANGED` → 请用户核实并信任新的密钥。不要设法绕过这些错误。
 "
@@ -78,7 +84,7 @@ pub fn rules(lang: Lang) -> &'static str {
     }
 }
 
-/// 写入 Agent 全局指令文件的块（含标记）。
+/// 写入 Agent 全局指令文件的块（含标记）。`passmanager show --rules` 打印的也是它。
 pub fn instruction_block(lang: Lang) -> String {
     let title = match lang {
         Lang::En => format!("## PassManager (agent instructions v{INSTRUCTIONS_VERSION})"),
@@ -97,12 +103,14 @@ pub fn one_liner(origin: &str, code: &str) -> String {
     format!("sh -c \"$(curl --proto '=https' --tlsv1.3 -fsSL {origin}/a/{code} || echo \"exit $?\")\"")
 }
 
-/// `passmanager agent-setup` 打印的接入说明。`origin` 例如 `https://pm.example.com`；`enroll_url` 是完整的
-/// `pm-enroll://主机:端口/注册码#指纹`。
-pub fn setup_text(lang: Lang, origin: &str, code: &str, enroll_url: &str, build: &BuildInfo, minutes: u64) -> String {
-    let one_liner = one_liner(origin, code);
-    let source = match (build.pinned(), lang) {
-        (Some((tag, commit)), Lang::En) => format!(
+/// 源码构建的步骤。`pin` 为 None 时用占位符（公开说明：固定值在服务器打印的说明里）。
+fn source_steps(lang: Lang, pin: Option<(&str, &str)>, enroll_url: &str) -> String {
+    let (tag, commit) = pin.unwrap_or(match lang {
+        Lang::En => ("<tag>", "<commit>"),
+        Lang::Zh => ("<标签>", "<提交>"),
+    });
+    match lang {
+        Lang::En => format!(
             "   Prerequisites: git, a Rust toolchain (rustup, Rust >= 1.88), cmake, a C compiler and libclang (liboqs is built from source).
      git clone --branch {tag} --depth 1 {REPO} PassManager
      cd PassManager
@@ -113,7 +121,7 @@ pub fn setup_text(lang: Lang, origin: &str, code: &str, enroll_url: &str, build:
    (compare `git rev-parse HEAD` with {commit}; the binary is target\\release\\PassManager.exe).
 "
         ),
-        (Some((tag, commit)), Lang::Zh) => format!(
+        Lang::Zh => format!(
             "   前提：git、Rust 工具链（rustup，Rust >= 1.88）、cmake、C 编译器与 libclang（liboqs 从源码构建）。
      git clone --branch {tag} --depth 1 {REPO} PassManager
      cd PassManager
@@ -124,6 +132,34 @@ pub fn setup_text(lang: Lang, origin: &str, code: &str, enroll_url: &str, build:
    （把 `git rev-parse HEAD` 与 {commit} 比较；程序是 target\\release\\PassManager.exe）。
 "
         ),
+    }
+}
+
+/// 注册后 git 的说明（接入说明与公开说明共用）。
+fn git_note(lang: Lang) -> &'static str {
+    match lang {
+        Lang::En => {
+            "   Enrollment also sets up git over HTTPS: it installs `passmanager git-proxy` as a per-user service that starts
+   at boot or login (systemd user unit on Linux, LaunchAgent on macOS; on Windows it prints the manual steps) and
+   adds a `url.<proxy>.insteadOf` line to the global git configuration for every host that has an entry with the
+   `git` op (GitHub, a self-hosted git server, ...). The server adds the token; it never reaches this machine.
+"
+        }
+        Lang::Zh => {
+            "   注册同时配置基于 HTTPS 的 git：把 `passmanager git-proxy` 装成开机或登录时自动启动的用户服务（Linux 上是
+   systemd 用户单元，macOS 上是 LaunchAgent；Windows 上打印手动步骤），并为服务器上每个有 `git` 用途条目的主机
+   （GitHub、自建的 git 服务器等）在全局 git 配置里写入一行 `url.<代理>.insteadOf`。令牌由服务器带上，不会到达本机。
+"
+        }
+    }
+}
+
+/// `passmanager show --label <名称>`（服务器上的 root）打印的接入说明（含一次性注册码）。`origin` 例如
+/// `https://pm.example.com`；`enroll_url` 是完整的 `pm-enroll://主机:端口/注册码#指纹`。
+pub fn setup_text(lang: Lang, origin: &str, code: &str, enroll_url: &str, build: &BuildInfo, minutes: u64) -> String {
+    let one_liner = one_liner(origin, code);
+    let source = match (build.pinned(), lang) {
+        (Some(pin), _) => source_steps(lang, Some(pin), enroll_url),
         (None, Lang::En) => format!(
             "   This server runs a development build ({}) that does not correspond to a published release tag, so there is
    no pinned source to build. Do not build from an unpinned checkout; tell the user that step 1 failed and that the
@@ -147,16 +183,17 @@ The enrollment code below is valid for {minutes} minutes and works once. Do not 
      {one_liner}
    This installs the PassManager client to ~/.local/bin (SHA-256 verified), enrolls it with the server, configures the
    MCP server for the detected agents and adds the rules below to their global instruction files.
-   If the download fails the command prints curl's error and exits with curl's exit code. Exit code 35
+{git}   If the download fails the command prints curl's error and exits with curl's exit code. Exit code 35
    (`curl: (35)`, TLS handshake failure) means this machine's curl cannot do X25519MLKEM768: go to step 2.
    Any other error (for example 22: the code expired or was already used; 6 or 7: server unreachable): stop and tell the user.
 
 2. Only if step 1 exits with code 35 (TLS handshake failure; curl without ML-KEM support, e.g. macOS or older
-   distributions) or on Windows: build the client from the pinned source and enroll with it (this configures MCP and the
-   rules as well).
+   distributions) or on Windows: build the client from the pinned source and enroll with it (this configures MCP, the
+   rules and git as well).
 {source}
 3. Restart the agent so that it loads the PassManager MCP server, then follow these rules:
 {rules}",
+            git = git_note(lang),
             rules = rules(Lang::En)
         ),
         Lang::Zh => format!(
@@ -167,16 +204,91 @@ The enrollment code below is valid for {minutes} minutes and works once. Do not 
      {one_liner}
    它把 PassManager 客户端装到 ~/.local/bin（校验 SHA-256），向服务器注册，为检测到的 Agent 配置 MCP 服务，
    并把下面的规则写入它们的全局指令文件。
-   下载失败时命令会打印 curl 的错误，并以 curl 的退出码退出。退出码 35（`curl: (35)`，TLS 握手失败）表示本机的 curl
+{git}   下载失败时命令会打印 curl 的错误，并以 curl 的退出码退出。退出码 35（`curl: (35)`，TLS 握手失败）表示本机的 curl
    不支持 X25519MLKEM768：转到第 2 步。其他错误（例如 22：注册码已过期或已用过；6 或 7：连不上服务器）：停止并告诉用户。
 
 2. 只有第 1 步以退出码 35 失败（TLS 握手失败；curl 不支持 ML-KEM，例如 macOS 或较旧的发行版）或在 Windows 上时：
-   从固定的源码构建客户端并用它注册（同样会配置 MCP 与规则）。
+   从固定的源码构建客户端并用它注册（同样会配置 MCP、规则与 git）。
 {source}
 3. 重启 Agent 使其加载 PassManager MCP 服务，然后遵守以下规则：
 {rules}",
+            git = git_note(lang),
             rules = rules(Lang::Zh)
         ),
+    }
+}
+
+/// 不含注册码的公开说明：`passmanager show` 不带 `--label`、或不是服务器上的 root 时打印。
+/// `connected` 是本机已注册的服务器（`主机:端口`），没有注册时为 None。
+pub fn public_text(lang: Lang, connected: Option<&str>) -> String {
+    let placeholder_url = "pm-enroll://…";
+    let example = one_liner(
+        match lang {
+            Lang::En => "https://<server>",
+            Lang::Zh => "https://<服务器>",
+        },
+        match lang {
+            Lang::En => "<code>",
+            Lang::Zh => "<注册码>",
+        },
+    );
+    let source = source_steps(lang, None, &format!("<{placeholder_url}>"));
+    match lang {
+        Lang::En => {
+            let status = match connected {
+                Some(s) => format!("This machine is enrolled with the PassManager server {s} (check: passmanager status)."),
+                None => "This machine is not enrolled with a PassManager server.".to_string(),
+            };
+            format!(
+                "PassManager agent setup (public guide: contains no enrollment code and no secret).
+{status}
+
+1. The administrator runs on the server, as root:
+     passmanager show --label <name>
+   and hands the complete output to the AI agent on the machine that should use PassManager. It contains a one-time
+   enrollment code (valid for 10 minutes, works once) and one command:
+     {example}
+   The command installs the PassManager client to ~/.local/bin (SHA-256 verified), enrolls it with the server,
+   configures the MCP server for the detected agents and adds the rules below to their global instruction files.
+{git}
+2. Fallback, only if that command exits with code 35 (`curl: (35)`: this machine's curl cannot do post-quantum TLS,
+   X25519MLKEM768) or on Windows: build the client from the release source pinned to the tag and commit printed in
+   the server's guide, then enroll with the pm-enroll:// URL from the guide (`passmanager show --label <name> --url`
+   on the server prints only that URL):
+{source}
+3. Restart the agent so that it loads the PassManager MCP server, then follow these rules:
+{rules}",
+                git = git_note(lang),
+                rules = rules(lang)
+            )
+        }
+        Lang::Zh => {
+            let status = match connected {
+                Some(s) => format!("本机已注册到 PassManager 服务器 {s}（检查：passmanager status）。"),
+                None => "本机尚未注册到 PassManager 服务器。".to_string(),
+            };
+            format!(
+                "PassManager 接入说明（公开版本：不含注册码，也不含任何秘密）。
+{status}
+
+1. 管理员在服务器上以 root 运行：
+     passmanager show --label <名称>
+   并把完整的输出交给需要使用 PassManager 的那台机器上的 AI Agent。其中有一个一次性注册码（10 分钟内有效，只能使用一次）
+   与一行命令：
+     {example}
+   这行命令把 PassManager 客户端装到 ~/.local/bin（校验 SHA-256），向服务器注册，为检测到的 Agent 配置 MCP 服务，
+   并把下面的规则写入它们的全局指令文件。
+{git}
+2. 备用方式，只在那行命令以退出码 35 失败（`curl: (35)`：本机的 curl 不支持后量子 TLS，X25519MLKEM768）或在 Windows 上时：
+   按服务器说明里给出的发布标签与提交从源码构建客户端，再用说明里的 pm-enroll:// 注册码注册
+   （在服务器上运行 `passmanager show --label <名称> --url` 只打印这个注册码）：
+{source}
+3. 重启 Agent 使其加载 PassManager MCP 服务，然后遵守以下规则：
+{rules}",
+                git = git_note(lang),
+                rules = rules(lang)
+            )
+        }
     }
 }
 
@@ -215,6 +327,7 @@ mod tests {
             assert!(t.contains(&format!("enroll '{URL}'")));
             assert!(t.contains("{{entry.field}}") || t.contains("{{条目.字段}}"));
             assert!(!t.contains("install-agent.sh") && !t.contains("irm ") && !t.contains("iex"), "没有其他安装方式");
+            assert!(t.contains("git-proxy") && t.contains("insteadOf"), "说明注册同时配置 git");
             let dev = setup_text(
                 lang,
                 "https://pm.example.com",
@@ -229,12 +342,40 @@ mod tests {
         }
     }
 
+    /// 公开说明（不带 --label、或不是服务器上的 root）：没有注册码、没有 /a/<注册码>、没有 pm-enroll:// 注册码，
+    /// 但有完整的流程、备用方式（退出码 35 → 固定源码构建 → enroll）、git 与规则；已注册时说明连接的服务器。
+    #[test]
+    fn public_text_has_no_code() {
+        for lang in [Lang::En, Lang::Zh] {
+            for connected in [None, Some("pm.example.com:8121")] {
+                let t = public_text(lang, connected);
+                assert!(t.contains("passmanager show --label"), "{t}");
+                assert!(t.contains("35") && t.contains("git rev-parse HEAD") && t.contains("enroll '<pm-enroll://…>'"), "{t}");
+                assert!(t.contains("--url") && t.contains("git-proxy") && t.contains("insteadOf"));
+                assert!(t.contains("--proto '=https'") && !t.contains("| sh"));
+                // 没有任何形如注册码的内容：/a/ 后面只有占位符，pm-enroll:// 后面没有主机与注册码。
+                for (i, _) in t.match_indices("/a/") {
+                    let rest = &t[i + 3..];
+                    assert!(rest.starts_with("<code>") || rest.starts_with("<注册码>"), "{t}");
+                }
+                for (i, _) in t.match_indices("pm-enroll://") {
+                    assert!(t[i + 12..].starts_with(['…', ' ']), "{t}");
+                }
+                assert!(!t.split(|c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_').any(|w| w.len() == 43));
+                assert_eq!(t.contains("pm.example.com:8121"), connected.is_some());
+                assert!(t.contains("{{entry.field}}") || t.contains("{{条目.字段}}"));
+            }
+        }
+        assert!(public_text(Lang::En, None).contains("not enrolled"));
+    }
+
     #[test]
     fn instruction_block_has_markers() {
         let b = instruction_block(Lang::En);
         assert!(b.starts_with(BEGIN) && b.trim_end().ends_with(END));
         assert_eq!(b.matches(BEGIN).count(), 1);
         assert!(b.contains(&format!("v{INSTRUCTIONS_VERSION}")) && b.contains("`list`") && b.contains("{{entry.base_url}}"));
+        assert!(b.contains("git-proxy --install") && instruction_block(Lang::Zh).contains("git-proxy --install"));
         assert_eq!(Lang::parse("ZH").unwrap(), Lang::Zh);
         assert!(Lang::parse("fr").is_err());
     }

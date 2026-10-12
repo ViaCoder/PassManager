@@ -71,7 +71,8 @@ the domain and the allowed client CIDRs must be given at install time.
 # server (root; Debian 13 or another systemd ≥ 250 distribution)
 ./install-server.sh --domain pm.example.com --lan-cidr 198.51.100.0/24 < cloudflare-token
 passmanager import --name github --domain api.github.com < token.txt     # secrets come from stdin, never echoed
-passmanager agent-setup --label laptop                                     # prints one block of text for an AI agent
+passmanager import --name forge --ops git --domain github.com < pat.txt  # git entries: git over HTTPS just works
+passmanager show --label laptop --lang en                                  # prints one block of text for an AI agent
 ```
 
 Give the printed block to the AI agent on the machine that should use PassManager. It contains a one-time enrollment code
@@ -79,9 +80,16 @@ Give the printed block to the AI agent on the machine that should use PassManage
 `sh -c "$(curl --proto '=https' --tlsv1.3 -fsSL https://pm.example.com/a/<code> || echo "exit $?")"` (works in sh, bash and zsh,
 and fails loudly with curl's exit code) — which installs the client (SHA-256 verified),
 enrolls it, configures the MCP server for the detected agents (Claude Code, Codex, Cursor, Gemini CLI, VS Code, Windsurf) and
-adds the usage rules to their global instruction files (`~/.claude/CLAUDE.md`, `~/.codex/AGENTS.md`, …). If the agent's curl
-cannot do post-quantum TLS, the block tells it to build the client from the pinned release source and run `enroll` instead.
-`passmanager agent-instructions` prints the rules; `passmanager unenroll` removes everything again.
+adds the usage rules to their global instruction files (`~/.claude/CLAUDE.md`, `~/.codex/AGENTS.md`, …), and sets up git over
+HTTPS: `git-proxy` becomes a per-user service that starts at boot or login (systemd user unit; LaunchAgent on macOS; manual steps
+on Windows) and every host of an entry with the `git` op (GitHub, a self-hosted forge, …) gets an `insteadOf` line, so plain
+`git clone https://…` works while the token stays on the server. If the agent's curl cannot do post-quantum TLS (exit code 35),
+the block tells it to build the client from the pinned release source and run `enroll` instead, which does the same.
+
+`passmanager show` is the one onboarding command: `show --label NAME` (root on the server) prints the full guide with a fresh code,
+`show --label NAME --url` only the `pm-enroll://` code, `show --rules` only the rules, and plain `show` (or any non-root user) the
+public guide without a code — on an enrolled machine it also names the server. `passmanager token list|revoke` manage tokens and
+pending codes; `passmanager unenroll` removes everything again (including the git-proxy service and the `insteadOf` lines).
 
 What else 0.2.0 adds on top of `http` / `ssh` / `scp`:
 
@@ -94,9 +102,10 @@ What else 0.2.0 adds on top of `http` / `ssh` / `scp`:
 - **`PassManager ssh-agent`** (agent machine): an OpenSSH agent socket so plain `ssh`, `scp` and `git` can use keys stored on the
   server. Keys never leave the server; it only signs `publickey` userauth requests bound (OpenSSH ≥ 8.9 `session-bind`) to a host key
   that belongs to the entry, rate-limited and audited.
-- **`PassManager git-proxy`** (agent machine): a loopback git smart-HTTP proxy. With
-  `git config --global url."http://127.0.0.1:7878/<token>/https/github.com/".insteadOf "https://github.com/"` (the command prints the
-  exact line) git clones and pushes through the server, which adds the stored token (`Authorization: Basic x-access-token:<PAT>`).
+- **`PassManager git-proxy`** (agent machine): a loopback git smart-HTTP proxy. Enrollment installs it as a user service and writes
+  `url."http://127.0.0.1:7878/<path-token>/https/<host>/".insteadOf "https://<host>/"` for every git entry's host (re-run
+  `passmanager git-proxy --install` after adding git entries; `--uninstall` removes it), so git clones and pushes through the
+  server, which adds the stored token (`Authorization: Basic x-access-token:<PAT>`). The path token is persistent (0600).
   The agent machine never receives the token; only HTTPS, only the entry's domains, no redirects.
 
 - **Single-port mode and IP allowlist**: `install-server.sh --port 8121` serves the web UI and the agent channel on one port

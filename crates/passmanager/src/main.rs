@@ -5,12 +5,14 @@
 //! - `PassManager mcp`：MCP 服务器（供 AI Agent 使用）。
 //! - `PassManager list|http|ssh|scp`：CLI（输出 JSON，供 AI Agent 使用）。
 //! - `sudo PassManager install`：一键安装。
-//! - 局域网在线版（服务器，root）：`passmanager init|login|token|status|lock|unlock|reseal`；
-//!   Agent 端：`passmanager enroll <注册码>`，之后 MCP / CLI 用法不变。
+//! - 局域网在线版（服务器，root）：`passmanager init|login|show|token|status|lock|unlock|reseal`；
+//!   接入 Agent：`passmanager show --label <名称>`（一次性注册码 + 给 AI Agent 的完整说明）；
+//!   Agent 端：一行安装命令或 `passmanager enroll <注册码>`，之后 MCP / CLI 用法不变。
 
 mod agent_instructions;
 mod cli;
 mod git_proxy;
+mod git_service;
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 mod import;
 mod install;
@@ -266,26 +268,31 @@ enum Cmd {
         #[arg(long = "host-key")]
         host_keys: Vec<String>,
     },
-    /// [服务器，root] 为一台 Agent 机器生成接入说明（含一次性注册码），整段交给那台机器上的 AI Agent
+    /// 显示 Agent 接入说明；服务器上的 root 加 --label 时附带一次性注册码（10 分钟有效，只能使用一次）
     #[command(after_help = "\
-打印一段给 AI Agent 的文字：一行安装命令（curl … | sh：安装客户端、注册、配置 MCP 与使用规则）、
-TLS 握手失败时从固定的发布源码构建客户端的步骤，以及使用规则。注册码 10 分钟内有效、只能使用一次。
+服务器上的 root 加 --label：生成一次性注册码，打印给 AI Agent 的完整接入说明——一行安装命令（安装客户端、注册、
+配置 MCP、使用规则与 git 凭据代理服务）、curl 不支持后量子 TLS（退出码 35）时从固定的发布源码构建再 enroll 的步骤，
+以及使用规则。把整段交给那台机器上的 AI Agent。
+不带 --label，或不是服务器上的 root：只打印公开的接入说明（不含注册码）；已注册的机器还会显示连接的服务器。
 
 示例：
-  ssh root@server passmanager agent-setup --label laptop
-  ssh root@server passmanager agent-setup --label build-box --lang zh")]
-    AgentSetup {
-        /// 标签（例如机器名或 Agent 名），默认 agent
-        #[arg(long, default_value = "agent")]
-        label: String,
-        /// 说明语言：en（默认）或 zh
-        #[arg(long, default_value = "en")]
-        lang: String,
-    },
-    /// 打印给 AI Agent 的 PassManager 使用规则（enroll 时会写入 Agent 的全局指令文件）
-    AgentInstructions {
-        /// en（默认）或 zh
-        #[arg(long, default_value = "en")]
+  ssh root@server passmanager show --label laptop              # 完整的接入说明（含一行安装命令）
+  ssh root@server passmanager show --label laptop --lang en    # 英文
+  ssh root@server passmanager show --label laptop --url        # 只打印 pm-enroll://… 注册码
+  passmanager show --rules                                     # 只打印使用规则
+  passmanager show                                             # 公开的接入说明")]
+    Show {
+        /// 标签（例如机器名或 Agent 名）：为这台 Agent 机器生成一次性注册码（需要服务器上的 root）
+        #[arg(long)]
+        label: Option<String>,
+        /// 只打印 pm-enroll://… 注册码（需要 --label；在 Agent 机器上用 passmanager enroll '<注册码>' 注册）
+        #[arg(long, requires = "label")]
+        url: bool,
+        /// 只打印给 AI Agent 的使用规则（enroll 时会写入 Agent 的全局指令文件）
+        #[arg(long, conflicts_with_all = ["label", "url"])]
+        rules: bool,
+        /// 说明语言：zh（默认）或 en
+        #[arg(long, default_value = "zh")]
         lang: String,
     },
     /// [Agent 机器] 取消注册：删除远程配置与令牌、移除 MCP 配置与写入的使用规则
@@ -308,7 +315,7 @@ TLS 握手失败时从固定的发布源码构建客户端的步骤，以及使�
     /// [服务器，root] 管理 Agent 令牌
     #[command(
         subcommand,
-        after_help = "示例：\n  passmanager token add laptop-claude\n  passmanager token list\n  passmanager token revoke 1a2b3c4d"
+        after_help = "新的 Agent 用 passmanager show --label <名称> 接入。\n\n示例：\n  passmanager token list\n  passmanager token revoke 1a2b3c4d"
     )]
     Token(TokenCmd),
     /// 显示状态（服务器上：封存等级、证书、令牌；Agent 机器上：远程配置与连接测试）
@@ -324,19 +331,26 @@ TLS 握手失败时从固定的发布源码构建客户端的步骤，以及使�
 示例：
   passmanager reseal")]
     Reseal,
-    /// [Agent 机器] 用一次性注册码接入服务器：核对指纹、保存令牌（0600）、写入 Claude Code / Codex 等的 MCP 配置
+    /// [Agent 机器] 用一次性注册码接入服务器：核对指纹、保存令牌（0600）、写入 Claude Code / Codex 等的 MCP 配置、
+    /// 使用规则与 git 凭据代理服务
     #[command(
-        after_help = "示例：\n  passmanager enroll 'pm-enroll://pm.example.com:8443/<注册码>#<指纹>'\n  passmanager enroll --no-mcp 'pm-enroll://…'   # 只保存令牌，不改 Agent 配置"
+        after_help = "注册码由服务器上的 root 生成：passmanager show --label <名称> --url（或完整说明：show --label <名称>）。\n\n示例：\n  passmanager enroll 'pm-enroll://pm.example.com:8443/<注册码>#<指纹>'\n  passmanager enroll --no-git-proxy 'pm-enroll://…'   # 不安装 git 代理服务\n  passmanager enroll --no-mcp 'pm-enroll://…'         # 只保存令牌，不改 Agent 与 git 的配置"
     )]
     Enroll {
         /// 注册码（pm-enroll://主机:端口/注册码#指纹）
         code: String,
-        /// 不写入 Agent 的 MCP 配置（也不写使用规则）
+        /// 不写入 Agent 的 MCP 配置（也不写使用规则、不安装 git 代理服务）
         #[arg(long)]
         no_mcp: bool,
         /// 不把使用规则写入 Agent 的全局指令文件（CLAUDE.md、AGENTS.md 等）
         #[arg(long)]
         no_instructions: bool,
+        /// 不安装 git 凭据代理服务，也不写 git 的 insteadOf 配置
+        #[arg(long)]
+        no_git_proxy: bool,
+        /// git 代理服务的监听地址（只能是回环地址），默认 127.0.0.1:7878
+        #[arg(long, value_name = "ADDR")]
+        git_proxy_listen: Option<String>,
         /// 测试：直接连接的 IPv4:端口
         #[arg(long, hide = true)]
         connect_addr: Option<std::net::SocketAddr>,
@@ -360,20 +374,30 @@ TLS 握手失败时从固定的发布源码构建客户端的步骤，以及使�
     },
     /// [Agent 机器] git 凭据注入代理：git 经本机代理访问 HTTPS 仓库，由服务器带上访问令牌（本机不接触令牌）
     #[command(after_help = "\
-在已注册（passmanager enroll）的机器上运行，然后按输出配置 git：
-  passmanager git-proxy --host github.com --host git.example.com:8121 &
-  git config --global url.\"http://127.0.0.1:7878/<路径令牌>/https/github.com/\".insteadOf \"https://github.com/\"
-  git clone https://github.com/owner/repo.git
+enroll 已把它装成开机 / 登录时自动启动的用户服务（Linux：systemd 用户单元；macOS：LaunchAgent；Windows：打印手动步骤），
+并为服务器上每个有 git 用途条目的主机写入全局的 git insteadOf，之后直接使用 https:// 地址即可。
+新增 git 条目之后重新运行 --install（可重复运行：服务文件与 insteadOf 整体替换，不会重复）。
 
-服务器上要有绑定该主机的条目（单值 PAT，或带 username 与 token/password 字段的多字段条目）。
-只代理 git smart-HTTP 请求；路径令牌保存在配置目录（0600），只监听回环地址。")]
+  passmanager git-proxy --install            # 安装 / 更新服务与 git 配置
+  passmanager git-proxy --uninstall          # 停止并移除服务与 git 配置
+  passmanager git-proxy &                    # 前台运行，打印每个 git 主机的配置命令
+  git config --global url.\"http://127.0.0.1:7878/<路径令牌>/https/github.com/\".insteadOf \"https://github.com/\"
+
+服务器上要有绑定该主机、用途包含 git 的条目（单值 PAT，或带 username 与 token/password 字段的多字段条目）。
+只代理 git smart-HTTP 请求；路径令牌持久保存在配置目录（0600），只监听回环地址。")]
     GitProxy {
         /// 监听地址（只能是回环地址），默认 127.0.0.1:7878
         #[arg(long)]
         listen: Option<String>,
-        /// 打印这些主机的 git 配置命令（可重复）
+        /// git 主机（可重复）；默认是服务器上有 git 用途的所有条目的主机
         #[arg(long = "host")]
         hosts: Vec<String>,
+        /// 安装为开机 / 登录时自动启动的用户服务，并写入 git 的 insteadOf
+        #[arg(long, conflicts_with = "uninstall")]
+        install: bool,
+        /// 停止并移除用户服务与 PassManager 写入的 git insteadOf
+        #[arg(long, conflicts_with_all = ["listen", "hosts"])]
+        uninstall: bool,
     },
     /// [服务器，root] 导入 TLS 证书（不使用 ACME 时）
     #[command(hide = true)]
@@ -407,11 +431,6 @@ TLS 握手失败时从固定的发布源码构建客户端的步骤，以及使�
 
 #[derive(Subcommand)]
 enum TokenCmd {
-    /// 生成一次性注册码 pm-enroll://…（10 分钟有效，只能使用一次）
-    Add {
-        /// 标签（例如机器名或 Agent 名）
-        label: String,
-    },
     /// 列出令牌与未使用的注册码
     List,
     /// 吊销令牌（立即失效），或作废未使用的注册码
@@ -481,23 +500,15 @@ fn main() -> ExitCode {
         Some(Cmd::Import { name, domains, ops, note, self_signed, replace, kind, fields, interactive, host_keys }) => {
             server::import(import::ImportOpts { name, domains, ops, note, self_signed, replace, kind, fields, interactive, host_keys })
         }
-        Some(Cmd::Token(TokenCmd::Add { label })) => server::token_add(&label),
         Some(Cmd::Token(TokenCmd::List)) => server::token_list(),
         Some(Cmd::Token(TokenCmd::Revoke { id })) => server::token_revoke(&id),
         Some(Cmd::Status) => server::status(),
         Some(Cmd::Lock) => server::lock(false),
         Some(Cmd::Reseal) => server::reseal(),
-        Some(Cmd::Enroll { code, no_mcp, no_instructions, connect_addr, ca_file }) => {
-            remote::enroll_cmd(&code, remote::EnrollOpts { no_mcp, no_instructions, connect_addr, ca_file })
+        Some(Cmd::Enroll { code, no_mcp, no_instructions, no_git_proxy, git_proxy_listen, connect_addr, ca_file }) => {
+            remote::enroll_cmd(&code, remote::EnrollOpts { no_mcp, no_instructions, no_git_proxy, git_proxy_listen, connect_addr, ca_file })
         }
-        Some(Cmd::AgentSetup { label, lang }) => server::agent_setup(&label, &lang),
-        Some(Cmd::AgentInstructions { lang }) => match pm_proto::agent_text::Lang::parse(&lang) {
-            Ok(l) => {
-                print!("{}", pm_proto::agent_text::instruction_block(l));
-                ExitCode::SUCCESS
-            }
-            Err(e) => install::fail(e),
-        },
+        Some(Cmd::Show { label, url, rules, lang }) => show(label, url, rules, &lang),
         Some(Cmd::Unenroll) => remote::unenroll(),
         Some(Cmd::BuildInfo) => {
             let b = pm_service::build_info();
@@ -522,7 +533,9 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         Some(Cmd::ImportCert { chain, key }) => server::import_cert(&chain, &key),
-        Some(Cmd::GitProxy { listen, hosts }) => git_proxy::run(listen, hosts),
+        Some(Cmd::GitProxy { listen, hosts, install: true, .. }) => git_service::install_cmd(listen, hosts),
+        Some(Cmd::GitProxy { uninstall: true, .. }) => git_service::uninstall_cmd(),
+        Some(Cmd::GitProxy { listen, hosts, .. }) => git_proxy::run(listen, hosts),
         Some(Cmd::SshAgent { socket }) => {
             #[cfg(unix)]
             {
@@ -535,6 +548,35 @@ fn main() -> ExitCode {
             }
         }
         Some(Cmd::ServerUnit { tpm_group, tmpfiles }) => server::print_unit(tpm_group.as_deref(), tmpfiles),
+    }
+}
+
+/// `passmanager show`：服务器上的 root 加 `--label` 时生成一次性注册码（完整说明或只有 URL）；
+/// 否则打印不含注册码的公开说明（已注册的机器说明连接的服务器）。说明文字只来自 `pm_proto::agent_text`。
+fn show(label: Option<String>, url: bool, rules: bool, lang: &str) -> ExitCode {
+    use pm_proto::agent_text::{Lang, instruction_block, public_text};
+    let l = match Lang::parse(lang) {
+        Ok(l) => l,
+        Err(e) => return install::fail(e),
+    };
+    if rules {
+        print!("{}", instruction_block(l));
+        return ExitCode::SUCCESS;
+    }
+    let admin = server_mode() && server::is_admin();
+    match label {
+        Some(label) if admin && url => server::show_url(&label),
+        Some(label) if admin => server::show_code(&label, lang),
+        Some(_) if url => install::fail("只有服务器上的 root 能生成注册码：ssh root@<服务器> passmanager show --label <名称> --url"),
+        other => {
+            if other.is_some() {
+                eprintln!("（不是服务器上的 root：只显示公开的接入说明，不生成注册码。）");
+            } else if admin {
+                eprintln!("（加 --label <名称> 生成一次性注册码与完整的接入说明。）");
+            }
+            print!("{}", public_text(l, remote::connected_server().as_deref()));
+            ExitCode::SUCCESS
+        }
     }
 }
 

@@ -176,7 +176,7 @@ pub enum Request {
     EnrollCreate {
         label: String,
     },
-    /// 新建注册码并生成给 AI Agent 的接入说明（`passmanager agent-setup`），返回 [`AgentSetupView`]。
+    /// 新建注册码并生成给 AI Agent 的接入说明（`passmanager show --label`、网页令牌页），返回 [`AgentSetupView`]。
     AgentSetup {
         label: String,
         #[serde(default)]
@@ -406,7 +406,7 @@ pub struct EnrollView {
     pub expires_in_secs: u64,
 }
 
-/// `agent-setup` 的结果：一段给 AI Agent 的文字（含一次性注册码）。
+/// `show --label` 的结果：一段给 AI Agent 的文字（含一次性注册码）。
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct AgentSetupView {
     pub id: String,
@@ -568,7 +568,7 @@ impl Client {
         let fail = || {
             ApiError::new(
                 "ENROLL_FAILED",
-                "注册码无效、已使用或已过期（有效期 10 分钟，只能使用一次）。请在服务器上重新运行：passmanager token add <标签>",
+                "注册码无效、已使用或已过期（有效期 10 分钟，只能使用一次）。请在服务器上重新运行：passmanager show --label <名称>",
             )
         };
         let ack: EnrollAck = serde_json::from_slice(&ack.map_err(|_| fail())?).map_err(|_| fail())?;

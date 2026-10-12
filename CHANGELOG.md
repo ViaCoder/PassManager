@@ -4,6 +4,27 @@ English | [简体中文](CHANGELOG.zh-CN.md)
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.3.8] - 2026-10-12
+
+### Changed
+
+- **One onboarding command: `passmanager show`.** `show --label NAME` (root on the server) creates the 10-minute single-use enrollment code and prints the complete guide for the AI agent — the one-liner `sh -c "$(curl --proto '=https' --tlsv1.3 -fsSL https://<origin>/a/<code> || echo "exit $?")"`, the fallback for machines whose curl lacks post-quantum TLS (exit code 35: build from the release source pinned to tag and commit, then `PassManager enroll '<pm-enroll://…>'`) and the rules. `show --label NAME --url` prints only the `pm-enroll://` code, `show --rules` only the rules block. Plain `show`, or any user who is not root on the server, gets the public guide without a code (on an enrolled machine it names the server). Chinese is the default; `--lang en` for English. The text still has a single source (`pm_proto::agent_text`).
+- **Removed** `passmanager agent-setup`, `passmanager agent-instructions`, `passmanager token add` and `scripts/install-agent.sh`; use `show --label`, `show --rules`, `show --label --url` and the one-liner. `token list` / `token revoke`, `enroll` and `import` are unchanged.
+- **Usage rules v3**: git over HTTPS uses plain `https://` URLs through the resident `git-proxy` service; `passmanager git-proxy --install` refreshes it.
+
+### Added
+
+- **git works after enrollment**, for every entry with the `git` op (GitHub, self-hosted forges, … treated identically): `enroll` — used by the one-liner and by the source-build fallback — installs `git-proxy` as a per-user service that starts at boot or login (systemd user unit `passmanager-git-proxy.service` with `loginctl enable-linger` attempted without prompting and documented when not permitted; LaunchAgent `com.passmanager.git-proxy` on macOS; printed `schtasks` steps on Windows) and writes one global `url."http://127.0.0.1:7878/<path-token>/https/<host>/".insteadOf "https://<host>/"` per git host. The path token is persistent (0600), so the lines survive restarts; re-running replaces and never duplicates; the lines are only written once the service runs, so a machine without a user service manager keeps a working git. The PAT never touches the agent machine. New options: `enroll --no-git-proxy`, `enroll --git-proxy-listen ADDR`, `git-proxy --install`, `git-proxy --uninstall`; `unenroll` removes the service and the lines.
+- `git-proxy` without `--host` prints the configuration for the hosts of all entries with the `git` op (from the `list` call). Configuration errors (no remote configuration, non-loopback `--listen`) exit with 78 so the service manager does not restart it.
+
+### Security
+
+- **Enrollment codes**: failed redeems on the agent channel are now rate-limited per source address (10 failures in 10 minutes → 15 minutes lockout; during the lockout even a valid code is refused and not consumed). The audit log records label, source address and result of every redeem (`enroll: ok …`, `enroll: rejected …`), never the code. Verified unchanged: 256-bit random codes, only the SHA-256 kept in memory, 10-minute expiry, single use with take-out and invalidation in one atomic step.
+
+### Tests
+
+- clap parsing of every `show` form and the new `enroll` / `git-proxy` options, the removed commands are rejected; the public guide (no `--label`, not root) contains no `pm-enroll://` code and no `/a/<code>`; code strength and hash-only storage, expiry, reuse, 16 threads redeeming the same code (exactly one wins), per-source lockout; `agent_setup_e2e` switched to `show` (including concurrent `enroll` with one code and the lockout over the network); a new end-to-end test runs `show` → the bootstrap script in a temporary HOME with fake `systemctl` / `loginctl` → checks the unit file, the calls and the `insteadOf` lines (idempotent `git-proxy --install`), starts the proxy with the unit's `ExecStart`, `git push` / `git ls-remote` against a local git HTTP server succeed, no PAT anywhere in the temporary HOME or outputs, and after `token revoke` git fails; systemd unit / LaunchAgent generation and install sequences with fake service managers, `systemd-analyze verify`; real-git `insteadOf` replacement that keeps user entries; `shellcheck` on the generated bootstrap script; `install_scripts_test.sh` covers `git-proxy --install/--uninstall` with fake service managers.
+
 ## [0.3.7] - 2026-10-11
 
 ### Fixed

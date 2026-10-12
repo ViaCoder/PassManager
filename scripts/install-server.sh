@@ -22,7 +22,7 @@
 #   --agent-port N       Agent 端口（默认 8443；两端口模式）               站点文件键 AGENT_PORT
 #   --tpm-socket PATH    可选：swtpm 的 Unix 数据套接字；不给时只自动检测 /dev/tpmrm0   站点文件键 TPM_SOCKET
 #   --agent-bundle DIR   可选：放有发布包（PassManager-<版本>-<目标>.tar.gz，可附 SHA256SUMS）的目录，
-#                        供一键接入（passmanager agent-setup）给其他平台的 Agent 机器下载；本机程序总会提供
+#                        供一键接入（passmanager show --label）给其他平台的 Agent 机器下载；本机程序总会提供
 #                                                                          站点文件键 AGENT_BUNDLE
 #   --site-file FILE     读取站点配置文件（命令行参数优先）
 #   --skip-acme          不申请 Let's Encrypt 证书
@@ -388,4 +388,4 @@ done
 say "完成"
 echo "   状态：passmanager status"
 echo "   网页：passmanager login（输出 2 分钟有效的一次性链接）"
-echo "   Agent：passmanager agent-setup --label <名称>，把输出的整段文字交给那台机器上的 AI Agent"
+echo "   Agent：passmanager show --label <名称>，把输出的整段文字交给那台机器上的 AI Agent"

@@ -289,7 +289,7 @@ tag_s = HMAC-SHA384(k_fin, "…server-finished" ‖ th)；tag_c = HMAC-SHA384(k_
 - 两个方向各一把密钥、各一个不在线上传输的计数器：重放、重排、丢帧、反射都会认证失败并断开连接。外层 AES-GCM、内层 ChaCha20-Poly1305，算法不同。
 - 服务端把内层会话包装成 `AsyncRead + AsyncWrite`（duplex 管道 + 两个加解密泵）交给原样不变的 `handle_conn`；Agent 端包装成 `Read + Write` 交给原有的阻塞客户端，所以 MCP 与 CLI 的用法不变。
 
-注册：`passmanager token add <标签>`（root）输出 `pm-enroll://<域名>:<端口>/<注册码>#<指纹>`（32 字节随机数，10 分钟有效，只能用一次，服务端只在内存里保存它的 SHA-256）。`passmanager enroll <注册码>` 下载公钥包、核对指纹、建立内层会话、用注册码换一个新令牌，然后在 `~/.config/passmanager` 下写入 `remote.toml`、`token`（0600）与 `server-keys.bin`，并为检测到的 Agent 写入 MCP 配置（不含令牌）。
+注册：`passmanager show --label <标签> --url`（root）输出 `pm-enroll://<域名>:<端口>/<注册码>#<指纹>`（32 字节随机数，10 分钟有效，只能用一次——取出与作废是原子的，并发兑换时恰好一个成功——服务端只在内存里保存它的 SHA-256；兑换失败按来源地址限速，10 分钟内 10 次 → 锁定 15 分钟；审计日志只记录标签、来源地址与结果，从不记录注册码）。`show --label <标签>` 打印围绕这个注册码的完整接入说明（§10.10）。`passmanager enroll <注册码>` 下载公钥包、核对指纹、建立内层会话、用注册码换一个新令牌，然后在 `~/.config/passmanager` 下写入 `remote.toml`、`token`（0600）与 `server-keys.bin`，并为检测到的 Agent 写入 MCP 配置（不含令牌）。
 
 ### 10.3 无口令库模式及其代价
 
@@ -322,14 +322,15 @@ v2 文件头 = v1 的字段 + 模式字节（device-only）；文件头哈希仍
 |---|---|---|
 | 服务器（root） | `passmanager init [--cf-token-stdin] [--skip-acme] …` | 设备密钥、内层密钥、无口令库、证书、systemd 单元（可重复执行） |
 | 服务器（root） | `passmanager login` | 网页一次性登录链接 |
-| 服务器（root） | `passmanager token add <标签>` / `list` / `revoke <id>` | 注册码与令牌 |
+| 服务器（root） | `passmanager token list` / `revoke <id>` | 令牌与未使用的注册码 |
 | 服务器（root） | `passmanager status` / `lock` / `unlock` / `reseal` | 状态、锁定、解锁、L2 → L3 |
 | 服务器（root） | `passmanager import --name <名称> [--domain …] [--kind ssh-key] [--fields a,b] [--replace]` | 从标准输入导入密钥 |
-| 服务器（root） | `passmanager agent-setup [--label 名称] [--lang zh]` | 一次性注册码 + 给 AI Agent 的整段文字 |
-| Agent 机器 | `passmanager enroll 'pm-enroll://…' [--no-instructions]` | 接入服务器；配置 MCP 与使用规则 |
-| Agent 机器 | `passmanager unenroll` / `agent-instructions` | 移除配置 / 打印使用规则 |
+| 服务器（root） | `passmanager show --label 名称 [--url] [--lang en]` | 一次性注册码 + 给 AI Agent 的整段文字（`--url`：只有注册码） |
+| 任何机器 | `passmanager show [--rules] [--lang en]` | 不含注册码的公开说明（已注册时写出服务器）/ 只打印使用规则 |
+| Agent 机器 | `passmanager enroll 'pm-enroll://…' [--no-instructions] [--no-git-proxy]` | 接入服务器；配置 MCP、使用规则与 git-proxy 服务 |
+| Agent 机器 | `passmanager unenroll` | 移除配置、使用规则与 git-proxy 服务 |
 | Agent 机器 | `passmanager ssh-agent [--socket 路径]` | OpenSSH agent 桥（Unix） |
-| Agent 机器 | `passmanager git-proxy [--listen 127.0.0.1:端口]` | git 凭据注入代理 |
+| Agent 机器 | `passmanager git-proxy [--listen 127.0.0.1:端口] [--install \| --uninstall]` | git 凭据注入代理；`--install`：用户服务 + `insteadOf` |
 | 服务器 | `scripts/install-server.sh` | 服务器一键安装（`DRY_RUN=1` 用于测试） |
 
 ### 10.7 条目：多字段密钥与 SSH 私钥
@@ -363,8 +364,9 @@ v2 文件头 = v1 的字段 + 模式字节（device-only）；文件头哈希仍
 
 ### 10.10 Agent 一键接入
 
-`passmanager agent-setup` 生成一个普通的注册码，并打印一段给 AI Agent 的文字。除了这个注册码（10 分钟、只能用一次、服务端只在内存里
-保存 SHA-256），文字里没有任何秘密。
+`passmanager show --label <名称>`（服务器上的 root）生成一个普通的注册码，并打印一段给 AI Agent 的文字。除了这个注册码（10 分钟、
+只能用一次、服务端只在内存里保存 SHA-256），文字里没有任何秘密。文字只有一个来源（`pm_proto::agent_text`）；不带 `--label`、或不是
+服务器上的 root 时，`show` 打印同一份说明的公开版本，用占位符代替注册码。
 
 - 网页端口上的 `GET /a/<注册码>` 返回为该注册码生成的 POSIX sh 脚本：内嵌完整的 `pm-enroll://…#<指纹>` 与
   `/var/lib/passmanager/agent-bin/` 中每个客户端程序的 SHA-256（由安装脚本复制；请求时从不联网下载）。脚本与程序都经过与网页相同的
@@ -378,3 +380,9 @@ v2 文件头 = v1 的字段 + 模式字节（device-only）；文件头哈希仍
 - `enroll` 把使用规则写入检测到的 Agent 的全局指令文件（Claude Code `~/.claude/CLAUDE.md`、Codex `~/.codex/AGENTS.md`、
   Gemini CLI `~/.gemini/GEMINI.md`、Windsurf `global_rules.md`）中 `<!-- passmanager:begin -->` 与 `<!-- passmanager:end -->` 之间：
   原地更新、不重复，原内容保存为 `*.passmanager.bak`，标记损坏时拒绝修改，`unenroll` / `uninstall` 时移除。
+- `enroll`（一行命令与源码构建的回退方式都一样）还让基于 HTTPS 的 git 对 Agent 能使用的每个有 `git` 用途的条目直接可用——GitHub、
+  自建的 git 服务器等一视同仁：把 `git-proxy` 装成用户服务（systemd 用户单元，`Restart=on-failure`、`RestartPreventExitStatus=78`；
+  以 `--no-ask-password` 尝试 `loginctl enable-linger`，没有权限时给出说明；macOS 上是 LaunchAgent；Windows 上打印 `schtasks` 步骤），
+  并替换全局 git 配置里由 PassManager 写入的 `url.<回环代理>/<路径令牌>/https/<主机>/.insteadOf` 行。128 位路径令牌持久保存在客户端
+  配置目录（0600），这些行在重启后仍然有效；由回环地址加 32 位十六进制路径令牌识别我们写入的行，所以重复运行只替换、不重复。主机列表
+  来自普通的 `list` 调用（`ops` 含 `git` 的条目）；`git-proxy` 不带 `--host` 时使用同一份列表。PAT 留在服务器上。

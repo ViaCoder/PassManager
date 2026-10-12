@@ -139,6 +139,10 @@ pub struct EnrollOpts {
     pub no_mcp: bool,
     /// 不把使用规则写入 Agent 的全局指令文件。
     pub no_instructions: bool,
+    /// 不安装 git-proxy 服务、不写 git 的 insteadOf。
+    pub no_git_proxy: bool,
+    /// git-proxy 服务的监听地址（默认 127.0.0.1:7878）。
+    pub git_proxy_listen: Option<String>,
     /// 测试：直接连接的地址。
     pub connect_addr: Option<std::net::SocketAddr>,
     /// 测试：额外信任的 CA 文件。
@@ -203,6 +207,11 @@ pub fn enroll_cmd(url: &str, o: EnrollOpts) -> ExitCode {
                         }
                     }
                 }
+                if !o.no_git_proxy {
+                    for m in crate::git_service::after_enroll(o.git_proxy_listen.as_deref()) {
+                        println!("  · git-proxy：{m}");
+                    }
+                }
             }
             println!("测试：{} list", std::env::current_exe().map(|p| p.display().to_string()).unwrap_or_else(|_| "PassManager".into()));
             ExitCode::SUCCESS
@@ -213,6 +222,10 @@ pub fn enroll_cmd(url: &str, o: EnrollOpts) -> ExitCode {
 
 /// `passmanager unenroll`：删除远程配置与令牌，移除 MCP 配置与写入的使用规则。服务器上的令牌请在网页里吊销。
 pub fn unenroll() -> ExitCode {
+    let run = crate::git_service::run_cmd;
+    for m in crate::git_service::uninstall_all(&crate::git_service::Ctx::current(crate::git_proxy::DEFAULT_LISTEN, &run)) {
+        println!("  · git-proxy：{m}");
+    }
     for d in pm_platform::paths::client_config_dirs() {
         let mut removed = 0;
         for f in [CONFIG_FILE, TOKEN_FILE, KEYS_FILE, "git-proxy.token"] {
@@ -239,6 +252,14 @@ pub fn unenroll() -> ExitCode {
     }
     println!("服务器上的令牌请在网页\"Agent 令牌\"页吊销，或在服务器上运行 passmanager token revoke <ID>。");
     ExitCode::SUCCESS
+}
+
+/// 本机已注册的服务器（`主机:端口`），用于 `passmanager show` 的公开说明。
+pub fn connected_server() -> Option<String> {
+    match load_in(&dir()) {
+        Some(Ok(c)) => Some(format!("{}:{}", c.server, c.port)),
+        _ => None,
+    }
 }
 
 /// 非服务器上的 `passmanager status`：显示远程配置并测试连接。

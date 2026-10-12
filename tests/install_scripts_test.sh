@@ -50,7 +50,7 @@ chmod +x "$F"/*
 
 PKG="$T/pkg"; mkdir -p "$PKG"
 cp "$BIN" "$PKG/PassManager"
-cp "$SRC/scripts/install-server.sh" "$SRC/scripts/install-agent.sh" "$PKG/"
+cp "$SRC/scripts/install-server.sh" "$PKG/"
 SOCK="$T/swtpm/tpm.sock"
 mkdir -p "$(dirname "$SOCK")"
 python3 -I -c "import socket,sys; s=socket.socket(socket.AF_UNIX); s.bind(sys.argv[1])" "$SOCK"
@@ -94,7 +94,7 @@ check "init：无口令库、内层密钥、封存的 Cloudflare token" '[ -f "$
 check "init：配置来自参数（域名、两个网段、套接字）" 'grep -q "\"pm.example.com\"" "$D/install.json" && grep -q "203.0.113.0/24" "$D/install.json" && grep -qF "$SOCK" "$D/install.json"'
 ARCH_T="$(uname -m | sed 's/amd64/x86_64/; s/arm64/aarch64/')-unknown-linux-gnu"
 check "一键接入：本机程序复制到 Agent 程序目录" 'cmp -s "$D/agent-bin/PassManager-$ARCH_T" "$BIN"'
-check "完成提示 agent-setup" 'grep -q "passmanager agent-setup" "$OUT"'
+check "完成提示 show --label" 'grep -q "passmanager show --label" "$OUT" && ! grep -q "agent-setup" "$OUT"'
 check "Cloudflare token 没有出现在任何文件或输出里" '! grep -rqF "$TOKEN" "$R" && ! grep -qF "$TOKEN" "$OUT"'
 
 echo "== 重复运行（幂等）、已有的 sysctl 文件、权限受限的容器"
@@ -242,26 +242,22 @@ check "DRY_RUN 没有测试替身时拒绝（不执行任何系统命令、不�
 check "--help" 'bash "$PKG/install-server.sh" --help | grep -q "DRY_RUN"'
 check "非 DRY_RUN 且不是 root 时拒绝" '[ "$(id -u)" = 0 ] || ! bash "$PKG/install-server.sh" --skip-acme < /dev/null > /dev/null 2>&1'
 
-echo "== install-agent.sh"
-AP="$T/agentpkg"; mkdir -p "$AP"
-cp "$SRC/scripts/install-agent.sh" "$AP/"
-printf '#!/bin/sh\necho "PassManager $*" >> "%s"\n' "$LOG" > "$AP/PassManager"; chmod +x "$AP/PassManager"
-printf '#!/bin/sh\n[ "$1" = -u ] && { echo "${FAKE_UID:-1000}"; exit 0; }\necho "uid=${FAKE_UID:-1000}"\n' > "$F/id"
-printf '#!/bin/sh\necho "sudo $*" >> "%s"\n' "$LOG" > "$F/sudo"
-chmod +x "$F/id" "$F/sudo"
-CODE='pm-enroll://pm.example.com:8443/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA#BBBB'
+echo "== git-proxy 服务（替身 systemctl / loginctl / launchctl，未注册时拒绝）"
+GH="$T/gp-home"; mkdir -p "$GH"
+for c in loginctl launchctl; do
+  printf '#!/bin/sh\necho "%s $*" >> "%s"\n' "$c" "$LOG" > "$F/$c"; chmod +x "$F/$c"
+done
 : > "$LOG"
-check "root（sudo）：装到 /usr/local/bin，以 SUDO_USER 注册" 'FAKE_UID=0 SUDO_USER=alice DRY_RUN=1 ROOT="$T/ar" PATH="$F:$PATH" bash "$AP/install-agent.sh" "$CODE" >/dev/null && grep -qxF "sudo -u alice -H $T/ar/usr/local/bin/PassManager enroll $CODE" "$LOG" && [ -x "$T/ar/usr/local/bin/PassManager" ]'
-check "root 但没有 SUDO_USER：拒绝（Agent 不能以 root 运行）" '! FAKE_UID=0 DRY_RUN=1 ROOT="$T/ar" PATH="$F:$PATH" env -u SUDO_USER bash "$AP/install-agent.sh" "$CODE" >/dev/null 2>&1'
-: > "$LOG"
-check "普通用户：装到 ~/.local/bin 并注册（--no-mcp 透传）" 'FAKE_UID=1000 HOME="$T/home" DRY_RUN=1 ROOT="$T/au" PATH="$F:$PATH" bash "$AP/install-agent.sh" --no-mcp "$CODE" >/dev/null && grep -qxF "PassManager enroll --no-mcp $CODE" "$LOG" && [ -L "$T/au$T/home/.local/bin/passmanager" ]'
-check "DRY_RUN 没有测试替身时拒绝（install-agent.sh）" '! FAKE_UID=1000 HOME="$T/home" DRY_RUN=1 ROOT="$T/an" bash "$AP/install-agent.sh" "$CODE" > "$T/out5.txt" 2>&1 && grep -q "测试替身" "$T/out5.txt" && [ ! -e "$T/an" ]'
-check "缺少注册码" '! DRY_RUN=1 ROOT="$T/au" PATH="$F:$PATH" bash "$AP/install-agent.sh" >/dev/null 2>&1'
-check "不是注册码的参数" '! DRY_RUN=1 ROOT="$T/au" PATH="$F:$PATH" bash "$AP/install-agent.sh" "https://evil" >/dev/null 2>&1'
+check "git-proxy --install：没有远程配置时拒绝，不写服务文件、不调用服务管理器" '! HOME="$GH" PATH="$F:$PATH" env -u PASSMANAGER_HOME -u PASSMANAGER_CONFIG_DIR -u XDG_CONFIG_HOME "$BIN" git-proxy --install > "$T/out-gp.txt" 2>&1 && grep -q "passmanager enroll" "$T/out-gp.txt" && [ ! -e "$GH/.config/systemd" ] && [ ! -s "$LOG" ]'
+check "git-proxy：没有远程配置时以 78 退出（服务管理器不重启）" 'HOME="$GH" env -u PASSMANAGER_HOME -u PASSMANAGER_CONFIG_DIR -u XDG_CONFIG_HOME "$BIN" git-proxy --listen 127.0.0.1:1 > /dev/null 2>&1; [ $? = 78 ]'
+check "git-proxy：只监听回环地址" 'HOME="$GH" env -u PASSMANAGER_HOME -u PASSMANAGER_CONFIG_DIR "$BIN" git-proxy --listen 0.0.0.0:7878 > /dev/null 2>&1; [ $? = 78 ]'
+mkdir -p "$GH/.config/systemd/user"
+printf '[Service]\nExecStart=/bin/true\n' > "$GH/.config/systemd/user/passmanager-git-proxy.service"
+check "git-proxy --uninstall：停止并移除用户服务" 'HOME="$GH" PATH="$F:$PATH" env -u PASSMANAGER_HOME -u PASSMANAGER_CONFIG_DIR GIT_CONFIG_GLOBAL="$T/gp-gitconfig" "$BIN" git-proxy --uninstall > /dev/null 2>&1 && grep -qx "systemctl --user disable --now passmanager-git-proxy.service" "$LOG" && [ ! -e "$GH/.config/systemd/user/passmanager-git-proxy.service" ]'
 
 if command -v shellcheck >/dev/null; then
   echo "== shellcheck"
-  check "shellcheck 通过" 'shellcheck "$SRC/scripts/install-server.sh" "$SRC/scripts/install-agent.sh" "$SRC/scripts/package-lan.sh" "$0"'
+  check "shellcheck 通过" 'shellcheck "$SRC/scripts/install-server.sh" "$SRC/scripts/package-lan.sh" "$0"'
 fi
 
 echo
