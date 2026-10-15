@@ -1,7 +1,7 @@
 """系统模式安装后的探测脚本（供 CI 使用）。
 
 连接已安装的 PassManager 服务（口令握手），输出状态、封存等级、安全检查结果；
-可选地在库已就绪时跑一遍 Agent 流程（新建令牌 → 新增条目 → 用 CLI 以令牌调用 list）。
+可选地在库已就绪时跑一遍 Agent 流程（新建令牌 → 新增条目 → 用 CLI 以令牌调用 lookup）。
 
 用法：
   python3 -I tests/system_probe.py --password PW [--expect-level 2] [--expect-ready yes|no|any]
@@ -114,13 +114,13 @@ if args.agent_flow and status["ready"]:
         failures.append(f"新增条目失败：{r}")
     env = dict(os.environ, PASSMANAGER_TOKEN=tok)
     prefix = args.bin_prefix.split()
-    cmd = prefix + [args.bin, "list"]
+    cmd = prefix + [args.bin, "lookup", "https://httpbin.org/anything"]
     if args.run_as and os.name != "nt":
         cmd = ["sudo", "-u", args.run_as, "env", f"PASSMANAGER_TOKEN={tok}"] + cmd
     out = subprocess.run(cmd, env=env, capture_output=True, encoding="utf-8", errors="replace")
-    print("CLI list:", out.stdout.strip())
-    if out.returncode != 0 or '"ci"' not in out.stdout:
-        failures.append(f"CLI list 失败：{out.stdout} {out.stderr}")
+    print("CLI lookup:", out.stdout.strip())
+    if out.returncode != 0 or '"ci"' not in out.stdout or "{{secret}}" not in out.stdout:
+        failures.append(f"CLI lookup 失败：{out.stdout} {out.stderr}")
     # 真实 HTTPS 回显：密钥必须被脱敏（外部服务偶尔不可用，只记录不判失败）。
     cmd = prefix + [args.bin, "http", "GET", "https://httpbin.org/anything?k={{ci}}"]
     if args.run_as and os.name != "nt":

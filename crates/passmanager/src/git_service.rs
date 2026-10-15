@@ -11,7 +11,7 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
 
-use pm_proto::{CredentialView, Request};
+use pm_proto::Request;
 
 use crate::git_proxy::{DEFAULT_LISTEN, path_token};
 
@@ -326,23 +326,22 @@ pub fn git_host(domain: &str) -> Option<String> {
 }
 
 /// 有 `git` 用途（明确列出）的条目的主机，去重并排序。
-pub fn git_hosts(entries: &[CredentialView]) -> Vec<String> {
-    let mut v: Vec<String> =
-        entries.iter().filter(|e| e.ops.iter().any(|o| o == "git")).flat_map(|e| e.domains.iter().filter_map(|d| git_host(d))).collect();
+pub fn git_hosts(domains: &[String]) -> Vec<String> {
+    let mut v: Vec<String> = domains.iter().filter_map(|d| git_host(d)).collect();
     v.sort();
     v.dedup();
     v
 }
 
-/// 经远程通道读取条目列表，取出 git 主机。
+/// 经远程通道取得 git 主机：服务器只返回有 `git` 用途条目绑定的域名（`Request::GitHosts`），不涉及其他条目。
 pub fn default_hosts() -> Result<Vec<String>, String> {
     let mut c = match crate::remote::connect_if_configured() {
         Some(Ok(c)) => c,
         Some(Err(e)) => return Err(format!("{}: {}", e.code, e.message)),
         None => return Err("没有远程配置（先运行 passmanager enroll）".into()),
     };
-    let list: Vec<CredentialView> = c.call_as(&Request::List).map_err(|e| format!("{}: {}", e.code, e.message))?;
-    Ok(git_hosts(&list))
+    let domains: Vec<String> = c.call_as(&Request::GitHosts).map_err(|e| format!("{}: {}", e.code, e.message))?;
+    Ok(git_hosts(&domains))
 }
 
 /// `url.<子节>` 是否是 PassManager 写入的（回环地址上的代理 + 32 位十六进制路径令牌）。
@@ -476,29 +475,24 @@ mod tests {
     use super::*;
     use std::cell::RefCell;
 
-    fn entry(name: &str, domains: &[&str], ops: &[&str]) -> CredentialView {
-        CredentialView {
-            name: name.into(),
-            domains: domains.iter().map(|s| s.to_string()).collect(),
-            note: String::new(),
-            fields: vec![],
-            status: None,
-            ops: ops.iter().map(|s| s.to_string()).collect(),
-        }
-    }
-
+    /// 服务器的 GitHosts 只返回有 git 用途条目的域名；这里把它们变成可代理的主机（去掉通配符、网段、非法值并去重）。
     #[test]
     fn hosts_from_git_entries() {
-        let list = vec![
-            entry("github", &["github.com", "api.github.com"], &["http", "git"]),
-            entry("megagit", &["git.example.com:8121", "*.example.com", "198.51.100.0/24"], &["git"]),
-            entry("dup", &["GitHub.com:443"], &["git"]),
-            entry("http-only", &["api.example.org"], &["http"]),
-            entry("unrestricted", &["any.example.org"], &[]),
-            entry("ipv6", &["[2001:db8::1]:443", "2001:db8::1"], &["git"]),
-            entry("ip", &["127.0.0.1:9443"], &["git"]),
-        ];
-        assert_eq!(git_hosts(&list), vec!["127.0.0.1:9443", "api.github.com", "git.example.com:8121", "github.com"]);
+        let domains: Vec<String> = [
+            "github.com",
+            "api.github.com",
+            "git.example.com:8121",
+            "*.example.com",
+            "198.51.100.0/24",
+            "GitHub.com:443",
+            "[2001:db8::1]:443",
+            "2001:db8::1",
+            "127.0.0.1:9443",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        assert_eq!(git_hosts(&domains), vec!["127.0.0.1:9443", "api.github.com", "git.example.com:8121", "github.com"]);
         for bad in ["", "*.x.com", "x.com:0", "x.com:99999", "a b.com", "x.com/path", ".x.com", "x@y.com"] {
             assert_eq!(git_host(bad), None, "{bad}");
         }

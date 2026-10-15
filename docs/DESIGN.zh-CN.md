@@ -160,23 +160,25 @@ SealedPayload = { ct_mlkem, ct_mce, nonce_a, nonce_b, c2 }
 
 | MCP 工具 | CLI | 行为 |
 |---|---|---|
-| `list` | `PassManager list` | 已保存密钥的主机（引用名、域名、说明） |
+| `lookup(target, use?)` | `PassManager lookup 目标 [--use http\|ssh\|scp\|git]` | 按需查询：对一个 URL、`user@host` 或主机（基础地址本身是秘密时用 `{{名称}}`），只返回引用名、字段名与照抄即可的写法（`how`），选择规则与真正执行请求时完全相同。不返回其他条目、该条目的其他域名、备注或用途清单 |
 | `http(method, url, headers?, body?)` | `PassManager http [METHOD] URL [-X] [-H 'K: V'] [-d BODY \| -d @file \| --json BODY]` | 在请求头 / 请求体 / URL 查询中写 `{{secret}}`，按 URL 主机自动选择密钥；只支持 HTTPS；不跟随跨主机重定向；删除 `Set-Cookie` 与认证类响应头；正文与响应头脱敏 |
 | `ssh(target, command)` | `PassManager ssh [-p 端口] [-l 用户] user@host[:port] 命令…` | 内置 russh；password 失败时尝试 keyboard-interactive；命令以 `sudo ` 开头时改为 `sudo -k -S -p ''` 并从 stdin 提供密码；输出脱敏 |
 | `scp(source, destination)` | `PassManager scp [-P 端口] 源 目标` | 远程一侧写成 `user@host:/path`；SFTP 上传（创建/截断）或下载（内容脱敏，上限 64 MiB）；本地文件由客户端以当前用户身份读写 |
 
-兼容性：MCP 工具同时接受旧名称（`list_credentials`、`http_request`、`ssh_exec`、`ssh_upload`/`ssh_download`）和常见参数写法（headers 为对象 / 数组 / `"K: V"` 文本，body 为 JSON 对象，ssh 分开写 `host`/`user`/`port`，scp 用 `from`/`to`），但工具列表只公开上面 4 个；CLI 兼容 curl、OpenSSH、scp 的常用选项，并忽略 `-s`、`-L`、`-t`、`-o …` 等无关选项。客户端定位本地服务不依赖环境变量（Linux 用 `/run/user/<uid>`，Windows 用用户 SID 生成管道名），因此在环境变量很少的 MCP 子进程中同样可用。
+兼容性：`list`（以及 `list_credentials`）不再列出任何内容，返回 `USE_LOOKUP`。MCP 工具同时接受旧名称（`http_request`、`ssh_exec`、`ssh_upload`/`ssh_download`）和常见参数写法（headers 为对象 / 数组 / `"K: V"` 文本，body 为 JSON 对象，ssh 分开写 `host`/`user`/`port`，scp 用 `from`/`to`），但工具列表只公开上面 4 个；CLI 兼容 curl、OpenSSH、scp 的常用选项，并忽略 `-s`、`-L`、`-t`、`-o …` 等无关选项。客户端定位本地服务不依赖环境变量（Linux 用 `/run/user/<uid>`，Windows 用用户 SID 生成管道名），因此在环境变量很少的 MCP 子进程中同样可用。
 
-MCP 服务器为 stdio、按行分隔的 JSON-RPC 2.0，支持协议版本 2025-11-25 / 2025-06-18 / 2025-03-26 / 2024-11-05，并在 `instructions` 中附带三句使用说明。错误信息可以直接指导下一步：
+MCP 服务器为 stdio、按行分隔的 JSON-RPC 2.0，支持协议版本 2025-11-25 / 2025-06-18 / 2025-03-26 / 2024-11-05，使用说明逐步披露：`instructions`（最多 5 行：先 lookup、照抄 `how`、不泄露秘密、按 `Next:` 做）→ 工具描述（每个 2~3 句加一个最小示例，并带 `readOnlyHint`/`destructiveHint`/`openWorldHint` 标注；测试限制整个工具列表的大小）→ `lookup` 的 `how` → 按错误码附在每个错误后面的 `Next:` 行（`pm_proto::agent_text::next_step`）。错误信息不列出条目绑定的域名或允许的用途：
 
 | 代码 | 含义 |
 |---|---|
 | `LOCKED` | 库已锁定：`Ask the user to run: PassManager unlock` |
 | `NOT_READY` | 安全检查未通过：`Ask the user to run: PassManager` |
 | `NOT_INITIALIZED` / `NOT_RUNNING` | 尚未安装：`sudo PassManager install` |
-| `DOMAIN_MISMATCH` | `"github" only works with *.github.com` |
+| `DOMAIN_MISMATCH` | `"github" is not bound to evil.example`（不列出绑定的域名）；Next：`ssh root@<服务器> passmanager update --name … --domain …` |
+| `OP_NOT_ALLOWED` | 条目不允许这种用途；Next：`passmanager update --add-op …` |
+| `USE_LOOKUP` | 调用了已移除的 `list`；Next：调用 `lookup` |
 | `USE_HTTPS` | 不支持明文 HTTP（内网也不支持） |
-| `NO_CREDENTIAL` | 该主机没有保存密钥 |
+| `NO_CREDENTIAL` | 该主机没有保存密钥；Next：在服务器上导入，秘密只经过管道（`… \| ssh root@<服务器> passmanager import …`） |
 | `AMBIGUOUS` | 该主机有多个密钥，列出引用名供指定 |
 | `UNKNOWN_CREDENTIAL` | 指定的引用名不存在 |
 | `HOST_KEY_CHANGED` | SSH 主机密钥 / 自签证书指纹变化，**未发送任何数据**：`Ask the user to run: PassManager trust <主机>` |
@@ -385,4 +387,4 @@ v2 文件头 = v1 的字段 + 模式字节（device-only）；文件头哈希仍
   以 `--no-ask-password` 尝试 `loginctl enable-linger`，没有权限时给出说明；macOS 上是 LaunchAgent；Windows 上打印 `schtasks` 步骤），
   并替换全局 git 配置里由 PassManager 写入的 `url.<回环代理>/<路径令牌>/https/<主机>/.insteadOf` 行。128 位路径令牌持久保存在客户端
   配置目录（0600），这些行在重启后仍然有效；由回环地址加 32 位十六进制路径令牌识别我们写入的行，所以重复运行只替换、不重复。主机列表
-  来自普通的 `list` 调用（`ops` 含 `git` 的条目）；`git-proxy` 不带 `--host` 时使用同一份列表。PAT 留在服务器上。
+  来自只限令牌的 `git_hosts` 请求，它只返回 `ops` 含 `git` 的条目的域名；`git-proxy` 不带 `--host` 时使用同一份列表。PAT 留在服务器上。

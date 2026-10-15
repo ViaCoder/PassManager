@@ -49,14 +49,14 @@ PassManager trust db1.example.com   # 主机重装或证书更换后信任新指
 
 | MCP 工具 | CLI | 说明 |
 |---|---|---|
-| `list` | `PassManager list` | 已保存密钥的主机 |
+| `lookup` | `PassManager lookup https://api.github.com/user` | 先调用它：只显示这一个目标可用的凭据与照抄即可的写法（`how`）；不涉及其他条目，也不显示备注 |
 | `http` | `PassManager http https://api.github.com/user -H 'Authorization: Bearer {{secret}}'` | 在需要密钥的位置写 `{{secret}}`，按 URL 主机自动选择密钥；只支持 HTTPS |
 | `ssh` | `PassManager ssh deploy@db1.example.com 'sudo systemctl restart nginx'` | 用保存的密码或私钥登录；命令以 `sudo` 开头时自动提供 sudo 密码 |
 | `scp` | `PassManager scp ./app.conf deploy@db1.example.com:/etc/app.conf` | 远程一侧写成 `user@host:/path`；下载的内容会脱敏 |
 
 - CLI 兼容常用写法：`http` 支持 curl 的 `-X`、`-H`、`-d`/`--data-raw`、`-d @文件`、`--json`；`ssh` 支持 `-p`、`-l`、`ssh://user@host:port`；`scp` 支持 `-P`。
-- 同一主机保存了多个密钥时，用列表里的引用名指定：HTTP 中写 `{{引用名}}`，SSH/SCP 写 `引用名/user@host`。
-- CLI 从环境变量 `PASSMANAGER_TOKEN` 读取令牌，输出 JSON。需要用户操作的错误会直接给出命令，例如 `LOCKED: Ask the user to run: PassManager unlock`。
+- 同一主机保存了多个密钥时，`lookup` 返回 `AMBIGUOUS` 并列出引用名；用引用名指定：HTTP 中写 `{{引用名}}`，SSH/SCP 写 `引用名/user@host`。
+- CLI 从环境变量 `PASSMANAGER_TOKEN` 读取令牌，输出 JSON。每个错误最后都有一行 `Next:`，告诉 Agent 下一步做什么（CLI 输出里是 `next` 字段），例如在服务器上用 `passmanager import` 导入缺少的凭据、用 `passmanager update` 绑定主机。
 
 ## 局域网服务器（在线版）
 
@@ -69,6 +69,7 @@ Agent 与服务器之间是 TLS 1.3 混合后量子密钥交换，内层再叠�
 ./install-server.sh --domain pm.example.com --lan-cidr 198.51.100.0/24 < cloudflare-token
 passmanager import --name github --domain api.github.com < token.txt     # 密钥从标准输入读入，不回显
 passmanager import --name forge --ops git --domain github.com < pat.txt  # git 用途的条目：HTTPS 的 git 直接可用
+passmanager update --name forge --domain api.github.com --add-op http    # 只改绑定、用途、备注，不动密钥
 passmanager show --label laptop                                            # 打印一段给 AI Agent 的文字
 ```
 

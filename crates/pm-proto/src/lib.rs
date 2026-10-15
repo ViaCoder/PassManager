@@ -52,8 +52,6 @@ pub struct FieldInput {
 pub const KIND_PASSWORD: &str = "password";
 pub const KIND_SSH_KEY: &str = "ssh-key";
 pub const KIND_FIELDS: &str = "fields";
-/// 没有绑定域名的条目在列表与网页中的标注。
-pub const UNBOUND: &str = "未绑定域名";
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub struct EntryInput {
@@ -87,7 +85,18 @@ pub struct EntryInput {
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum Request {
     // ---- 使用类（令牌即可） ----
+    /// 已废弃：不再返回条目，只返回 `USE_LOOKUP` 错误（0.3.8 及更早的客户端仍会发送）。
     List,
+    /// 按目标查询可用的凭据：只返回能用于这一个目标的条目名、字段名与现成的写法（[`LookupView`]）。
+    /// `target`：URL、`[名称/]user@host[:port]`、主机名，或条目名（`{{名称}}` / `{{名称.base_url}}`）。
+    /// `use_`：`http`、`ssh`、`scp`、`git`；省略时按 `target` 推断（URL → http，user@host → ssh）。
+    Lookup {
+        target: String,
+        #[serde(default, rename = "use", skip_serializing_if = "Option::is_none")]
+        use_: Option<String>,
+    },
+    /// git-proxy 的主机发现：只返回有 `git` 用途条目绑定的域名（不含其他任何信息）。
+    GitHosts,
     Http {
         method: String,
         url: String,
@@ -208,6 +217,8 @@ impl Request {
         matches!(
             self,
             Request::List
+                | Request::Lookup { .. }
+                | Request::GitHosts
                 | Request::Http { .. }
                 | Request::Ssh { .. }
                 | Request::Upload { .. }
@@ -244,20 +255,21 @@ impl Response {
 
 // ---- 返回数据类型 ----
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct CredentialView {
-    pub name: String,
-    pub domains: Vec<String>,
-    pub note: String,
-    /// 多字段条目的字段名（只有名字，没有值）。
+/// `lookup` 的结果：只描述这一个目标可用的凭据——不含其他条目、该条目绑定的其他域名、备注或用途清单。
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct LookupView {
+    /// 规范化后的目标：`host:port`，按条目名查询时为占位符（例如 `{{ai.base_url}}`）。
+    pub target: String,
+    /// 用途：`http`、`ssh`、`scp` 或 `git`。
+    #[serde(rename = "use")]
+    pub use_: String,
+    /// 会被使用的条目名（SSH 可能是私钥与口令两个）。
+    pub credentials: Vec<String>,
+    /// 多字段条目的字段名（只有名字）。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub fields: Vec<String>,
-    /// 没有绑定任何域名：在网页里添加域名之前 Agent 无法使用。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub status: Option<String>,
-    /// 限定的用途（为空表示不限）。
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub ops: Vec<String>,
+    /// 现成的写法（照抄即可）。
+    pub how: String,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]

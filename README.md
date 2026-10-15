@@ -51,14 +51,14 @@ On the "Agent 接入" (Agents) tab, select your agent and press Enter to connect
 
 | MCP tool | CLI | Description |
 |---|---|---|
-| `list` | `PassManager list` | Hosts that have stored secrets |
+| `lookup` | `PassManager lookup https://api.github.com/user` | Call first: shows only the credential for this one target and a ready-to-copy call (`how`); nothing about other entries, no notes |
 | `http` | `PassManager http https://api.github.com/user -H 'Authorization: Bearer {{secret}}'` | Write `{{secret}}` where the secret goes; the secret for the URL's host is filled in. HTTPS only |
 | `ssh` | `PassManager ssh deploy@db1.example.com 'sudo systemctl restart nginx'` | Logs in with the stored password or private key; commands starting with `sudo` get the sudo password automatically |
 | `scp` | `PassManager scp ./app.conf deploy@db1.example.com:/etc/app.conf` | Write the remote side as `user@host:/path`; downloaded content is redacted |
 
 - The CLI accepts common forms: `http` supports curl's `-X`, `-H`, `-d`/`--data-raw`, `-d @file`, `--json`; `ssh` supports `-p`, `-l`, `ssh://user@host:port`; `scp` supports `-P`.
-- If a host has several stored secrets, pick one by the reference name shown in the list: `{{name}}` in HTTP, `name/user@host` for SSH/SCP.
-- The CLI reads the token from the `PASSMANAGER_TOKEN` environment variable and prints JSON. Errors that need the user tell the agent exactly what to ask for, e.g. `LOCKED: Ask the user to run: PassManager unlock`.
+- If a host has several stored secrets, `lookup` returns `AMBIGUOUS` with their reference names; pick one: `{{name}}` in HTTP, `name/user@host` for SSH/SCP.
+- The CLI reads the token from the `PASSMANAGER_TOKEN` environment variable and prints JSON. Every error ends with a `Next:` line that tells the agent exactly what to do (CLI: a `next` field), e.g. how to import a missing credential with `passmanager import` or bind one with `passmanager update` on the server.
 
 ## LAN server (online edition)
 
@@ -72,6 +72,7 @@ the domain and the allowed client CIDRs must be given at install time.
 ./install-server.sh --domain pm.example.com --lan-cidr 198.51.100.0/24 < cloudflare-token
 passmanager import --name github --domain api.github.com < token.txt     # secrets come from stdin, never echoed
 passmanager import --name forge --ops git --domain github.com < pat.txt  # git entries: git over HTTPS just works
+passmanager update --name forge --domain api.github.com --add-op http    # bindings, uses, note only; the secret is untouched
 passmanager show --label laptop --lang en                                  # prints one block of text for an AI agent
 ```
 

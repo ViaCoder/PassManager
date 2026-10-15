@@ -107,7 +107,16 @@ enum Cmd {
     SocketPath,
     /// MCP 服务器（stdio），供 AI Agent 使用
     Mcp,
-    /// 列出已保存密钥的主机
+    /// 查询某个目标（URL、user@host 或主机）可用的凭据，返回照抄即可的写法（只显示这一个目标的信息）
+    Lookup {
+        /// URL、user@host[:port]、主机，或 {{名称}}
+        target: String,
+        /// 用途：http、ssh、scp、git（省略时按目标推断）
+        #[arg(long = "use")]
+        use_: Option<String>,
+    },
+    /// 已废弃：不再列出条目，请用 lookup
+    #[command(hide = true)]
     List,
     /// HTTPS 请求（curl 风格）：在需要密钥的位置写 {{secret}}
     #[command(override_usage = "PassManager http [METHOD] <URL> [-X METHOD] [-H 'K: V']... [-d BODY | -d @file | --json BODY]")]
@@ -246,7 +255,7 @@ enum Cmd {
         /// 只允许这些用途（逗号分隔：http、ssh、git；默认不限），例如只用于 SSH 登录的初始口令写 --ops ssh
         #[arg(long, value_delimiter = ',')]
         ops: Vec<String>,
-        /// 说明
+        /// 备注：一句用途说明（不要写路径、URL、账号或秘密）
         #[arg(long, default_value = "")]
         note: String,
         /// 自签证书（首次连接时记录证书指纹）
@@ -267,6 +276,34 @@ enum Cmd {
         /// SSH 私钥：允许 ssh-agent 桥签名的主机密钥（SHA256:… 指纹或公钥行，可重复）
         #[arg(long = "host-key")]
         host_keys: Vec<String>,
+    },
+    /// [服务器 root] 修改条目的绑定、用途或备注（不涉及密钥）
+    #[command(after_help = "\
+示例：
+  ssh root@server passmanager update --name forge --domain git.example.com
+  ssh root@server passmanager update --name init --add-op ssh --remove-domain 203.0.113.0/24
+  ssh root@server passmanager update --name ai --note 'AI gateway key'
+
+备注只写一句用途：不要写路径、URL、账号或秘密。")]
+    Update {
+        /// 引用名
+        #[arg(long)]
+        name: String,
+        /// 增加绑定的目标（可重复，格式同 import --domain）
+        #[arg(long = "domain")]
+        add_domains: Vec<String>,
+        /// 移除绑定的目标（可重复）
+        #[arg(long = "remove-domain")]
+        remove_domains: Vec<String>,
+        /// 增加允许的用途（http、ssh、git；可重复或逗号分隔）
+        #[arg(long = "add-op", value_delimiter = ',')]
+        add_ops: Vec<String>,
+        /// 移除允许的用途
+        #[arg(long = "remove-op", value_delimiter = ',')]
+        remove_ops: Vec<String>,
+        /// 新的备注（一句用途说明）
+        #[arg(long)]
+        note: Option<String>,
     },
     /// 显示 Agent 接入说明；服务器上的 root 加 --label 时附带一次性注册码（10 分钟有效，只能使用一次）
     #[command(after_help = "\
@@ -291,6 +328,9 @@ enum Cmd {
         /// 只打印给 AI Agent 的使用规则（enroll 时会写入 Agent 的全局指令文件）
         #[arg(long, conflicts_with_all = ["label", "url"])]
         rules: bool,
+        /// 与 --rules 一起：把规则写入本机已检测到的 Agent 的全局指令文件（原地更新，与 enroll 时相同，英文）
+        #[arg(long, requires = "rules")]
+        write: bool,
         /// 说明语言：zh（默认）或 en
         #[arg(long, default_value = "zh")]
         lang: String,
@@ -461,6 +501,7 @@ fn main() -> ExitCode {
             mcp::run();
             ExitCode::SUCCESS
         }
+        Some(Cmd::Lookup { target, use_ }) => cli::tool("lookup", serde_json::json!({"target": target, "use": use_})),
         Some(Cmd::List) => cli::tool("list", serde_json::json!({})),
         Some(Cmd::Http { args, request, headers, data, json, .. }) => cli::http(args, request, headers, data, json),
         Some(Cmd::Ssh { port, login, target, command, .. }) => cli::ssh(port, login, target, command),
@@ -500,6 +541,9 @@ fn main() -> ExitCode {
         Some(Cmd::Import { name, domains, ops, note, self_signed, replace, kind, fields, interactive, host_keys }) => {
             server::import(import::ImportOpts { name, domains, ops, note, self_signed, replace, kind, fields, interactive, host_keys })
         }
+        Some(Cmd::Update { name, add_domains, remove_domains, add_ops, remove_ops, note }) => {
+            server::update(import::UpdateOpts { name, add_domains, remove_domains, add_ops, remove_ops, note })
+        }
         Some(Cmd::Token(TokenCmd::List)) => server::token_list(),
         Some(Cmd::Token(TokenCmd::Revoke { id })) => server::token_revoke(&id),
         Some(Cmd::Status) => server::status(),
@@ -508,7 +552,7 @@ fn main() -> ExitCode {
         Some(Cmd::Enroll { code, no_mcp, no_instructions, no_git_proxy, git_proxy_listen, connect_addr, ca_file }) => {
             remote::enroll_cmd(&code, remote::EnrollOpts { no_mcp, no_instructions, no_git_proxy, git_proxy_listen, connect_addr, ca_file })
         }
-        Some(Cmd::Show { label, url, rules, lang }) => show(label, url, rules, &lang),
+        Some(Cmd::Show { label, url, rules, write, lang }) => show(label, url, rules, write, &lang),
         Some(Cmd::Unenroll) => remote::unenroll(),
         Some(Cmd::BuildInfo) => {
             let b = pm_service::build_info();
@@ -553,12 +597,33 @@ fn main() -> ExitCode {
 
 /// `passmanager show`：服务器上的 root 加 `--label` 时生成一次性注册码（完整说明或只有 URL）；
 /// 否则打印不含注册码的公开说明（已注册的机器说明连接的服务器）。说明文字只来自 `pm_proto::agent_text`。
-fn show(label: Option<String>, url: bool, rules: bool, lang: &str) -> ExitCode {
+fn show(label: Option<String>, url: bool, rules: bool, write: bool, lang: &str) -> ExitCode {
     use pm_proto::agent_text::{Lang, instruction_block, public_text};
     let l = match Lang::parse(lang) {
         Ok(l) => l,
         Err(e) => return install::fail(e),
     };
+    if write {
+        // 与 enroll 写入的一致（英文），升级客户端后运行一次即可更新各 Agent 的规则块。
+        let block = instruction_block(Lang::En);
+        let mut ok = true;
+        let mut any = false;
+        for (name, path, r) in agent_instructions::install_detected(&block) {
+            any = true;
+            match r {
+                Ok(agent_instructions::Change::Unchanged) => println!("{name}：使用规则已是最新（{}）", path.display()),
+                Ok(_) => println!("{name}：已更新使用规则（{}）", path.display()),
+                Err(e) => {
+                    ok = false;
+                    println!("{name}：未写入使用规则（{e}）")
+                }
+            }
+        }
+        if !any {
+            println!("没有检测到支持全局指令文件的 Agent。");
+        }
+        return if ok { ExitCode::SUCCESS } else { ExitCode::from(1) };
+    }
     if rules {
         print!("{}", instruction_block(l));
         return ExitCode::SUCCESS;

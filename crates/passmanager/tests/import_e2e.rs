@@ -51,11 +51,11 @@ fn import_from_stdin() {
     let (ok, out) = http_digest(&env, port, "{{creds.username}}:{{creds.password}}");
     assert!(ok && out.contains(&digest_of(&format!("{USER}:{PASS}"))), "{out}");
     outputs += &out;
-    // MCP / CLI 的 list 只给字段名。
-    let o = env.agent(&["list"]);
-    let list = stdout(&o);
-    assert!(list.contains("\"username\"") && list.contains("\"password\""), "{list}");
-    outputs += &list;
+    // lookup 只给字段名（没有值、没有域名、没有备注）。
+    let o = env.agent(&["lookup", "{{creds}}"]);
+    let found = stdout(&o);
+    assert!(found.contains("\"username\"") && found.contains("\"password\"") && !found.contains("127.0.0.1"), "{found}");
+    outputs += &found;
 
     // ---- 回显服务：每个字段值、多行值的每一行、各种编码都被脱敏 ----
     let echo = echo_server();
@@ -109,11 +109,26 @@ fn import_from_stdin() {
     // ---- 没有域名：保存，但标为未绑定，Agent 不能使用 ----
     let o = env.run_stdin(&["import", "--name", "spare"], b"spare-secret-value\n");
     assert!(o.status.success() && stdout(&o).contains("0 个域名") && stdout(&o).contains("没有绑定域名"), "{}", stdout(&o));
-    let list = stdout(&env.agent(&["list"]));
-    assert!(list.contains("未绑定域名"), "{list}");
+    let found = stdout(&env.agent(&["lookup", "{{spare}}"]));
+    assert!(
+        found.contains("DOMAIN_MISMATCH") && found.contains("not bound to any domain") && found.contains("passmanager update"),
+        "{found}"
+    );
     let (ok, out) = http_digest(&env, port, "{{spare}}");
     assert!(!ok && out.contains("DOMAIN_MISMATCH") && out.contains("not bound"), "{out}");
     outputs += &out;
+
+    // ---- update：只改绑定 / 用途 / 备注，密钥不变；可疑备注给出警告 ----
+    let o = env.run(&["update", "--name", "spare", "--domain", &d, "--note", "token file /root/x"]);
+    assert!(o.status.success() && stdout(&o).contains("密钥未改动") && stderr(&o).contains("警告"), "{}{}", stdout(&o), stderr(&o));
+    let o = env.run(&["update", "--name", "spare", "--note", "spare key", "--add-op", "http"]);
+    assert!(o.status.success() && stderr(&o).is_empty(), "{}{}", stdout(&o), stderr(&o));
+    // 绑定生效：不再是 DOMAIN_MISMATCH（spare 不是自签条目，所以到本地自签服务器的 TLS 校验失败——说明请求已经发出）。
+    let (ok, out) = http_digest(&env, port, "{{spare}}");
+    assert!(!ok && out.contains("UPSTREAM_ERROR") && !out.contains("DOMAIN_MISMATCH"), "{out}");
+    outputs += &out;
+    assert!(!env.run(&["update", "--name", "nope", "--note", "x"]).status.success());
+    assert!(!env.run(&["update", "--name", "spare"]).status.success(), "没有要修改的内容");
 
     // ---- 标准输入是终端：拒绝 ----
     let mut master = 0;

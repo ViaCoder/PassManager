@@ -160,23 +160,25 @@ SealedPayload = { ct_mlkem, ct_mce, nonce_a, nonce_b, c2 }
 
 | MCP tool | CLI | Behavior |
 |---|---|---|
-| `list` | `PassManager list` | Hosts with stored secrets (reference name, domains, note) |
+| `lookup(target, use?)` | `PassManager lookup TARGET [--use http\|ssh\|scp\|git]` | Need-to-know discovery: for one URL, `user@host` or host (or `{{name}}` when the base URL itself is secret) it returns only the reference name(s), field names and a ready-to-copy call (`how`), chosen by exactly the same rules as the real request. Never other entries, other domains of the entry, notes or the `ops` list |
 | `http(method, url, headers?, body?)` | `PassManager http [METHOD] URL [-X] [-H 'K: V'] [-d BODY \| -d @file \| --json BODY]` | Write `{{secret}}` in headers / body / URL query and the secret for the URL's host is selected; HTTPS only; no cross-host redirects; `Set-Cookie` and auth-related response headers are removed; body and headers are redacted |
 | `ssh(target, command)` | `PassManager ssh [-p port] [-l user] user@host[:port] command…` | Built-in russh; falls back to keyboard-interactive if password auth fails; commands starting with `sudo ` become `sudo -k -S -p ''` with the password supplied on stdin; output is redacted |
 | `scp(source, destination)` | `PassManager scp [-P port] source destination` | Write the remote side as `user@host:/path`; SFTP upload (create/truncate) or download (content redacted, 64 MiB limit); local files are read and written by the client as the current user |
 
-Compatibility: the MCP tools also accept older names (`list_credentials`, `http_request`, `ssh_exec`, `ssh_upload`/`ssh_download`) and common argument shapes (headers as an object / array / `"K: V"` text, body as a JSON object, ssh with separate `host`/`user`/`port`, scp with `from`/`to`), but the tool list only advertises the four above. The CLI accepts common curl, OpenSSH, and scp options and ignores unrelated ones such as `-s`, `-L`, `-t`, `-o …`. Clients locate the local service without environment variables (Linux uses `/run/user/<uid>`, Windows derives the pipe name from the user SID), so it also works in MCP child processes with a minimal environment.
+Compatibility: `list` (and `list_credentials`) no longer lists anything; it returns `USE_LOOKUP`. The MCP tools also accept older names (`http_request`, `ssh_exec`, `ssh_upload`/`ssh_download`) and common argument shapes (headers as an object / array / `"K: V"` text, body as a JSON object, ssh with separate `host`/`user`/`port`, scp with `from`/`to`), but the tool list only advertises the four above. The CLI accepts common curl, OpenSSH, and scp options and ignores unrelated ones such as `-s`, `-L`, `-t`, `-o …`. Clients locate the local service without environment variables (Linux uses `/run/user/<uid>`, Windows derives the pipe name from the user SID), so it also works in MCP child processes with a minimal environment.
 
-The MCP server speaks newline-delimited JSON-RPC 2.0 over stdio, supports protocol versions 2025-11-25 / 2025-06-18 / 2025-03-26 / 2024-11-05, and includes three sentences of usage guidance in `instructions`. Error messages tell the agent what to do next:
+The MCP server speaks newline-delimited JSON-RPC 2.0 over stdio, supports protocol versions 2025-11-25 / 2025-06-18 / 2025-03-26 / 2024-11-05, and discloses usage progressively: `instructions` (at most five lines: lookup first, copy `how`, never reveal secrets, follow `Next:`) → tool descriptions (two or three sentences plus one minimal example each, with `readOnlyHint`/`destructiveHint`/`openWorldHint` annotations; a test caps the whole tool list in size) → `lookup`'s `how` → a `Next:` line appended to every error by code (`pm_proto::agent_text::next_step`). Error messages do not list an entry's domains or allowed operations:
 
 | Code | Meaning |
 |---|---|
 | `LOCKED` | The vault is locked: `Ask the user to run: PassManager unlock` |
 | `NOT_READY` | Security checks failed: `Ask the user to run: PassManager` |
 | `NOT_INITIALIZED` / `NOT_RUNNING` | Not installed yet: `sudo PassManager install` |
-| `DOMAIN_MISMATCH` | `"github" only works with *.github.com` |
+| `DOMAIN_MISMATCH` | `"github" is not bound to evil.example` (the bound domains are not listed); Next: `ssh root@<server> passmanager update --name … --domain …` |
+| `OP_NOT_ALLOWED` | The entry may not be used for this operation; Next: `passmanager update --add-op …` |
+| `USE_LOOKUP` | The removed `list` was called; Next: call `lookup` |
 | `USE_HTTPS` | Plain HTTP is not supported (not even on internal networks) |
-| `NO_CREDENTIAL` | No secret is stored for this host |
+| `NO_CREDENTIAL` | No secret is stored for this host; Next: import it on the server without displaying it (`… \| ssh root@<server> passmanager import …`) |
 | `AMBIGUOUS` | This host has several secrets; their reference names are listed |
 | `UNKNOWN_CREDENTIAL` | The given reference name does not exist |
 | `HOST_KEY_CHANGED` | SSH host key / self-signed certificate fingerprint changed, **nothing was sent**: `Ask the user to run: PassManager trust <host>` |
@@ -398,5 +400,5 @@ of the same guide with placeholders instead of a code.
   the PassManager-managed `url.<loopback proxy>/<path-token>/https/<host>/.insteadOf` lines in the global git configuration. The
   128-bit path token is stored persistently (0600) in the client configuration directory, so the lines survive restarts; managed
   lines are recognised by a loopback address plus a 32-hex path token, so re-running replaces and never duplicates. The host list
-  comes from the ordinary `list` call (entries whose `ops` include `git`); `git-proxy` without `--host` uses the same list. The
+  comes from the token-only `git_hosts` request, which returns just the domains of entries whose `ops` include `git`; `git-proxy` without `--host` uses the same list. The
   PAT stays on the server.

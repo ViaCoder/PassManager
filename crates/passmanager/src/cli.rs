@@ -13,7 +13,11 @@ fn print_result(r: Result<Value, ApiError>) -> ExitCode {
             ExitCode::SUCCESS
         }
         Err(e) => {
-            println!("{}", serde_json::to_string_pretty(&json!({"error": e.code, "message": e.message})).unwrap_or_default());
+            let mut v = json!({"error": e.code, "message": e.message});
+            if let Some(n) = crate::mcp::next(&e) {
+                v["next"] = Value::String(n);
+            }
+            println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default());
             ExitCode::from(1)
         }
     }
@@ -158,6 +162,9 @@ mod tests {
             vec!["PassManager", "ssh", "deploy@db1", "sudo systemctl restart nginx"],
             vec!["PassManager", "scp", "-P", "2222", "a.txt", "deploy@db1:/tmp/a.txt"],
             vec!["PassManager", "list"],
+            vec!["PassManager", "lookup", "https://api.github.com/user"],
+            vec!["PassManager", "lookup", "root@db1", "--use", "scp"],
+            vec!["PassManager", "update", "--name", "x", "--domain", "a.example.com", "--add-op", "git,http", "--note", "y"],
         ] {
             assert!(crate::Cli::try_parse_from(&argv).is_ok(), "failed to parse {argv:?}");
         }
@@ -169,7 +176,7 @@ mod tests {
         use clap::Parser;
         let parse = |argv: &[&str]| crate::Cli::try_parse_from(argv);
         let show = |argv: &[&str]| match parse(argv).unwrap_or_else(|e| panic!("{argv:?}: {e}")).cmd {
-            Some(crate::Cmd::Show { label, url, rules, lang }) => (label, url, rules, lang),
+            Some(crate::Cmd::Show { label, url, rules, lang, .. }) => (label, url, rules, lang),
             _ => panic!("not show: {argv:?}"),
         };
         assert_eq!(show(&["PassManager", "show"]), (None, false, false, "zh".to_string()), "默认中文");
@@ -181,6 +188,9 @@ mod tests {
             &["PassManager", "show", "--url"][..],
             &["PassManager", "show", "--rules", "--label", "x"],
             &["PassManager", "show", "--rules", "--url"],
+            &["PassManager", "show", "--write"],
+            &["PassManager", "lookup"],
+            &["PassManager", "update", "--domain", "a"],
             &["PassManager", "show", "--label"],
             &["PassManager", "agent-setup", "--label", "x"],
             &["PassManager", "agent-instructions"],
@@ -192,6 +202,7 @@ mod tests {
             &["PassManager", "token", "list"][..],
             &["PassManager", "token", "revoke", "1a2b3c4d"],
             &["PassManager", "enroll", "pm-enroll://x"],
+            &["PassManager", "show", "--rules", "--write"],
         ] {
             assert!(parse(ok).is_ok(), "{ok:?}");
         }

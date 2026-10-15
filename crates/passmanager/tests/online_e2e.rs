@@ -347,20 +347,21 @@ fn lan_server_end_to_end() {
     }
     assert!(https(&env, "GET", "/tokens", Some(&cookie), None).body.contains("laptop"));
 
-    // ---- Agent：MCP list 与 http（经双层通道），结果脱敏 ----
+    // ---- Agent：MCP lookup 与 http（经双层通道），结果脱敏 ----
     let echo = echo_server();
     let out = mcp(
         &env,
         &[
-            json!({"name": "list", "arguments": {}}),
+            json!({"name": "lookup", "arguments": {"target": format!("https://127.0.0.1:{echo}/x")}}),
             json!({"name": "http", "arguments": {"method": "GET", "url": format!("https://127.0.0.1:{echo}/x"), "headers": {"Authorization": "Bearer {{secret}}"}}}),
         ],
     );
     assert_eq!(out.len(), 2, "{out:?}");
-    assert!(tool_text(&out[0]).contains("\"echo\""), "{}", tool_text(&out[0]));
+    let found = tool_text(&out[0]);
+    assert!(found.contains("\"echo\"") && found.contains("{{secret}}") && !found.contains(SECRET), "{found}");
     let t = tool_text(&out[1]);
     assert!(t.contains("[REDACTED:echo]") && !t.contains(SECRET), "{t}");
-    let o = env.agent_cmd(&["list"]).output().unwrap();
+    let o = env.agent_cmd(&["lookup", "127.0.0.1"]).output().unwrap();
     assert!(o.status.success() && stdout(&o).contains("echo"), "{}", stdout(&o));
     let o = env.agent_cmd(&["status"]).output().unwrap();
     assert!(stdout(&o).contains("双层加密"), "{}", stdout(&o));
@@ -370,14 +371,14 @@ fn lan_server_end_to_end() {
     let _ = svc.wait();
     let _ = std::fs::remove_file(env.home.join("run/passmanager.sock"));
     let mut svc = env.start();
-    let o = env.agent_cmd(&["list"]).output().unwrap();
+    let o = env.agent_cmd(&["lookup", "127.0.0.1"]).output().unwrap();
     assert!(o.status.success() && stdout(&o).contains("echo"), "{}", stdout(&o));
 
     // ---- 吊销令牌：立即失效 ----
     let o = env.run(&["token", "list"]);
     let id = stdout(&o).lines().find(|l| l.contains("laptop")).unwrap().split_whitespace().next().unwrap().to_string();
     assert!(env.run(&["token", "revoke", &id]).status.success());
-    let o = env.agent_cmd(&["list"]).output().unwrap();
+    let o = env.agent_cmd(&["lookup", "127.0.0.1"]).output().unwrap();
     assert!(!o.status.success() && stdout(&o).contains("AUTH_FAILED"), "{}", stdout(&o));
 
     // ---- 断电：主库文件被截断 → 重启后从 .bak 恢复（.bak 由上次保存产生） ----

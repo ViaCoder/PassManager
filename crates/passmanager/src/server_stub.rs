@@ -30,6 +30,9 @@ pub fn layout() -> pm_platform::paths::Layout {
 pub fn import(_: crate::import::ImportOpts) -> ExitCode {
     linux_only()
 }
+pub fn update(_: crate::import::UpdateOpts) -> ExitCode {
+    linux_only()
+}
 pub fn token_list() -> ExitCode {
     linux_only()
 }

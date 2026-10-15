@@ -6,7 +6,7 @@
 //! - 使用规则写在 `<!-- passmanager:begin -->` 与 `<!-- passmanager:end -->` 之间，原地更新、不重复。
 
 /// 使用规则的版本（规则内容变化时加 1）。
-pub const INSTRUCTIONS_VERSION: u32 = 3;
+pub const INSTRUCTIONS_VERSION: u32 = 4;
 pub const BEGIN: &str = "<!-- passmanager:begin -->";
 pub const END: &str = "<!-- passmanager:end -->";
 /// 公开的源码仓库。
@@ -47,41 +47,90 @@ impl BuildInfo {
 }
 
 /// 使用规则（写入 Agent 全局指令文件，也是接入说明的最后一部分）。
+///
+/// 只写流程与边界；每个工具的用法在 MCP 工具描述里，具体写法由 `lookup` 的结果给出，错误的处理由 `Next:` 给出（逐步披露）。
 pub fn rules(lang: Lang) -> &'static str {
     match lang {
         Lang::En => {
             "\
-- Use the PassManager MCP tools (or the `passmanager` CLI). Call `list` first to see which hosts and entries exist.
-- Never ask the user for a password, token or key, and never print, log or store plaintext secrets. Reference them only as
-  placeholders in `http`, `ssh` and `scp` requests: `{{secret}}` (the entry for the target host), `{{entry}}`,
-  `{{entry.field}}`, or `{{field}}`. PassManager fills them in on the server and redacts the results.
-  If an entry has a `base_url` field, use `{{entry.base_url}}` as the URL (optionally followed by a path, e.g.
-  `{{ai.base_url}}/models`); the base URL itself stays secret.
-- For plain `ssh`/`scp`/`git` over SSH run `passmanager ssh-agent` and use the printed `SSH_AUTH_SOCK`.
-- git over HTTPS: use ordinary `https://` URLs. For every host that has an entry with the `git` op, the
-  `passmanager git-proxy` user service routes git through the server, which adds the token. If git asks for
-  credentials, run `passmanager git-proxy --install` (also after git entries were added) and retry.
-  Private keys and tokens never leave the server.
-- Errors: `LOCKED`/`NOT_READY` → ask the user to unlock or fix the server; `DOMAIN_MISMATCH` or an unbound entry → ask the user
-  to bind the entry to that host in the PassManager web UI; `NO_CREDENTIAL` → ask the user to add one; `HOST_KEY_CHANGED` →
-  ask the user to verify and trust the new key. Do not try to work around these errors.
+- Use the PassManager MCP tools (or the `passmanager` CLI). You never see secrets: you write placeholders and
+  PassManager fills them in on the server and redacts the results.
+- Workflow: 1. `lookup` the URL or user@host you need (CLI: `passmanager lookup <target>`). 2. Copy the `how` it
+  returns into `http`, `ssh` or `scp`, replacing only the `<...>` parts.
+- Never ask the user for a password, token or key; never print, log or store one; never try to reveal one.
+- git over HTTPS: plain `git` with `https://` URLs (if git asks for credentials, run `passmanager git-proxy --install`).
+  Plain `ssh`/`scp`/git over SSH: run `passmanager ssh-agent` and use the printed `SSH_AUTH_SOCK`.
+- An error ends with a `Next:` line: do exactly that. Do not retry the same call and do not work around the error.
+- Adding or changing a credential is done by an agent with root SSH on the PassManager server, not by the user:
+    <command that prints the secret> | ssh root@<server> passmanager import --name <name> --domain <host> --ops <http|ssh|git> --note '<purpose>'
+    ssh root@<server> passmanager update --name <name> --domain <host>      (also --add-op, --remove-domain, --note)
+  The secret only travels through the pipe: never echo, cat or save it. A note is one short purpose: no paths, URLs,
+  accounts or secrets. Without root SSH on the server, tell the user what is missing.
 "
         }
         Lang::Zh => {
             "\
-- 使用 PassManager 的 MCP 工具（或 `passmanager` 命令行）。先调用 `list` 查看有哪些主机与条目。
-- 永远不要向用户索要口令、令牌或私钥，也不要打印、记录或保存明文。只在 `http`、`ssh`、`scp` 请求里用占位符引用：
-  `{{secret}}`（目标主机对应的条目）、`{{条目}}`、`{{条目.字段}}` 或 `{{字段}}`。PassManager 在服务器上代入并对结果脱敏。
-  条目有 `base_url` 字段时，用 `{{条目.base_url}}` 作为 URL（后面可以接路径，例如 `{{ai.base_url}}/models`）；基础地址本身也是秘密。
-- 普通的 `ssh`/`scp`/基于 SSH 的 `git`：运行 `passmanager ssh-agent` 并使用它打印的 `SSH_AUTH_SOCK`。
-- 基于 HTTPS 的 git：直接使用普通的 `https://` 地址。对每个有 `git` 用途条目的主机，`passmanager git-proxy` 用户服务
-  让 git 经服务器访问，由服务器带上令牌。git 要求输入凭据时，运行 `passmanager git-proxy --install`
-  （新增 git 条目之后也要运行）再重试。私钥与令牌不会离开服务器。
-- 错误：`LOCKED`/`NOT_READY` → 请用户解锁或处理服务器；`DOMAIN_MISMATCH` 或条目未绑定域名 → 请用户在 PassManager 网页里
-  把条目绑定到该主机；`NO_CREDENTIAL` → 请用户添加；`HOST_KEY_CHANGED` → 请用户核实并信任新的密钥。不要设法绕过这些错误。
+- 使用 PassManager 的 MCP 工具（或 `passmanager` 命令行）。你看不到秘密：只写占位符，PassManager 在服务器上代入并对结果脱敏。
+- 流程：1. 用 `lookup` 查询要访问的 URL 或 user@host（命令行：`passmanager lookup <目标>`）。2. 把返回的 `how` 照抄到
+  `http`、`ssh` 或 `scp`，只替换其中 `<...>` 的部分。
+- 永远不要向用户索要口令、令牌或私钥；不要打印、记录或保存；不要设法还原秘密。
+- 基于 HTTPS 的 git：直接用普通的 `git` 与 `https://` 地址（git 要求输入凭据时运行 `passmanager git-proxy --install`）。
+  普通的 `ssh`/`scp`/基于 SSH 的 git：运行 `passmanager ssh-agent`，使用它打印的 `SSH_AUTH_SOCK`。
+- 错误的最后一行是 `Next:`：照它做。不要重复同样的调用，也不要绕过错误。
+- 新增或修改凭据由拥有 PassManager 服务器 root SSH 的 Agent 完成，用户不手动操作：
+    <输出秘密的命令> | ssh root@<服务器> passmanager import --name <名称> --domain <主机> --ops <http|ssh|git> --note '<用途>'
+    ssh root@<服务器> passmanager update --name <名称> --domain <主机>      （还有 --add-op、--remove-domain、--note）
+  秘密只经过管道：不要 echo、cat 或保存。备注只写一句用途：不含路径、URL、账号或秘密。没有服务器的 root SSH 时，告诉用户缺少什么。
 "
         }
     }
+}
+
+/// 错误码对应的下一步（附在 MCP 与 CLI 的错误后面，写给 Agent）。`server` 是本机注册的服务器主机名（未注册时为 None）。
+pub fn next_step(code: &str, server: Option<&str>) -> Option<String> {
+    let srv = server.unwrap_or("<PassManager server>");
+    let no_root = "Without root SSH on that server, tell the user exactly what is missing.";
+    let s = match code {
+        "NO_CREDENTIAL" => format!(
+            "no credential is stored for this target. If you have root SSH on the PassManager server, import it without displaying it: \
+             <command that prints the secret> | ssh root@{srv} passmanager import --name <name> --domain <host> --ops <http|ssh|git> \
+             --note '<purpose>'. {no_root} Do not guess other credential names."
+        ),
+        "DOMAIN_MISMATCH" => format!(
+            "this credential is not bound to that host. If it should be, bind it: ssh root@{srv} passmanager update --name <name> \
+             --domain <host>. {no_root} Do not retry with other names."
+        ),
+        "OP_NOT_ALLOWED" => format!(
+            "this credential is not allowed for that use. If it should be, allow it: ssh root@{srv} passmanager update --name <name> \
+             --add-op <http|ssh|git>. {no_root} Do not retry."
+        ),
+        "AMBIGUOUS" => "ask the user which of the named credentials to use, then pick it by name: write {{name}} instead of \
+                        {{secret}} in an http request, or name/user@host for ssh or scp (lookup accepts name/https://... too)."
+            .into(),
+        "UNKNOWN_CREDENTIAL" | "UNKNOWN_FIELD" | "USE_LOOKUP" => {
+            "call lookup with the URL or user@host you want to use, then use exactly the names and placeholders it returns.".into()
+        }
+        "BAD_REQUEST" | "BAD_URL" => "fix the arguments; follow the example in the tool description or lookup's how.".into(),
+        "USE_HTTPS" => "use an https:// URL.".into(),
+        "LOCKED" | "NOT_READY" => "tell the user PassManager is not available (the message says why). Do not retry.".into(),
+        "HOST_KEY_CHANGED" => {
+            "tell the user the server's key or certificate changed; they must verify and trust it. Do not retry or work around it.".into()
+        }
+        "AUTH_REJECTED" | "AUTH_FAILED" | "BAD_CREDENTIAL" => {
+            "the target rejected the stored credential. Do not retry and do not try other names; tell the user which target \
+             rejected it."
+                .into()
+        }
+        "UPSTREAM_ERROR" | "DISCONNECTED" => {
+            "the target or the network failed (see the message). Retry once at most, then tell the user.".into()
+        }
+        "RATE_LIMITED" => "wait a minute before the next call.".into(),
+        "TOO_LARGE" => "the file is over 64 MiB; split or compress it first.".into(),
+        "NO_TOKEN" => "this machine is not enrolled with PassManager; tell the user.".into(),
+        "FORBIDDEN" => "this is not allowed for agents. Do not retry.".into(),
+        _ => return None,
+    };
+    Some(s)
 }
 
 /// 写入 Agent 全局指令文件的块（含标记）。`passmanager show --rules` 打印的也是它。
@@ -325,7 +374,7 @@ mod tests {
             assert!(t.contains("35"), "说明握手失败的退出码");
             assert!(t.contains("--branch v0.3.0") && t.contains("0123456789abcdef0123456789abcdef01234567"));
             assert!(t.contains(&format!("enroll '{URL}'")));
-            assert!(t.contains("{{entry.field}}") || t.contains("{{条目.字段}}"));
+            assert!(t.contains("`lookup`") && t.contains("Next:"));
             assert!(!t.contains("install-agent.sh") && !t.contains("irm ") && !t.contains("iex"), "没有其他安装方式");
             assert!(t.contains("git-proxy") && t.contains("insteadOf"), "说明注册同时配置 git");
             let dev = setup_text(
@@ -363,10 +412,24 @@ mod tests {
                 }
                 assert!(!t.split(|c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_').any(|w| w.len() == 43));
                 assert_eq!(t.contains("pm.example.com:8121"), connected.is_some());
-                assert!(t.contains("{{entry.field}}") || t.contains("{{条目.字段}}"));
+                assert!(t.contains("`lookup`") && t.contains("Next:"));
             }
         }
         assert!(public_text(Lang::En, None).contains("not enrolled"));
+    }
+
+    #[test]
+    fn next_steps() {
+        let n = next_step("NO_CREDENTIAL", Some("pm.example.com")).unwrap();
+        assert!(n.contains("ssh root@pm.example.com passmanager import") && n.contains("Do not guess"), "{n}");
+        assert!(next_step("DOMAIN_MISMATCH", None).unwrap().contains("<PassManager server> passmanager update"));
+        assert!(next_step("OP_NOT_ALLOWED", None).unwrap().contains("--add-op"));
+        for c in
+            ["AMBIGUOUS", "UNKNOWN_CREDENTIAL", "USE_LOOKUP", "LOCKED", "NOT_READY", "HOST_KEY_CHANGED", "AUTH_REJECTED", "BAD_REQUEST"]
+        {
+            assert!(next_step(c, None).is_some(), "{c}");
+        }
+        assert!(next_step("INTERNAL", None).is_none());
     }
 
     #[test]
@@ -374,8 +437,14 @@ mod tests {
         let b = instruction_block(Lang::En);
         assert!(b.starts_with(BEGIN) && b.trim_end().ends_with(END));
         assert_eq!(b.matches(BEGIN).count(), 1);
-        assert!(b.contains(&format!("v{INSTRUCTIONS_VERSION}")) && b.contains("`list`") && b.contains("{{entry.base_url}}"));
-        assert!(b.contains("git-proxy --install") && instruction_block(Lang::Zh).contains("git-proxy --install"));
+        assert!(b.contains(&format!("v{INSTRUCTIONS_VERSION}")) && b.contains("`lookup`") && !b.contains("`list`"));
+        for blk in [b.clone(), instruction_block(Lang::Zh)] {
+            for must in ["git-proxy --install", "ssh-agent", "Next:", "passmanager import", "passmanager update", "`how`"] {
+                assert!(blk.contains(must), "{must}: {blk}");
+            }
+        }
+        // 规则块保持简短（详细用法在工具描述、lookup 结果与 Next: 里）。
+        assert!(rules(Lang::En).lines().count() <= 16, "{}", rules(Lang::En));
         assert_eq!(Lang::parse("ZH").unwrap(), Lang::Zh);
         assert!(Lang::parse("fr").is_err());
     }

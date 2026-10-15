@@ -401,12 +401,24 @@ fn end_to_end() {
     assert_eq!(code(agent.call(&Request::Reveal { name: "gh".into(), password: PW.into() })), "FORBIDDEN");
     // 不填名称：按第一个域名自动生成引用名。
     add(&mut admin, "", "auto-secret-value", &["*.auto.example.com"], false).unwrap();
-    let list = agent.call(&Request::List).unwrap();
-    assert!(list.as_array().unwrap().iter().any(|e| e["name"] == "auto.example.com"), "{list}");
+    // Agent 按目标查询：只看到这一个目标的条目名与写法，不看到其他条目、备注或秘密。
+    let found = agent.call(&Request::Lookup { target: "https://x.auto.example.com/api".into(), use_: None }).unwrap();
+    assert_eq!(found["credentials"], serde_json::json!(["auto.example.com"]), "{found}");
+    assert!(found["how"].as_str().unwrap().contains("{{secret}}"), "{found}");
+    for leak in ["note", "gh", "srv", "public", "auto-secret-value", "*.auto"] {
+        assert!(!found.to_string().contains(leak), "{leak}: {found}");
+    }
     admin.call(&Request::DeleteEntry { name: "auto.example.com".into() }).unwrap();
-    let list = agent.call(&Request::List).unwrap();
-    assert_eq!(list.as_array().unwrap().len(), 3);
-    assert!(!list.to_string().contains(GH_SECRET));
+    // 删除后由次具体的 *.example.com 接手；没有任何条目的主机得到 NO_CREDENTIAL。
+    let found = agent.call(&Request::Lookup { target: "x.auto.example.com".into(), use_: None }).unwrap();
+    assert_eq!(found["credentials"], serde_json::json!(["public"]), "{found}");
+    assert_eq!(code(agent.call(&Request::Lookup { target: "nothing.invalid".into(), use_: None })), "NO_CREDENTIAL");
+    // 旧的 list 不再返回任何条目。
+    let e = agent.call(&Request::List).err().unwrap();
+    assert_eq!(e.code, "USE_LOOKUP");
+    assert!(!e.message.contains("gh") && !e.message.contains("example.com"));
+    // git 主机发现只返回有 git 用途条目的域名（这里没有）。
+    assert_eq!(agent.call(&Request::GitHosts).unwrap(), serde_json::json!([]));
 
     // ---- HTTPS ----
     let tls = tls_server(0);
@@ -552,11 +564,11 @@ fn end_to_end() {
 
     // 锁定后 Agent 得到 LOCKED 及解锁命令；口令登录后重新解锁。
     agent.call(&Request::Lock).unwrap();
-    let e = agent.call(&Request::List).err().unwrap();
+    let e = agent.call(&Request::GitHosts).err().unwrap();
     assert_eq!(e.code, "LOCKED");
     assert!(e.message.contains("PassManager unlock"));
     let _ = svc.admin();
-    assert_eq!(code(agent.call(&Request::List)), "OK");
+    assert_eq!(code(agent.call(&Request::GitHosts)), "OK");
 
     // 库文件中没有明文，令牌文件中只有哈希。
     let vault = std::fs::read(home.join("data/vault.pmv")).unwrap();
@@ -577,7 +589,13 @@ fn end_to_end() {
         let stdin = mcp.stdin.as_mut().unwrap();
         writeln!(stdin, "{}", json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t","version":"1"}}})).unwrap();
         writeln!(stdin, "{}", json!({"jsonrpc":"2.0","method":"notifications/initialized"})).unwrap();
-        writeln!(stdin, "{}", json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"list","arguments":{}}})).unwrap();
+        writeln!(
+            stdin,
+            "{}",
+            json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"lookup","arguments":{"target":"https://127.0.0.1/x"}}})
+        )
+        .unwrap();
+        writeln!(stdin, "{}", json!({"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"list","arguments":{}}})).unwrap();
         writeln!(stdin, "{}", json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"http_request","arguments":{"method":"GET","url":"http://x.example.com/{{public}}"}}})).unwrap();
     }
     drop(mcp.stdin.take());
@@ -585,24 +603,40 @@ fn end_to_end() {
     mcp.stdout.take().unwrap().read_to_string(&mut out).unwrap();
     let _ = mcp.wait();
     let lines: Vec<Value> = out.lines().map(|l| serde_json::from_str(l).unwrap()).collect();
-    assert_eq!(lines.len(), 3);
+    assert_eq!(lines.len(), 4);
     assert_eq!(lines[1]["result"]["isError"], false);
-    assert!(lines[1]["result"]["content"][0]["text"].as_str().unwrap().contains("\"gh\""));
+    let found = lines[1]["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(found.contains("\"gh\"") && found.contains("{{secret}}") && !found.contains("srv") && !found.contains("note"), "{found}");
+    assert_eq!(lines[3]["result"]["isError"], true);
+    let t = lines[3]["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(t.starts_with("USE_HTTPS") && t.contains("\nNext: use an https:// URL"), "{t}");
+    // 旧的 list（第 2 行）：错误 + 下一步，不列出任何条目。
     assert_eq!(lines[2]["result"]["isError"], true);
-    assert!(lines[2]["result"]["content"][0]["text"].as_str().unwrap().starts_with("USE_HTTPS"));
+    let t = lines[2]["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(t.starts_with("USE_LOOKUP") && t.contains("Next: call lookup") && !t.contains("gh"), "{t}");
 
     // CLI：输出 JSON。
-    let out = Command::new(env!("CARGO_BIN_EXE_PassManager"))
-        .arg("list")
-        .env("PASSMANAGER_HOME", &home)
-        .env("PASSMANAGER_TOKEN", &tok.token)
-        .output()
-        .unwrap();
-    assert!(out.status.success());
+    let cli = |args: &[&str], token: &str| {
+        Command::new(env!("CARGO_BIN_EXE_PassManager"))
+            .args(args)
+            .env("PASSMANAGER_HOME", &home)
+            .env("PASSMANAGER_TOKEN", token)
+            .output()
+            .unwrap()
+    };
+    let out = cli(&["lookup", "deploy@localhost:2222"], &tok.token);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stdout));
     let v: Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(v.as_array().unwrap().len(), 3);
+    assert_eq!(v["credentials"], json!(["srv"]));
+    assert!(v["how"].as_str().unwrap().contains("\"target\":\"deploy@localhost:2222\""), "{v}");
+    // 旧的 list：退出码 1，JSON 里有 next。
+    let out = cli(&["list"], &tok.token);
+    assert!(!out.status.success());
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["error"], "USE_LOOKUP");
+    assert!(v["next"].as_str().unwrap().starts_with("call lookup"), "{v}");
     let out = Command::new(env!("CARGO_BIN_EXE_PassManager"))
-        .arg("list")
+        .args(["lookup", "localhost"])
         .env("PASSMANAGER_HOME", &home)
         .env("PASSMANAGER_TOKEN", "pm_bad")
         .output()

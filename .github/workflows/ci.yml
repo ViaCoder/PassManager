@@ -63,7 +63,7 @@ jobs:
           echo "$PM_CI_PASSWORD" | sudo ./target/release/PassManager install --client-user "$USER" --password-stdin --no-fix
           ps axo user=,comm= | grep -i passmanager
           sudo python3 -I tests/system_probe.py --password "$PM_CI_PASSWORD"
-          ! PASSMANAGER_TOKEN=pm_invalid ./target/release/PassManager list
+          ! PASSMANAGER_TOKEN=pm_invalid ./target/release/PassManager lookup https://api.github.com/user
           sudo ./target/release/PassManager uninstall --yes
       - name: Install, probe, uninstall (Windows)
         if: runner.os == 'Windows'

@@ -339,12 +339,55 @@ pub fn import(o: crate::import::ImportOpts) -> ExitCode {
     match c.call(&req) {
         Ok(v) => {
             println!("已导入 {name}（{bytes} 字节，{k} 个域名）");
+            if let Some(w) = crate::import::note_warning(&o.note) {
+                eprintln!("警告：{w}");
+            }
             if let Some(fp) = v.get("public_key").and_then(|x| x.as_str()) {
                 println!("公钥指纹：{fp}");
             }
             if k == 0 {
                 println!("提示：没有绑定域名，在网页里添加域名之前 Agent 无法使用这个条目。");
             }
+            ExitCode::SUCCESS
+        }
+        Err(e) => fail(import_err(&e)),
+    }
+}
+
+/// `passmanager update`（服务器上的 root）：只改绑定、用途与备注，不涉及密钥。
+pub fn update(o: crate::import::UpdateOpts) -> ExitCode {
+    let l = layout();
+    if let Err(e) = need_root(&l) {
+        return fail(e);
+    }
+    if o.add_domains.is_empty() && o.remove_domains.is_empty() && o.add_ops.is_empty() && o.remove_ops.is_empty() && o.note.is_none() {
+        return fail("没有要修改的内容（--domain、--remove-domain、--add-op、--remove-op、--note）");
+    }
+    let mut c = match root_client() {
+        Ok(c) => c,
+        Err(e) => return fail(e.message),
+    };
+    let cur = match c.call_as::<Vec<pm_proto::EntryView>>(&Request::Entries) {
+        Ok(list) => match list.into_iter().find(|e| e.name == o.name) {
+            Some(e) => e,
+            None => return fail(format!("条目 {} 不存在", o.name)),
+        },
+        Err(e) => return fail(import_err(&e)),
+    };
+    let (input, msgs) = match crate::import::apply_update(&o, &cur) {
+        Ok(x) => x,
+        Err(e) => return fail(e),
+    };
+    for m in msgs {
+        println!("提示：{m}");
+    }
+    if let Some(w) = o.note.as_deref().and_then(crate::import::note_warning) {
+        eprintln!("警告：{w}");
+    }
+    let k = input.domains.len();
+    match c.call(&Request::UpdateEntry { original: o.name.clone(), entry: input }) {
+        Ok(_) => {
+            println!("已更新 {}（{k} 个域名；密钥未改动）", o.name);
             ExitCode::SUCCESS
         }
         Err(e) => fail(import_err(&e)),

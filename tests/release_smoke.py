@@ -1,7 +1,7 @@
 """在构建机上直接对发布包做功能冒烟测试（不需要单独的运行环境）。
 
 步骤：以用户模式启动发布版服务（运行完整的启动自检）→ 用真实的 KDF 参数设置口令 →
-调用 tests/system_probe.py 跑一遍 Agent 流程（建令牌、加条目、CLI list、经 httpbin.org 的 HTTPS 代填与脱敏）。
+调用 tests/system_probe.py 跑一遍 Agent 流程（建令牌、加条目、CLI lookup、经 httpbin.org 的 HTTPS 代填与脱敏）。
 
 用法：
   python3 -I tests/release_smoke.py <PassManager 可执行文件> [--prefix "arch -x86_64"]

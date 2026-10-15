@@ -3,6 +3,7 @@
 pub mod agent;
 pub mod git;
 pub mod http;
+pub mod lookup;
 pub mod online;
 pub mod redact;
 mod server;
@@ -641,21 +642,32 @@ impl Shared {
                     runtime_issues,
                 })
             }
-            Request::List => {
+            // 0.3.8 及更早客户端的 list：不再返回任何条目信息。新客户端在本地处理 list，从不发送这个请求，
+            // 所以这条消息是写给旧客户端的 Agent 的：它们没有 lookup 工具，但 http / ssh / scp 照常可用。
+            Request::List => Err(err(
+                "USE_LOOKUP",
+                "this PassManager server no longer lists entries. Skip list: call http, ssh or scp directly and write {{secret}} \
+                 where the secret goes; PassManager picks the credential for the target host. Ask the user to upgrade this \
+                 PassManager client (0.3.9 adds lookup).",
+            )),
+            Request::Lookup { target, use_ } => {
                 let inner = self.inner.lock().await;
                 let v = inner.vault.as_ref().ok_or_else(|| self.locked_err())?;
-                ok(v.payload
+                ok(lookup::lookup(&v.payload, &target, use_.as_deref())?)
+            }
+            Request::GitHosts => {
+                let inner = self.inner.lock().await;
+                let v = inner.vault.as_ref().ok_or_else(|| self.locked_err())?;
+                let mut hosts: Vec<String> = v
+                    .payload
                     .entries
                     .iter()
-                    .map(|e| CredentialView {
-                        name: e.name.clone(),
-                        domains: e.domains.clone(),
-                        note: e.note.clone(),
-                        fields: e.fields.iter().map(|f| f.name.clone()).collect(),
-                        status: e.domains.is_empty().then(|| format!("{UNBOUND} (unbound: add domains in the web UI before use)")),
-                        ops: e.ops.clone(),
-                    })
-                    .collect::<Vec<_>>())
+                    .filter(|e| e.ops.iter().any(|o| o == pm_vault::OP_GIT))
+                    .flat_map(|e| e.domains.iter().cloned())
+                    .collect();
+                hosts.sort();
+                hosts.dedup();
+                ok(hosts)
             }
             Request::Http { method, url, headers, body } => self.do_http(&method, &url, &headers, body.as_deref()).await,
             Request::AgentKeys => {

@@ -153,10 +153,11 @@ fn sh_env(path: &str, home: &Path, ca: &Path, cmd: &str, extra: &[(&str, &str)])
 /// （说明，要设置的环境变量，要移除的环境变量）。
 type EnvVariant<'a> = (&'a str, Vec<(&'a str, &'a str)>, Vec<&'a str>);
 
-/// 以给定的环境运行注册后的客户端（模拟 Agent 启动 MCP / CLI 时与安装时不同的环境）。
-fn client_list(home: &Path, env: &[(&str, &str)], remove: &[&str]) -> Output {
+/// 以给定的环境运行注册后的客户端（模拟 Agent 启动 MCP / CLI 时与安装时不同的环境）：查询一个没有凭据的主机。
+/// 得到 NO_CREDENTIAL 说明已经连上服务器、令牌有效、库已解锁（见 [`reached_server`]）。
+fn client_probe(home: &Path, env: &[(&str, &str)], remove: &[&str]) -> Output {
     let mut c = Command::new(BIN);
-    c.arg("list").env("HOME", home).env_remove("PASSMANAGER_CONFIG_DIR").env_remove("PASSMANAGER_HOME");
+    c.args(["lookup", "nothing.invalid"]).env("HOME", home).env_remove("PASSMANAGER_CONFIG_DIR").env_remove("PASSMANAGER_HOME");
     for k in remove {
         c.env_remove(k);
     }
@@ -164,6 +165,10 @@ fn client_list(home: &Path, env: &[(&str, &str)], remove: &[&str]) -> Output {
         c.env(k, v);
     }
     c.output().unwrap()
+}
+
+fn reached_server(o: &Output) -> bool {
+    String::from_utf8_lossy(&o.stdout).contains("\"NO_CREDENTIAL\"")
 }
 
 /// 从接入说明里取出一行命令与注册码。
@@ -263,7 +268,7 @@ fn run_agent_setup(single: bool) {
     assert_eq!(code.len(), 43);
     assert_eq!(text.matches(&code).count(), 1, "开发构建只在一行命令里出现注册码");
     assert!(text.contains("development build") && !text.contains("git clone"), "{text}");
-    assert!(text.contains("MCP tools") && text.contains("{{entry.field}}") && text.contains("git-proxy"));
+    assert!(text.contains("MCP tools") && text.contains("`lookup`") && text.contains("Next:") && text.contains("git-proxy"));
     assert!(!text.contains("install-agent.sh") && !text.contains("pm_"), "没有其他安装方式，也没有令牌");
     assert!(stdout(&env.run(&["build-info"])).contains("development build"), "测试构建不是发布标签构建");
     let zh = env.run(&["show", "--label", "laptop-zh"]);
@@ -330,8 +335,8 @@ fn run_agent_setup(single: bool) {
         ("最小 PATH", vec![("PATH", "/usr/bin:/bin")], vec![]),
     ];
     for (what, set, remove) in &variants {
-        let o = client_list(&h2, set, remove);
-        assert!(o.status.success(), "{what}: {}{}", stdout(&o), stderr(&o));
+        let o = client_probe(&h2, set, remove);
+        assert!(reached_server(&o), "{what}: {}{}", stdout(&o), stderr(&o));
     }
     // 经服务器代为发出 HTTP 请求（本地回显服务），密钥只在服务器上代入，结果脱敏。
     let echo = echo_server();
@@ -402,8 +407,8 @@ fn run_agent_setup(single: bool) {
     assert!(o.status.success(), "{}{}", stdout(&o), stderr(&o));
     assert!(h6.join(".config/passmanager/remote.toml").exists() && !install_xdg.join("passmanager").exists(), "写入位置与 XDG 无关");
     for (what, set, remove) in &variants {
-        let o = client_list(&h6, set, remove);
-        assert!(o.status.success(), "安装时有 XDG，使用时{what}: {}{}", stdout(&o), stderr(&o));
+        let o = client_probe(&h6, set, remove);
+        assert!(reached_server(&o), "安装时有 XDG，使用时{what}: {}{}", stdout(&o), stderr(&o));
     }
     // 0.3.0 及更早版本按 XDG_CONFIG_HOME 写入的配置仍能读取；unenroll 清理所有位置。
     let legacy = env.base.join("xdg-legacy");
@@ -412,8 +417,8 @@ fn run_agent_setup(single: bool) {
         std::fs::rename(h6.join(".config/passmanager").join(f), legacy.join("passmanager").join(f)).unwrap();
     }
     let lx = legacy.to_str().unwrap();
-    let o = client_list(&h6, &[("XDG_CONFIG_HOME", lx)], &[]);
-    assert!(o.status.success(), "旧位置：{}{}", stdout(&o), stderr(&o));
+    let o = client_probe(&h6, &[("XDG_CONFIG_HOME", lx)], &[]);
+    assert!(reached_server(&o), "旧位置：{}{}", stdout(&o), stderr(&o));
     let o = Command::new(BIN)
         .arg("unenroll")
         .env("HOME", &h6)

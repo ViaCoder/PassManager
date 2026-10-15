@@ -1,0 +1,398 @@
+//! Agent 的 `lookup`：按目标（URL、`user@host`、主机或条目名）返回**这一个目标**可用的凭据与现成的写法。
+//!
+//! - 选择规则与真正执行请求时完全相同（`http::select` / `http::ssh_credentials`），查到的就是会用到的；
+//! - 只返回条目名、字段名与写法：不返回其他条目、该条目绑定的其他域名、备注或用途清单；
+//! - 错误沿用执行请求时的错误码（`NO_CREDENTIAL`、`AMBIGUOUS`、`OP_NOT_ALLOWED`……），信息同样不列出域名。
+
+use pm_proto::LookupView;
+use pm_vault::{Entry, OP_GIT, OP_HTTP, Payload, domain};
+use url::Url;
+
+use crate::http::{host_string, ssh_credentials};
+use crate::ssh::parse_target;
+use crate::{ApiErr, err};
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Use {
+    Http,
+    Ssh,
+    Scp,
+    Git,
+}
+
+impl Use {
+    fn parse(s: &str) -> Result<Self, ApiErr> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "http" | "https" => Ok(Use::Http),
+            "ssh" => Ok(Use::Ssh),
+            "scp" | "sftp" => Ok(Use::Scp),
+            "git" => Ok(Use::Git),
+            other => Err(err("BAD_REQUEST", format!("unknown use \"{other}\"; use one of http, ssh, scp, git"))),
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Use::Http => "http",
+            Use::Ssh => "ssh",
+            Use::Scp => "scp",
+            Use::Git => "git",
+        }
+    }
+
+    fn default_port(self) -> u16 {
+        match self {
+            Use::Ssh | Use::Scp => 22,
+            Use::Http | Use::Git => 443,
+        }
+    }
+}
+
+/// 字段名中被当作"基础地址"的那个（值是秘密的 https URL，写在 URL 开头）。
+const BASE_URL: &str = "base_url";
+
+fn field_names(e: &Entry) -> Vec<String> {
+    e.fields.iter().map(|f| f.name.clone()).collect()
+}
+
+/// 主机与端口的显示形式：默认端口时省略端口；IPv6 加方括号。
+fn host_port(host: &str, port: u16, default: u16) -> String {
+    let h = if host.contains(':') { format!("[{host}]") } else { host.to_string() };
+    if port == default { h } else { format!("{h}:{port}") }
+}
+
+/// 多字段条目里适合放进 `Authorization: Bearer` 的字段（按常见的令牌字段名挑选；没有时不举请求头的例子，
+/// 免得把用户名之类的字段写成令牌）。
+fn token_field(e: &Entry) -> Option<&str> {
+    const TOKEN_NAMES: [&str; 7] = ["api_key", "apikey", "token", "access_token", "key", "secret", "bearer"];
+    TOKEN_NAMES.iter().find_map(|t| e.fields.iter().map(|f| f.name.as_str()).find(|n| n.eq_ignore_ascii_case(t)))
+}
+
+/// `named`：Agent 指定了条目名（同一主机有多个凭据时）——这时必须写 `{{名称}}`，`{{secret}}` 会再次报 AMBIGUOUS。
+fn http_how(e: &Entry, url_prefix: &str, named: bool) -> String {
+    if e.fields.is_empty() {
+        let ph = if named { format!("{{{{{}}}}}", e.name) } else { "{{secret}}".to_string() };
+        return format!(
+            "http {{\"method\":\"GET\",\"url\":\"{url_prefix}/<path>\",\"headers\":{{\"Authorization\":\"Bearer {ph}\"}}}} \
+             - put {ph} where this API expects its key (header, query or body)"
+        );
+    }
+    let name = &e.name;
+    let header = token_field(e).map(|f| format!(",\"headers\":{{\"Authorization\":\"Bearer {{{{{name}.{f}}}}}\"}}")).unwrap_or_default();
+    format!(
+        "http {{\"method\":\"GET\",\"url\":\"{url_prefix}/<path>\"{header}}} - write {{{{{name}.<field>}}}} where the API expects a field"
+    )
+}
+
+fn ssh_how(target: &str, has_password: bool) -> String {
+    let sudo = if has_password { "; a command starting with \"sudo \" gets the password automatically" } else { "" };
+    format!(
+        "ssh {{\"target\":\"{target}\",\"command\":\"<command>\"}}; scp {{\"source\":\"<local file>\",\"destination\":\"{target}:/<path>\"}}{sudo}"
+    )
+}
+
+fn git_how(hp: &str) -> String {
+    format!(
+        "run plain git with https://{hp}/<owner>/<repo>.git - PassManager's git-proxy adds the token. \
+         If git asks for credentials, run: passmanager git-proxy --install"
+    )
+}
+
+/// `{{名称}}` 或 `{{名称.字段}}` 形式的目标：只在没有主机可查时使用（例如基础地址本身是秘密）。
+fn by_name(payload: &Payload, token: &str, use_: Use) -> Result<LookupView, ApiErr> {
+    let token = token.trim();
+    let (entry, field) = match payload.entry(token) {
+        Some(e) => (e, None),
+        None => {
+            let mut by_prefix: Vec<&Entry> =
+                payload.entries.iter().filter(|e| token.len() > e.name.len() + 1 && token.starts_with(&format!("{}.", e.name))).collect();
+            by_prefix.sort_by_key(|e| std::cmp::Reverse(e.name.len()));
+            let e = by_prefix.first().ok_or_else(|| err("UNKNOWN_CREDENTIAL", format!("no credential \"{token}\"")))?;
+            let f = &token[e.name.len() + 1..];
+            if e.field(f).is_none() {
+                return Err(err("UNKNOWN_FIELD", format!("\"{}\" has no field \"{f}\"", e.name)));
+            }
+            (*e, Some(f.to_string()))
+        }
+    };
+    let op = match use_ {
+        Use::Http => OP_HTTP,
+        Use::Git => OP_GIT,
+        Use::Ssh | Use::Scp => pm_vault::OP_SSH,
+    };
+    if !entry.allows(op) {
+        return Err(err("OP_NOT_ALLOWED", format!("\"{}\" may not be used for {op} requests", entry.name)));
+    }
+    if entry.domains.is_empty() {
+        return Err(err("DOMAIN_MISMATCH", format!("\"{}\" is not bound to any domain yet", entry.name)));
+    }
+    let has_base = entry.field(BASE_URL).is_some() && matches!(field.as_deref(), None | Some(BASE_URL));
+    let (target, how) = if use_ == Use::Http && has_base {
+        let label = format!("{{{{{}.{BASE_URL}}}}}", entry.name);
+        (label.clone(), format!("{} - the base URL stays secret; do not try to find it", http_how(entry, &label, true)))
+    } else {
+        (format!("{{{{{}}}}}", entry.name), {
+            let n = &entry.name;
+            let ph = if entry.fields.is_empty() { format!("{{{{{n}}}}}") } else { format!("{{{{{n}.<field>}}}}") };
+            format!(
+                "write {ph} instead of {{{{secret}}}} in an http request to a host \"{n}\" is bound to, or {n}/user@host \
+                     for ssh or scp. If you do not know the host, ask the user."
+            )
+        })
+    };
+    Ok(LookupView { target, use_: use_.as_str().into(), credentials: vec![entry.name.clone()], fields: field_names(entry), how })
+}
+
+fn by_host(payload: &Payload, host: &str, port: u16, use_: Use, name: Option<&str>, user: Option<&str>) -> Result<LookupView, ApiErr> {
+    let hp = host_port(host, port, use_.default_port());
+    match use_ {
+        Use::Http | Use::Git => {
+            let op = if use_ == Use::Http { OP_HTTP } else { OP_GIT };
+            let e = crate::http::select(payload, name, host, port, op)?;
+            let how = if use_ == Use::Http { http_how(&e, &format!("https://{hp}"), name.is_some()) } else { git_how(&hp) };
+            Ok(LookupView {
+                target: host_port(host, port, 0),
+                use_: use_.as_str().into(),
+                credentials: vec![e.name.clone()],
+                fields: field_names(&e),
+                how,
+            })
+        }
+        Use::Ssh | Use::Scp => {
+            let (key, pw) = ssh_credentials(payload, name, host, port)?;
+            let credentials: Vec<String> = key.iter().chain(pw.iter()).map(|e| e.name.clone()).collect();
+            let prefix = name.map(|n| format!("{n}/")).unwrap_or_default();
+            let target = format!("{prefix}{}@{hp}", user.unwrap_or("root"));
+            Ok(LookupView {
+                target: host_port(host, port, 0),
+                use_: use_.as_str().into(),
+                credentials,
+                fields: vec![],
+                how: ssh_how(&target, pw.is_some()),
+            })
+        }
+    }
+}
+
+/// `lookup` 的实现（见模块说明）。
+pub fn lookup(payload: &Payload, target: &str, use_: Option<&str>) -> Result<LookupView, ApiErr> {
+    let t = target.trim();
+    if t.is_empty() {
+        return Err(err("BAD_REQUEST", "missing target: give the URL, user@host or host you want to use"));
+    }
+    let given = use_.filter(|u| !u.trim().is_empty()).map(Use::parse).transpose()?;
+
+    // {{名称}} / {{名称.字段}}
+    if let Some(inner) = t.strip_prefix("{{").and_then(|r| r.strip_suffix("}}")) {
+        return by_name(payload, inner, given.unwrap_or(Use::Http));
+    }
+
+    // [名称/]URL（名称用于同一主机有多个凭据时指定其中一个）
+    if let Some(i) = t.find("://") {
+        let (name, url) = match t[..i].split_once('/') {
+            Some((n, _)) if !n.is_empty() => (Some(n), &t[n.len() + 1..]),
+            _ => (None, t),
+        };
+        let u = Url::parse(url).map_err(|_| err("BAD_REQUEST", format!("\"{url}\" is not a valid URL")))?;
+        let use_ = given.unwrap_or(Use::Http);
+        if matches!(use_, Use::Ssh | Use::Scp) {
+            return Err(err("BAD_REQUEST", "for ssh or scp give user@host, not a URL"));
+        }
+        if u.scheme() != "https" {
+            return Err(err("USE_HTTPS", "only https:// URLs are supported"));
+        }
+        let host = host_string(&u).ok_or_else(|| err("BAD_REQUEST", format!("\"{url}\" has no host")))?;
+        let port = u.port_or_known_default().unwrap_or(443);
+        return by_host(payload, &host, port, use_, name, None);
+    }
+
+    // [名称/]user@host[:port]
+    if t.contains('@') || t.contains('/') {
+        let use_ = given.unwrap_or(Use::Ssh);
+        let d = parse_target(t)?;
+        if matches!(use_, Use::Http | Use::Git) {
+            // parse_target 省略端口时按 SSH 的 22 处理；http / git 没写端口时是 443。
+            let hostport = t.rsplit('@').next().unwrap_or(t);
+            let explicit = if hostport.starts_with('[') { hostport.contains("]:") } else { hostport.contains(':') };
+            let port = if explicit { d.port } else { use_.default_port() };
+            return by_host(payload, &d.host, port, use_, d.name.as_deref(), None);
+        }
+        return by_host(payload, &d.host, d.port, use_, d.name.as_deref(), Some(&d.user));
+    }
+
+    // 主机[:端口]（IPv6 写成 [::1] 或 [::1]:端口，也接受不带方括号的 IPv6）；
+    // 没有任何条目匹配这个主机、但有同名条目时按条目名查询。
+    let use_ = given.unwrap_or(Use::Http);
+    let bad_port = || err("BAD_REQUEST", format!("invalid port in \"{t}\""));
+    let (host, port) = if let Some(v6) = t.strip_prefix('[') {
+        let (h, after) = v6.split_once(']').ok_or_else(|| err("BAD_REQUEST", format!("invalid host \"{t}\"")))?;
+        match after.strip_prefix(':') {
+            Some(p) => (h, p.parse::<u16>().map_err(|_| bad_port())?),
+            None if after.is_empty() => (h, use_.default_port()),
+            None => return Err(err("BAD_REQUEST", format!("invalid host \"{t}\""))),
+        }
+    } else {
+        match t.rsplit_once(':') {
+            Some((h, p)) if !h.contains(':') => (h, p.parse::<u16>().map_err(|_| bad_port())?),
+            _ => (t, use_.default_port()),
+        }
+    };
+    let host = domain::normalize_host(host);
+    let r = by_host(payload, &host, port, use_, None, None);
+    match r {
+        Err(e) if e.code == "NO_CREDENTIAL" && payload.entry(t).is_some() => by_name(payload, t, use_),
+        other => other,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pm_vault::Field;
+    use zeroize::Zeroizing;
+
+    fn entry(name: &str, secret: &str, domains: &[&str], ops: &[&str]) -> Entry {
+        Entry {
+            name: name.into(),
+            secret: Zeroizing::new(secret.into()),
+            domains: domains.iter().map(|d| d.to_string()).collect(),
+            note: "NOTE-SHOULD-NOT-LEAK /root/secret-path".into(),
+            self_signed: false,
+            auto_accept_host_key: false,
+            created: 0,
+            updated: 0,
+            fields: vec![],
+            host_keys: vec![],
+            ops: ops.iter().map(|o| o.to_string()).collect(),
+        }
+    }
+
+    fn fld(n: &str, v: &str) -> Field {
+        Field { name: n.into(), value: Zeroizing::new(v.into()) }
+    }
+
+    fn payload() -> Payload {
+        let mut p = Payload::default();
+        p.entries.push(entry("github", "ghp_SECRET1", &["github.com", "api.github.com", "other-private.example.net"], &["http", "git"]));
+        p.entries.push(entry("cf", "CF_SECRET", &["api.cloudflare.com"], &["http"]));
+        p.entries.push(entry("init", "INITPASS", &["198.51.100.0/24"], &["ssh"]));
+        let mut ai = entry("ai", "", &["gateway.example.com"], &["http"]);
+        ai.fields = vec![fld("base_url", "https://gateway.example.com/v1/acct-7f3e"), fld("api_key", "sk-SECRET")];
+        p.entries.push(ai);
+        p.entries.push(entry("dup1", "D1", &["dup.example.com"], &[]));
+        p.entries.push(entry("dup2", "D2", &["dup.example.com"], &[]));
+        p
+    }
+
+    fn json(v: &LookupView) -> String {
+        serde_json::to_string(v).unwrap()
+    }
+
+    /// 只返回这一个目标的信息：没有其他条目、其他域名、备注、用途清单或秘密。
+    #[test]
+    fn need_to_know_only() {
+        let p = payload();
+        let v = lookup(&p, "https://api.github.com/user", None).unwrap();
+        assert_eq!(v.credentials, vec!["github"]);
+        assert_eq!(v.use_, "http");
+        assert!(v.how.contains("{{secret}}") && v.how.contains("https://api.github.com/<path>"), "{}", v.how);
+        let s = json(&v);
+        for leak in ["other-private", "github.com\"", "NOTE", "secret-path", "ghp_", "cf", "init", "\"git\"", "ops"] {
+            assert!(!s.contains(leak), "leaked {leak}: {s}");
+        }
+    }
+
+    #[test]
+    fn ssh_targets_and_use_inference() {
+        let p = payload();
+        let v = lookup(&p, "root@198.51.100.254", None).unwrap();
+        assert_eq!((v.use_.as_str(), v.credentials.clone()), ("ssh", vec!["init".to_string()]));
+        assert!(v.how.contains("\"target\":\"root@198.51.100.254\"") && v.how.contains("sudo"), "{}", v.how);
+        assert!(!json(&v).contains("198.51.100.0/24"));
+        let v = lookup(&p, "deploy@198.51.100.9:2222", Some("scp")).unwrap();
+        assert_eq!(v.use_, "scp");
+        assert!(v.how.contains("deploy@198.51.100.9:2222:/<path>"), "{}", v.how);
+        // 只能用于 ssh 的条目不能用于 http。
+        assert_eq!(lookup(&p, "https://198.51.100.5/", None).unwrap_err().code, "OP_NOT_ALLOWED");
+    }
+
+    /// user@host 用于 http / git 时，没写端口按 443（而不是 SSH 的 22）；IPv6 主机的各种写法。
+    #[test]
+    fn ports_and_ipv6() {
+        let mut p = payload();
+        p.entries.push(entry("tls-only", "T", &["svc.example.com:443"], &["http"]));
+        p.entries.push(entry("v6", "V", &["2001:db8::7"], &[]));
+        assert_eq!(lookup(&p, "tls-only/u@svc.example.com", Some("http")).unwrap().target, "svc.example.com:443");
+        assert_eq!(lookup(&p, "u@svc.example.com:8443", Some("http")).unwrap_err().code, "NO_CREDENTIAL");
+        for t in ["2001:db8::7", "[2001:db8::7]", "[2001:db8::7]:443", "https://[2001:db8::7]/x"] {
+            let v = lookup(&p, t, None).unwrap_or_else(|e| panic!("{t}: {} {}", e.code, e.message));
+            assert_eq!((v.credentials[0].as_str(), v.target.as_str()), ("v6", "[2001:db8::7]:443"), "{t}");
+            assert!(v.how.contains("https://[2001:db8::7]/<path>"), "{}", v.how);
+        }
+        assert_eq!(lookup(&p, "[2001:db8::7", None).unwrap_err().code, "BAD_REQUEST");
+        assert_eq!(lookup(&p, "svc.example.com:99999", None).unwrap_err().code, "BAD_REQUEST");
+    }
+
+    /// 多字段条目：只有令牌类字段才举 Bearer 的例子；用户名口令类不举，免得写错。
+    #[test]
+    fn header_example_only_for_token_fields() {
+        let mut p = payload();
+        let mut c = entry("creds", "", &["login.example.com"], &[]);
+        c.fields = vec![fld("username", "u"), fld("password", "pw")];
+        p.entries.push(c);
+        let v = lookup(&p, "https://login.example.com/", None).unwrap();
+        assert!(!v.how.contains("Bearer") && v.how.contains("{{creds.<field>}}"), "{}", v.how);
+        assert_eq!(v.fields, vec!["username", "password"]);
+        // 按名称查询普通条目：直接给出 {{名称}} 的写法，不再让 Agent 回头查询（避免循环）。
+        let v = lookup(&p, "{{creds}}", None).unwrap();
+        assert!(
+            v.how.contains("{{creds.<field>}}") && v.how.contains("instead of {{secret}}") && !v.how.contains("call lookup"),
+            "{}",
+            v.how
+        );
+    }
+
+    #[test]
+    fn git_and_errors() {
+        let p = payload();
+        let v = lookup(&p, "github.com", Some("git")).unwrap();
+        assert!(v.how.contains("git-proxy --install") && v.how.contains("https://github.com/<owner>"), "{}", v.how);
+        assert_eq!(lookup(&p, "api.cloudflare.com", Some("git")).unwrap_err().code, "OP_NOT_ALLOWED");
+        assert_eq!(lookup(&p, "nothing.example.org", None).unwrap_err().code, "NO_CREDENTIAL");
+        let e = lookup(&p, "https://dup.example.com/x", None).unwrap_err();
+        assert_eq!(e.code, "AMBIGUOUS");
+        assert!(e.message.contains("dup1") && e.message.contains("dup2") && !e.message.contains("NOTE"), "{}", e.message);
+        // 指定名称即可消除歧义（user@host 或 URL 前加 名称/）。
+        assert_eq!(lookup(&p, "dup2/u@dup.example.com", Some("http")).unwrap().credentials, vec!["dup2"]);
+        let v = lookup(&p, "dup1/https://dup.example.com/x", None).unwrap();
+        assert_eq!((v.credentials.clone(), v.target.as_str()), (vec!["dup1".to_string()], "dup.example.com:443"));
+        // 指定了名称时写法用 {{dup1}}：{{secret}} 在这台主机上会再次报 AMBIGUOUS。
+        assert!(v.how.contains("Bearer {{dup1}}") && !v.how.contains("{{secret}}"), "{}", v.how);
+        assert_eq!(lookup(&p, "nope/https://dup.example.com/x", None).unwrap_err().code, "UNKNOWN_CREDENTIAL");
+        // 名称与主机不符：不列出该条目绑定的域名。
+        let e = lookup(&p, "cf/u@api.github.com", Some("http")).unwrap_err();
+        assert_eq!(e.code, "DOMAIN_MISMATCH");
+        assert!(!e.message.contains("cloudflare"), "{}", e.message);
+        assert_eq!(lookup(&p, "x", Some("ftp")).unwrap_err().code, "BAD_REQUEST");
+        assert_eq!(lookup(&p, "  ", None).unwrap_err().code, "BAD_REQUEST");
+        assert_eq!(lookup(&p, "http://github.com/", None).unwrap_err().code, "USE_HTTPS");
+    }
+
+    /// 基础地址本身是秘密：按条目名查询，给出 {{ai.base_url}} 写法，不泄露地址或主机。
+    #[test]
+    fn base_url_by_name() {
+        let p = payload();
+        for t in ["{{ai.base_url}}", "{{ai}}", "ai"] {
+            let v = lookup(&p, t, None).unwrap();
+            assert_eq!(v.target, "{{ai.base_url}}", "{t}");
+            assert!(v.how.contains("\"url\":\"{{ai.base_url}}/<path>\"") && v.how.contains("Bearer {{ai.api_key}}"), "{}", v.how);
+            assert_eq!(v.fields, vec!["base_url", "api_key"]);
+            let s = json(&v);
+            assert!(!s.contains("acct-7f3e") && !s.contains("gateway.example.com") && !s.contains("sk-"), "{s}");
+        }
+        // 普通条目按名称查询：不给域名，只告诉 Agent 用目标再查。
+        let v = lookup(&p, "{{cf}}", None).unwrap();
+        assert!(v.how.contains("{{cf}}") && !json(&v).contains("cloudflare.com"), "{}", v.how);
+        assert_eq!(lookup(&p, "{{nope}}", None).unwrap_err().code, "UNKNOWN_CREDENTIAL");
+    }
+}

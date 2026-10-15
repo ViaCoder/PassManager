@@ -262,6 +262,14 @@ pub fn connected_server() -> Option<String> {
     }
 }
 
+/// 本机注册的服务器主机名（用于错误后面的 Next: 提示里的 `ssh root@<服务器>`）。
+pub fn server_host() -> Option<String> {
+    match load_in(&dir()) {
+        Some(Ok(c)) => Some(c.server),
+        _ => None,
+    }
+}
+
 /// 非服务器上的 `passmanager status`：显示远程配置并测试连接。
 pub fn status() -> ExitCode {
     let d = dir();

@@ -29,6 +29,94 @@ pub struct ImportOpts {
     pub host_keys: Vec<String>,
 }
 
+/// `passmanager update`：只改绑定、用途与备注，不涉及密钥（Agent 不需要再经手秘密）。
+#[derive(Clone, Debug, Default)]
+pub struct UpdateOpts {
+    pub name: String,
+    pub add_domains: Vec<String>,
+    pub remove_domains: Vec<String>,
+    pub add_ops: Vec<String>,
+    pub remove_ops: Vec<String>,
+    pub note: Option<String>,
+}
+
+/// 备注只写一句用途；看起来含路径、URL、邮箱/账号或令牌时返回提示（只警告，不拒绝）。
+pub fn note_warning(note: &str) -> Option<&'static str> {
+    let token_like = note
+        .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '-'))
+        .any(|w| w.len() >= 24 && w.chars().any(|c| c.is_ascii_digit()) && w.chars().any(|c| c.is_ascii_alphabetic()));
+    let has = |p: &str| note.contains(p);
+    if has("://") || has("/") || has("\\") || has("@") || token_like {
+        Some("备注看起来含有路径、URL、账号或令牌。备注只写一句用途，不要写敏感信息（可用 passmanager update --note 修改）。")
+    } else {
+        None
+    }
+}
+
+fn norm_op(o: &str) -> Result<String, String> {
+    let o = o.trim().to_ascii_lowercase();
+    if pm_vault::OPS.contains(&o.as_str()) {
+        Ok(o)
+    } else {
+        Err(format!("未知的用途 {o}（可用：{}）", pm_vault::OPS.join("、")))
+    }
+}
+
+/// 在现有条目上应用修改，得到 UpdateEntry 的输入（密钥、字段、私钥绑定保持不变）。
+/// 用途为空表示不限：对不限的条目 `--add-op` 不改变任何东西；`--remove-op` 变成"除此之外的全部用途"。
+pub fn apply_update(o: &UpdateOpts, cur: &pm_proto::EntryView) -> Result<(EntryInput, Vec<String>), String> {
+    let mut msgs = Vec::new();
+    let mut domains = cur.domains.clone();
+    for d in &o.add_domains {
+        let d = d.trim().to_string();
+        if !d.is_empty() && !domains.iter().any(|x| x.eq_ignore_ascii_case(&d)) {
+            domains.push(d);
+        }
+    }
+    for d in &o.remove_domains {
+        let before = domains.len();
+        domains.retain(|x| !x.eq_ignore_ascii_case(d.trim()));
+        if domains.len() == before {
+            msgs.push(format!("没有绑定 {}，忽略", d.trim()));
+        }
+    }
+    let mut ops = cur.ops.clone();
+    let add: Vec<String> = o.add_ops.iter().map(|x| norm_op(x)).collect::<Result<_, _>>()?;
+    let remove: Vec<String> = o.remove_ops.iter().map(|x| norm_op(x)).collect::<Result<_, _>>()?;
+    if !add.is_empty() && ops.is_empty() {
+        msgs.push("该条目的用途不限，--add-op 无需修改".into());
+    } else {
+        for a in add {
+            if !ops.contains(&a) {
+                ops.push(a);
+            }
+        }
+    }
+    if !remove.is_empty() {
+        if ops.is_empty() {
+            ops = pm_vault::OPS.iter().map(|x| x.to_string()).collect();
+        }
+        ops.retain(|x| !remove.contains(x));
+        if ops.is_empty() {
+            return Err("不能移除全部用途（不再使用的条目请在网页里删除）".into());
+        }
+    }
+    ops.sort();
+    let input = EntryInput {
+        name: String::new(),
+        secret: None,
+        domains,
+        note: o.note.clone().unwrap_or_else(|| cur.note.clone()),
+        self_signed: cur.self_signed,
+        auto_accept_host_key: cur.auto_accept_host_key,
+        fields: None,
+        kind: None,
+        host_keys: None,
+        ops: Some(ops),
+    };
+    Ok((input, msgs))
+}
+
 /// 读取标准输入（最多 MAX_IMPORT + 1 字节，用来判断是否超限）。
 pub fn read_limited(mut r: impl Read) -> Result<Zeroizing<Vec<u8>>, String> {
     let mut buf = Zeroizing::new(Vec::with_capacity(4096));
@@ -200,5 +288,59 @@ mod tests {
         assert!(e.secret.is_none());
         // 没有末尾换行也可以。
         assert!(build_entry(&f, b"u\np").is_ok());
+    }
+
+    fn view(domains: &[&str], ops: &[&str]) -> pm_proto::EntryView {
+        pm_proto::EntryView {
+            name: "x".into(),
+            domains: domains.iter().map(|d| d.to_string()).collect(),
+            note: "old".into(),
+            self_signed: true,
+            auto_accept_host_key: false,
+            private_key: false,
+            created: 0,
+            updated: 0,
+            kind: "password".into(),
+            fields: vec![],
+            public_key: None,
+            host_keys: vec![],
+            ops: ops.iter().map(|o| o.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn update_keeps_secret_and_merges() {
+        let o = UpdateOpts {
+            name: "x".into(),
+            add_domains: vec!["b.example.com".into(), "A.example.com".into()],
+            remove_domains: vec!["c.example.com".into()],
+            add_ops: vec!["GIT".into()],
+            ..Default::default()
+        };
+        let (i, msgs) = apply_update(&o, &view(&["a.example.com"], &["http"])).unwrap();
+        assert!(i.secret.is_none() && i.fields.is_none() && i.host_keys.is_none() && i.name.is_empty());
+        assert_eq!(i.domains, vec!["a.example.com", "b.example.com"]);
+        assert_eq!(i.ops, Some(vec!["git".to_string(), "http".to_string()]));
+        assert_eq!(i.note, "old");
+        assert!(i.self_signed);
+        assert_eq!(msgs.len(), 1);
+        // 不限用途的条目：--add-op 不收紧；--remove-op 变成其余用途。
+        let o = UpdateOpts { add_ops: vec!["http".into()], ..Default::default() };
+        assert_eq!(apply_update(&o, &view(&["a"], &[])).unwrap().0.ops, Some(vec![]));
+        let o = UpdateOpts { remove_ops: vec!["ssh".into()], note: Some("new".into()), ..Default::default() };
+        let (i, _) = apply_update(&o, &view(&["a"], &[])).unwrap();
+        assert_eq!((i.ops, i.note.as_str()), (Some(vec!["git".to_string(), "http".to_string()]), "new"));
+        assert!(apply_update(&UpdateOpts { remove_ops: vec!["http".into()], ..Default::default() }, &view(&["a"], &["http"])).is_err());
+        assert!(apply_update(&UpdateOpts { add_ops: vec!["ftp".into()], ..Default::default() }, &view(&["a"], &["http"])).is_err());
+    }
+
+    #[test]
+    fn note_warnings() {
+        for ok in ["示例服务 API 密钥（新）", "GitHub PAT（个人账号）", "服务器管理密钥（ECDSA P-384）", ""] {
+            assert!(note_warning(ok).is_none(), "{ok}");
+        }
+        for bad in ["token file /root/.config/app/token", "https://app.example.com", "user@example.com", "key abcabcabcabcabcabcabcabc12"] {
+            assert!(note_warning(bad).is_some(), "{bad}");
+        }
     }
 }

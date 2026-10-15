@@ -87,7 +87,7 @@ pub fn best_entry<'a>(
         many => Err(err(
             "AMBIGUOUS",
             format!(
-                "several credentials match {host} equally well: {}. Pick one by name (see list for notes).",
+                "several credentials match {host} equally well: {}",
                 many.iter().map(|e| e.name.as_str()).collect::<Vec<_>>().join(", ")
             ),
         )),
@@ -99,7 +99,8 @@ fn none_err(payload: &Payload, host: &str, port: u16, op: &str) -> ApiErr {
     if payload.entries.iter().any(|e| !e.allows(op) && domain::matches_any_port(&e.domains, host, port)) {
         return err("OP_NOT_ALLOWED", format!("the stored credential for {host} may not be used for {op} requests"));
     }
-    err("NO_CREDENTIAL", format!("no stored credential for {host}. Ask the user to add one in PassManager."))
+    // 只陈述事实；下一步（导入或告诉用户）由客户端附加的 Next: 说明。
+    err("NO_CREDENTIAL", format!("no stored credential for {host}"))
 }
 
 /// 按主机选出最具体的凭据。
@@ -109,16 +110,14 @@ pub fn select_by_host<'a>(payload: &'a Payload, host: &str, port: u16, op: &str)
 
 fn check_domain(e: &Entry, host: &str, port: u16, op: &str) -> Result<(), ApiErr> {
     if e.domains.is_empty() {
-        return Err(err(
-            "DOMAIN_MISMATCH",
-            format!("\"{}\" is not bound to any domain yet. Ask the user to add its domains in the PassManager web UI.", e.name),
-        ));
+        return Err(err("DOMAIN_MISMATCH", format!("\"{}\" is not bound to any domain yet", e.name)));
     }
     if !domain::matches_any_port(&e.domains, host, port) {
-        return Err(err("DOMAIN_MISMATCH", format!("\"{}\" only works with {}", e.name, e.domains.join(", "))));
+        // 不列出条目绑定的其他域名（Agent 只需要知道"不能用于这个主机"）。
+        return Err(err("DOMAIN_MISMATCH", format!("\"{}\" is not bound to {host}", e.name)));
     }
     if !e.allows(op) {
-        return Err(err("OP_NOT_ALLOWED", format!("\"{}\" may only be used for {}", e.name, e.ops.join(", "))));
+        return Err(err("OP_NOT_ALLOWED", format!("\"{}\" may not be used for {op} requests", e.name)));
     }
     Ok(())
 }
@@ -377,7 +376,7 @@ fn prepare_with_base(
     let bad = |why: &str| err("BAD_URL", format!("the value of {label} {why}"));
     let base_r = resolve_named(payload, lead)?;
     if !base_r.entry.allows(pm_vault::OP_HTTP) {
-        return Err(err("OP_NOT_ALLOWED", format!("\"{}\" may only be used for {}", base_r.entry.name, base_r.entry.ops.join(", "))));
+        return Err(err("OP_NOT_ALLOWED", format!("\"{}\" may not be used for http requests", base_r.entry.name)));
     }
     let base = base_r.value();
     if base.is_empty() || base.chars().any(|c| c.is_control() || c.is_whitespace()) {
@@ -874,7 +873,8 @@ mod tests {
         assert!(!x.message.contains("initial-pass"));
         let x = prepare(&p, "GET", "https://www.example.com/?p={{init-pw}}", &[], None).err().unwrap();
         assert_eq!(x.code, "OP_NOT_ALLOWED");
-        assert!(x.message.contains("ssh"));
+        // 只说明不能用于这种用途，不列出条目允许的用途。
+        assert!(x.message.contains("may not be used for http") && !x.message.contains("ssh"), "{}", x.message);
         assert_eq!(select_by_host(&p, "198.51.100.9", 22, pm_vault::OP_SSH).unwrap().name, "init-pw");
         assert_eq!(select_by_host(&p, "198.51.100.9", 22, pm_vault::OP_GIT).unwrap_err().code, "OP_NOT_ALLOWED");
         let (cmd, _) = substitute_all(&p, "echo {{init-pw}}", "a.example.com", 22, pm_vault::OP_SSH).unwrap();

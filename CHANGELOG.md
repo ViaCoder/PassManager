@@ -4,6 +4,30 @@ English | [简体中文](CHANGELOG.zh-CN.md)
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.3.9] - 2026-10-15
+
+### Changed (breaking for agents)
+
+- **Need-to-know discovery: `lookup` replaces `list`.** Agents no longer receive every entry with all domains, notes, fields and operations. `lookup` (MCP tool and `passmanager lookup TARGET [--use http|ssh|scp|git]`) takes the URL, `user@host` or host the agent is about to use (or `{{name}}` when a base URL is itself secret) and returns only the reference name(s), field names and `how`, a ready-to-copy `http` / `ssh` / `scp` call. It picks the entry with exactly the same rules as the real request. Notes are never shown to agents. `list` (MCP alias and CLI) and the protocol's `List` request now return `USE_LOOKUP` and disclose nothing.
+- **Progressive, compact usage guidance** for weaker models, following Anthropic's tool-writing guidance and the MCP specification. `instructions` is at most five lines: lookup first, copy `how`, never reveal secrets, follow `Next:`. Each of the four tools has two or three sentences, one minimal JSON example and `readOnlyHint` / `destructiveHint` / `openWorldHint` annotations. A test caps the size of the tool list.
+- **Every error ends with `Next:`** (CLI: a `next` field) saying exactly what to do, e.g. `NO_CREDENTIAL` → import it on the server without displaying it: `<command that prints the secret> | ssh root@<server> passmanager import …`; `DOMAIN_MISMATCH` → `passmanager update --name … --domain …`; `AMBIGUOUS` → ask the user which named credential to use. The texts live in `pm_proto::agent_text::next_step`.
+- **Usage rules v4** (written to the agents' global instruction files): the lookup workflow, git and ssh-agent, the `Next:` rule, and how an agent with root SSH on the server adds or changes credentials. `passmanager show --rules --write` refreshes the block in place after an upgrade, without enrolling again.
+- git-proxy host discovery uses the new token-only `git_hosts` request, which returns only the domains of entries with the `git` op.
+
+### Added
+
+- `passmanager update --name N [--domain D]… [--remove-domain D]… [--add-op OP]… [--remove-op OP]… [--note TEXT]` (root on the server): changes bindings, operations and the note without touching the secret. `--add-op` on an unrestricted entry changes nothing; `--remove-op` on an unrestricted entry keeps all other operations.
+- `import` and `update` warn when a note looks like it contains a path, URL, account or token. A note should be one short purpose.
+
+### Security
+
+- Error messages no longer list the domains an entry is bound to (`DOMAIN_MISMATCH` now says only that the entry is not bound to the requested host) or the operations it allows (`OP_NOT_ALLOWED`), and `AMBIGUOUS` lists only the tied reference names.
+
+### Upgrade
+
+- Upgrade the server first, then each client (`passmanager show --rules --write` on each client).
+- Clients up to 0.3.8 still work for `http`, `ssh`, `scp` and git, but their `list` returns `USE_LOOKUP`, and `git-proxy --install` cannot discover hosts until the client is upgraded. Existing `insteadOf` lines keep working.
+
 ## [0.3.8] - 2026-10-12
 
 ### Changed

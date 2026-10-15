@@ -1,6 +1,6 @@
 //! MCP 服务器（stdio，JSON-RPC 2.0，按行分隔）。
 //!
-//! 只提供 5 个工具，参数扁平、描述简短，小模型也能正确调用。
+//! 只提供 4 个工具（lookup、http、ssh、scp），参数扁平；说明逐步披露：服务器说明 → 工具描述（附示例）→ lookup 的 how → 错误的 Next:。
 //! 本进程不持有任何密钥：每次调用都用 `PASSMANAGER_TOKEN` 连接本地服务；
 //! 注册过远程服务器（`passmanager enroll`）时改为经双层加密通道连接服务器，用法不变。
 
@@ -13,48 +13,65 @@ use serde_json::{Value, json};
 
 const SUPPORTED: &[&str] = &["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
 
-const INSTRUCTIONS: &str = "PassManager uses stored secrets for you; you never see them. \
-http: write {{secret}} where the secret goes, e.g. header Authorization: Bearer {{secret}}. \
-If an entry has a base_url field, use {{entry.base_url}} as the URL (optionally followed by a path), e.g. {{ai.base_url}}/models. \
-ssh/scp: use user@host as usual. \
-If a result says LOCKED, NOT_READY or HOST_KEY_CHANGED, tell the user the command in the message.";
+/// 服务器级说明（逐步披露的第一层，≤ 5 行）：只讲固定流程与边界。具体写法由 lookup 的 `how` 给出，错误处理由 `Next:` 给出。
+const INSTRUCTIONS: &str = "PassManager lets you use stored secrets without ever seeing them.
+1. Call lookup with the URL or user@host you need.
+2. Copy its `how` into http, ssh or scp; replace only the <...> parts.
+Never ask for, print or store a secret, and never try to reveal one.
+If a result is an error, do exactly what its Next: line says; do not retry the same call.";
 
+/// 工具（第二层）：每个 2~3 句加一个最小示例；只靠这些描述也能正确使用（不是每个客户端都读全局指令文件）。
 fn tools() -> Value {
     json!([
         {
-            "name": "list",
-            "description": "List the hosts that have stored secrets.",
-            "inputSchema": {"type": "object", "properties": {}}
+            "name": "lookup",
+            "title": "Find credential",
+            "description": "Call this first. Finds the stored credential for one target and returns `how`: a ready-to-copy http, ssh or scp call with the right placeholders. target is the URL, user@host or host you will use (or {{name}} when the user names a credential). Example: {\"target\":\"https://api.github.com/user\"}",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "target": {"type": "string", "description": "URL, user@host[:port] or host"},
+                    "use": {"type": "string", "enum": ["http", "ssh", "scp", "git"], "description": "optional; guessed from target"}
+                },
+                "required": ["target"],
+                "additionalProperties": false
+            },
+            "annotations": {"readOnlyHint": true, "openWorldHint": false}
         },
         {
             "name": "http",
-            "description": "HTTPS request. Write {{secret}} where the secret goes (header, body or query); the secret stored for the URL's host is filled in. If an entry has a base_url field, use {{entry.base_url}} as the URL, optionally followed by a path or query (e.g. {{ai.base_url}}/models). Secrets in the response are shown as [REDACTED].",
+            "title": "HTTPS request",
+            "description": "Send one HTTPS request. Write placeholders exactly as lookup's how shows (e.g. {{secret}}); PassManager fills them in and redacts secrets from the response. Example: {\"method\":\"GET\",\"url\":\"https://api.github.com/user\",\"headers\":{\"Authorization\":\"Bearer {{secret}}\"}}",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "method": {"type": "string", "description": "GET, POST, PUT, PATCH, DELETE ..."},
-                    "url": {"type": "string", "description": "https:// URL, or {{entry.base_url}} followed by an optional path"},
+                    "url": {"type": "string", "description": "https:// URL, or {{name.base_url}}/path when lookup says so"},
                     "headers": {"type": "object", "additionalProperties": {"type": "string"}},
                     "body": {"type": "string"}
                 },
                 "required": ["method", "url"]
-            }
+            },
+            "annotations": {"readOnlyHint": false, "destructiveHint": true, "openWorldHint": true}
         },
         {
             "name": "ssh",
-            "description": "Run a command over SSH with the stored password or key. Commands starting with sudo get the password automatically.",
+            "title": "Run SSH command",
+            "description": "Run one shell command on user@host[:port] with the stored password or key; output is redacted. A command starting with \"sudo \" gets the password automatically. Example: {\"target\":\"root@192.0.2.10\",\"command\":\"uptime\"}",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "target": {"type": "string", "description": "user@host or user@host:port"},
+                    "target": {"type": "string", "description": "user@host or user@host:port (name/user@host to pick a credential)"},
                     "command": {"type": "string"}
                 },
                 "required": ["target", "command"]
-            }
+            },
+            "annotations": {"readOnlyHint": false, "destructiveHint": true, "openWorldHint": true}
         },
         {
             "name": "scp",
-            "description": "Copy a file to or from a host. Write the remote side as user@host:/path.",
+            "title": "Copy file over SSH",
+            "description": "Copy one file (max 64 MiB) to or from a host. Exactly one side is remote, written user@host:/path; downloaded content is redacted. Example: {\"source\":\"./app.conf\",\"destination\":\"root@192.0.2.10:/etc/app.conf\"}",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -62,9 +79,23 @@ fn tools() -> Value {
                     "destination": {"type": "string"}
                 },
                 "required": ["source", "destination"]
-            }
+            },
+            "annotations": {"readOnlyHint": false, "destructiveHint": true, "openWorldHint": true}
         }
     ])
+}
+
+/// 错误的文字（MCP 与 CLI 共用）：`代码: 信息`，有下一步时另起一行 `Next: …`。
+pub fn error_text(e: &ApiError) -> String {
+    match next(e) {
+        Some(n) => format!("{}: {}\nNext: {n}", e.code, e.message),
+        None => format!("{}: {}", e.code, e.message),
+    }
+}
+
+/// 错误码对应的下一步（服务器主机取自本机的注册配置）。
+pub fn next(e: &ApiError) -> Option<String> {
+    pm_proto::agent_text::next_step(&e.code, crate::remote::server_host().as_deref())
 }
 
 fn s(args: &Value, k: &str) -> Option<String> {
@@ -148,7 +179,14 @@ pub fn normalize(name: &str, args: &Value) -> Result<(&'static str, Value), ApiE
     let n = name.trim().to_ascii_lowercase().replace('-', "_");
     let str_of = |keys: &[&str]| first(args, keys).map(|v| as_text(&v));
     match n.as_str() {
+        // 旧的 list：不再列出条目（见 call_tool）。
         "list" | "list_credentials" | "list_secrets" | "credentials" => Ok(("list", json!({}))),
+        "lookup" | "find" | "search" | "resolve" | "find_credential" | "lookup_credential" | "credential" => {
+            let target = str_of(&["target", "url", "uri", "host", "hostname", "destination", "server", "name"])
+                .ok_or_else(|| ApiError::new("BAD_REQUEST", "missing argument \"target\" (the URL or user@host you want to use)"))?;
+            let use_ = str_of(&["use", "op", "purpose", "for", "type"]);
+            Ok(("lookup", json!({"target": target, "use": use_})))
+        }
         "http" | "http_request" | "request" | "https" | "fetch" | "curl" => {
             let mut headers = headers_of(first(args, &["headers", "header"]));
             let body = first(args, &["body", "data", "json", "payload"]).map(|b| match b {
@@ -212,7 +250,7 @@ pub fn normalize(name: &str, args: &Value) -> Result<(&'static str, Value), ApiE
                 _ => Err(ApiError::new("BAD_REQUEST", "missing \"source\" or \"destination\" (remote side: user@host:/path)")),
             }
         }
-        other => Err(ApiError::new("BAD_REQUEST", format!("unknown tool {other}; available: list, http, ssh, scp"))),
+        other => Err(ApiError::new("BAD_REQUEST", format!("unknown tool {other}; available: lookup, http, ssh, scp"))),
     }
 }
 
@@ -221,7 +259,10 @@ pub fn call_tool(name: &str, args: &Value) -> Result<Value, ApiError> {
     let (name, norm) = normalize(name, args)?;
     let args = &norm;
     let req = match name {
-        "list" => Request::List,
+        "list" => {
+            return Err(ApiError::new("USE_LOOKUP", "list was replaced by lookup: it only shows the credential for one target"));
+        }
+        "lookup" => Request::Lookup { target: need(args, "target")?, use_: s(args, "use") },
         "http" => {
             let headers: Vec<(String, String)> = serde_json::from_value(args["headers"].clone()).unwrap_or_default();
             Request::Http { method: need(args, "method")?, url: need(args, "url")?, headers, body: s(args, "body") }
@@ -290,7 +331,7 @@ fn handle(msg: &Value, out: &mut impl Write) {
             let args = msg.pointer("/params/arguments").cloned().unwrap_or(json!({}));
             let (text, is_error) = match call_tool(name, &args) {
                 Ok(v) => (serde_json::to_string_pretty(&v).unwrap_or_default(), false),
-                Err(e) => (format!("{}: {}", e.code, e.message), true),
+                Err(e) => (error_text(&e), true),
             };
             reply(out, &id, json!({"content": [{"type": "text", "text": text}], "isError": is_error}));
         }
@@ -384,5 +425,32 @@ mod tests {
         assert_eq!(lines[0]["result"]["protocolVersion"], "2025-06-18");
         assert_eq!(lines[1]["result"]["tools"].as_array().unwrap().len(), 4);
         assert_eq!(lines[2]["error"]["code"], -32601);
+    }
+
+    /// 不臃肿：4 个工具、说明 ≤ 5 行、整个工具列表有大小上限；每个工具都有示例与 annotations。
+    #[test]
+    fn surface_stays_small() {
+        let t = tools();
+        let names: Vec<&str> = t.as_array().unwrap().iter().map(|x| x["name"].as_str().unwrap()).collect();
+        assert_eq!(names, ["lookup", "http", "ssh", "scp"]);
+        let size = serde_json::to_string(&t).unwrap().len();
+        assert!(size <= 3600, "tools/list is {size} bytes");
+        assert!(INSTRUCTIONS.lines().count() <= 5);
+        for x in t.as_array().unwrap() {
+            assert!(x["description"].as_str().unwrap().contains("Example: {"), "{x}");
+            assert!(x["annotations"]["readOnlyHint"].is_boolean(), "{x}");
+        }
+        assert_eq!(t[0]["annotations"]["readOnlyHint"], true);
+        assert!(!INSTRUCTIONS.contains("list"));
+    }
+
+    #[test]
+    fn lookup_and_legacy_list() {
+        let (t, v) = normalize("find_credential", &json!({"url": "https://x.example.com/a", "op": "http"})).unwrap();
+        assert_eq!((t, v["target"].as_str(), v["use"].as_str()), ("lookup", Some("https://x.example.com/a"), Some("http")));
+        assert!(normalize("lookup", &json!({})).is_err());
+        let e = call_tool("list", &json!({})).unwrap_err();
+        assert_eq!(e.code, "USE_LOOKUP");
+        assert!(error_text(&e).contains("\nNext: call lookup"), "{}", error_text(&e));
     }
 }

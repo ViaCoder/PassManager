@@ -4,6 +4,30 @@
 
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.3.9] - 2026-10-15
+
+### 变更（对 Agent 不兼容）
+
+- **按需查询：`lookup` 取代 `list`。** Agent 不再拿到全部条目的域名、备注、字段与用途。`lookup`（MCP 工具与 `passmanager lookup 目标 [--use http|ssh|scp|git]`）接收将要访问的 URL、`user@host` 或主机（基础地址本身是秘密时用 `{{名称}}`），只返回引用名、字段名与 `how`：一行照抄即可的 `http` / `ssh` / `scp` 调用。选择规则与真正执行请求时完全相同。备注永远不给 Agent。`list`（MCP 别名与 CLI）以及协议的 `List` 请求现在返回 `USE_LOOKUP`，不透露任何信息。
+- **逐步披露、精简的使用说明**，照顾能力较弱的模型（参照 Anthropic 的工具编写指南与 MCP 规范）：`instructions` 最多 5 行（先 lookup、照抄 `how`、不泄露秘密、按 `Next:` 做）；4 个工具各 2~3 句、一个最小 JSON 示例，并带 `readOnlyHint` / `destructiveHint` / `openWorldHint` 标注；测试限制工具列表的大小。
+- **每个错误最后都有 `Next:`**（CLI 是 `next` 字段），明确下一步：例如 `NO_CREDENTIAL` → 在服务器上导入，秘密不显示（`<输出秘密的命令> | ssh root@<服务器> passmanager import …`）；`DOMAIN_MISMATCH` → `passmanager update --name … --domain …`；`AMBIGUOUS` → 请用户指定用哪个引用名。文字集中在 `pm_proto::agent_text::next_step`。
+- **使用规则 v4**（写入 Agent 的全局指令文件）：lookup 流程、git 与 ssh-agent、`Next:` 规则，以及拥有服务器 root SSH 的 Agent 如何新增或修改凭据。升级后运行 `passmanager show --rules --write` 原地更新，不需要重新注册。
+- git-proxy 的主机发现改用只限令牌的 `git_hosts` 请求：只返回有 `git` 用途条目的域名。
+
+### 新增
+
+- `passmanager update --name 名称 [--domain 域名]… [--remove-domain 域名]… [--add-op 用途]… [--remove-op 用途]… [--note 文字]`（服务器上的 root）：只改绑定、用途与备注，不动密钥。对不限用途的条目，`--add-op` 不做任何改变，`--remove-op` 保留其余用途。
+- `import` 与 `update` 在备注看起来含有路径、URL、账号或令牌时给出警告（备注只写一句用途）。
+
+### 安全
+
+- 错误信息不再列出条目绑定的域名（`DOMAIN_MISMATCH` 只说明该条目没有绑定所请求的主机）或允许的用途（`OP_NOT_ALLOWED`）；`AMBIGUOUS` 只列出并列的引用名。
+
+### 升级
+
+- 先升级服务器，再升级各客户端（在每台客户端上运行 `passmanager show --rules --write`）。
+- 0.3.8 及更早的客户端的 `http`、`ssh`、`scp` 与 git 照常可用，但它们的 `list` 会返回 `USE_LOOKUP`；在升级客户端之前，`git-proxy --install` 无法发现主机。已有的 `insteadOf` 行不受影响。
+
 ## [0.3.8] - 2026-10-12
 
 ### 变更
