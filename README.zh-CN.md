@@ -102,6 +102,10 @@ passmanager show --label laptop                                            # 打
   `passmanager git-proxy --install`；`--uninstall` 移除），git clone / push 经服务器转发，由服务器加上保存的令牌
   （`Authorization: Basic x-access-token:<PAT>`）。路径令牌持久保存（0600）。
   Agent 机器拿不到令牌；只允许 HTTPS、只用于条目的域名、不跟随重定向。
+- **`PassManager run <命令>`**（Agent 机器，Unix）：只为一条命令提供经服务器转发的认证，不装服务、不改配置：
+  `passmanager run git push`、`passmanager run ssh deploy@db1`、`passmanager run rsync …`。它开一个本机转发口（随机端口、
+  一次性路径令牌，只经 `GIT_CONFIG_*` 环境变量交给 git）和一个临时 agent 套接字（`SSH_AUTH_SOCK`），命令结束就都删除。
+  令牌和私钥留在服务器上。Agent 使用规则采用这种方式。
 
 - **单端口模式与 IP 允许列表**：`install-server.sh --port 8121` 在一个端口上同时提供网页与 Agent 通道（按 TLS ALPN 分流），
   `--allow "203.0.113.7 2001:db8::/32"` 让额外的地址访问这个端口（但不能访问 SSH）；防火墙与服务使用同一份列表。

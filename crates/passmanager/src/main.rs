@@ -19,6 +19,8 @@ mod install;
 mod mcp;
 mod prompt;
 mod remote;
+#[cfg(unix)]
+mod run;
 #[cfg(target_os = "linux")]
 mod server;
 #[cfg(not(target_os = "linux"))]
@@ -439,6 +441,23 @@ enroll 已把它装成开机 / 登录时自动启动的用户服务（Linux：sy
         #[arg(long, conflicts_with_all = ["listen", "hosts"])]
         uninstall: bool,
     },
+    /// [Agent 机器] 只为一条命令准备经服务器转发的认证（git 经服务器带上访问令牌，ssh 由服务器签名），命令结束就全部清除
+    #[command(after_help = "\
+  passmanager run git push                         # 基于 HTTPS 的 git：由服务器带上访问令牌
+  passmanager run git clone https://github.com/<所有者>/<仓库>.git
+  passmanager run ssh deploy@db1.example.com       # ssh / scp / rsync / 基于 SSH 的 git：由服务器签名
+  passmanager run rsync -a ./site/ deploy@db1.example.com:/srv/site/
+
+不写任何 git 或 ssh 配置，也不需要常驻服务：转发口（随机端口、一次性令牌）和 agent 套接字只在这条命令运行期间存在。
+令牌和私钥从不离开服务器。退出码与命令相同。")]
+    Run {
+        /// 经 PassManager 的 git 主机（可重复）；默认是服务器上有 git 用途的所有条目的主机
+        #[arg(long = "host")]
+        hosts: Vec<String>,
+        /// 要运行的命令和参数
+        #[arg(required = true, trailing_var_arg = true, allow_hyphen_values = true)]
+        command: Vec<String>,
+    },
     /// [服务器，root] 导入 TLS 证书（不使用 ACME 时）
     #[command(hide = true)]
     ImportCert { chain: std::path::PathBuf, key: std::path::PathBuf },
@@ -589,6 +608,17 @@ fn main() -> ExitCode {
             {
                 let _ = socket;
                 install::fail("ssh-agent 桥目前只支持 Linux / macOS（Unix 套接字）。")
+            }
+        }
+        Some(Cmd::Run { hosts, command }) => {
+            #[cfg(unix)]
+            {
+                run::run(hosts, command)
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = (hosts, command);
+                install::fail("passmanager run 目前只支持 Linux / macOS（Unix 套接字）。")
             }
         }
         Some(Cmd::ServerUnit { tpm_group, tmpfiles }) => server::print_unit(tpm_group.as_deref(), tmpfiles),

@@ -166,7 +166,8 @@ impl Conn {
     }
 }
 
-fn serve_conn(mut s: UnixStream, backend: &dyn Backend) {
+/// 处理一条 agent 连接（`passmanager run` 的临时 agent 也用它）。
+pub(crate) fn serve_conn(mut s: UnixStream, backend: &dyn Backend) {
     let mut conn = Conn::default();
     loop {
         let mut len = [0u8; 4];

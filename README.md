@@ -108,6 +108,10 @@ What else 0.2.0 adds on top of `http` / `ssh` / `scp`:
   `passmanager git-proxy --install` after adding git entries; `--uninstall` removes it), so git clones and pushes through the
   server, which adds the stored token (`Authorization: Basic x-access-token:<PAT>`). The path token is persistent (0600).
   The agent machine never receives the token; only HTTPS, only the entry's domains, no redirects.
+- **`PassManager run <command>`** (agent machine, Unix): forwarded authentication for one command, with nothing installed or
+  configured: `passmanager run git push`, `passmanager run ssh deploy@db1`, `passmanager run rsync …`. It opens a loopback relay
+  (random port, one-time path token, handed to git only through `GIT_CONFIG_*` environment variables) and a temporary agent
+  socket (`SSH_AUTH_SOCK`), and removes both when the command exits. Tokens and keys stay on the server. The agent rules use it.
 
 - **Single-port mode and IP allowlist**: `install-server.sh --port 8121` serves the web UI and the agent channel on one port
   (split by TLS ALPN), and `--allow "203.0.113.7 2001:db8::/32"` lets extra addresses reach that port (but not SSH); the firewall

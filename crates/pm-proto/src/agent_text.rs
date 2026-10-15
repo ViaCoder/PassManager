@@ -6,7 +6,7 @@
 //! - 使用规则写在 `<!-- passmanager:begin -->` 与 `<!-- passmanager:end -->` 之间，原地更新、不重复。
 
 /// 使用规则的版本（规则内容变化时加 1）。
-pub const INSTRUCTIONS_VERSION: u32 = 4;
+pub const INSTRUCTIONS_VERSION: u32 = 5;
 pub const BEGIN: &str = "<!-- passmanager:begin -->";
 pub const END: &str = "<!-- passmanager:end -->";
 /// 公开的源码仓库。
@@ -58,8 +58,8 @@ pub fn rules(lang: Lang) -> &'static str {
 - Workflow: 1. `lookup` the URL or user@host you need (CLI: `passmanager lookup <target>`). 2. Copy the `how` it
   returns into `http`, `ssh` or `scp`, replacing only the `<...>` parts.
 - Never ask the user for a password, token or key; never print, log or store one; never try to reveal one.
-- git over HTTPS: plain `git` with `https://` URLs (if git asks for credentials, run `passmanager git-proxy --install`).
-  Plain `ssh`/`scp`/git over SSH: run `passmanager ssh-agent` and use the printed `SSH_AUTH_SOCK`.
+- Shell commands that need a login (git over HTTPS or SSH, ssh, scp, rsync): prefix them with `passmanager run`, e.g.
+  `passmanager run git push`. Authentication is forwarded through the server for that one command; nothing is configured.
 - An error ends with a `Next:` line: do exactly that. Do not retry the same call and do not work around the error.
 - Adding or changing a credential is done by an agent with root SSH on the PassManager server, not by the user:
     <command that prints the secret> | ssh root@<server> passmanager import --name <name> --domain <host> --ops <http|ssh|git> --note '<purpose>'
@@ -74,8 +74,8 @@ pub fn rules(lang: Lang) -> &'static str {
 - 流程：1. 用 `lookup` 查询要访问的 URL 或 user@host（命令行：`passmanager lookup <目标>`）。2. 把返回的 `how` 照抄到
   `http`、`ssh` 或 `scp`，只替换其中 `<...>` 的部分。
 - 永远不要向用户索要口令、令牌或私钥；不要打印、记录或保存；不要设法还原秘密。
-- 基于 HTTPS 的 git：直接用普通的 `git` 与 `https://` 地址（git 要求输入凭据时运行 `passmanager git-proxy --install`）。
-  普通的 `ssh`/`scp`/基于 SSH 的 git：运行 `passmanager ssh-agent`，使用它打印的 `SSH_AUTH_SOCK`。
+- 需要登录的终端命令（基于 HTTPS 或 SSH 的 git、ssh、scp、rsync）：在前面加 `passmanager run`，例如
+  `passmanager run git push`。认证只为这一条命令经服务器转发，不改任何配置。
 - 错误的最后一行是 `Next:`：照它做。不要重复同样的调用，也不要绕过错误。
 - 新增或修改凭据由拥有 PassManager 服务器 root SSH 的 Agent 完成，用户不手动操作：
     <输出秘密的命令> | ssh root@<服务器> passmanager import --name <名称> --domain <主机> --ops <http|ssh|git> --note '<用途>'
@@ -439,7 +439,7 @@ mod tests {
         assert_eq!(b.matches(BEGIN).count(), 1);
         assert!(b.contains(&format!("v{INSTRUCTIONS_VERSION}")) && b.contains("`lookup`") && !b.contains("`list`"));
         for blk in [b.clone(), instruction_block(Lang::Zh)] {
-            for must in ["git-proxy --install", "ssh-agent", "Next:", "passmanager import", "passmanager update", "`how`"] {
+            for must in ["passmanager run", "Next:", "passmanager import", "passmanager update", "`how`"] {
                 assert!(blk.contains(must), "{must}: {blk}");
             }
         }

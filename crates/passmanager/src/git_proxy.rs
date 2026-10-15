@@ -5,6 +5,8 @@
 //! 经双层加密通道交给服务器；服务器带上条目里的访问令牌（PAT）请求上游。本机从不接触 PAT。
 //!
 //! - 路径令牌：随机 128 位，持久保存在配置目录（0600；insteadOf 配置在重启后仍然有效），防止本机其他程序借用代理；
+//!   代理的输出里从不出现令牌（打印的配置命令用 `$(cat …/git-proxy.token)` 代替）；
+//! - `passmanager run` 复用这里的 `serve_conn`，但用一次性的令牌和随机端口，只在那一条命令运行期间有效；
 //! - 常驻服务与 git 配置见 `git_service`（`enroll` 与 `git-proxy --install` 自动完成）；
 //! - 只接受回环地址的连接；只接受 `https` 目标；服务器端再检查主机是否属于条目的域名、请求是否是 smart-HTTP。
 
@@ -18,6 +20,12 @@ use pm_proto::{GitHead, Request};
 pub const DEFAULT_LISTEN: &str = "127.0.0.1:7878";
 const MAX_HEAD: usize = 64 * 1024;
 
+/// 生成一个新的路径令牌：随机 128 位，32 位十六进制。
+pub fn new_token() -> Result<String, String> {
+    let raw: [u8; 16] = pm_crypto::rng::random_array().map_err(|e| e.to_string())?;
+    Ok(hex::encode(raw))
+}
+
 /// 读取或生成路径令牌（配置目录下的 `git-proxy.token`，0600）。
 pub fn path_token(dir: &Path) -> Result<String, String> {
     let p = dir.join("git-proxy.token");
@@ -27,8 +35,7 @@ pub fn path_token(dir: &Path) -> Result<String, String> {
             return Ok(t);
         }
     }
-    let raw: [u8; 16] = pm_crypto::rng::random_array().map_err(|e| e.to_string())?;
-    let t = hex::encode(raw);
+    let t = new_token()?;
     std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     pm_platform::paths::write_atomic(&p, t.as_bytes(), 0o600).map_err(|e| e.to_string())?;
     Ok(t)
@@ -285,7 +292,9 @@ pub fn run(listen: Option<String>, hosts: Vec<String>) -> ExitCode {
             ));
         }
     };
-    let base = format!("http://{addr}/{token}/https");
+    // 打印的配置命令不含令牌本身：用 $(cat 令牌文件) 代替，复制到 shell 里同样可用。
+    let token_file = crate::remote::dir().join("git-proxy.token");
+    let base = format!("http://{addr}/$(cat '{}')/https", token_file.display());
     let (hosts, note) = if hosts.is_empty() {
         match crate::git_service::default_hosts() {
             Ok(h) if h.is_empty() => (h, Some("服务器上还没有 git 用途的条目".to_string())),

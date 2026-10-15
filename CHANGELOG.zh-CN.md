@@ -4,6 +4,24 @@
 
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.3.11-rc.1] - 2026-10-15
+
+### 新增
+
+- **`passmanager run <命令>`**：只为一条命令提供经服务器转发的认证，不装服务、不改配置（Unix）。
+  例如：`passmanager run git push`、`passmanager run ssh user@host`、`passmanager run rsync …`。
+  - **基于 HTTPS 的 git**：在本机回环地址的随机端口开一个转发口，路径令牌是一次性的。转发口只通过 `GIT_CONFIG_COUNT` / `GIT_CONFIG_KEY_n` / `GIT_CONFIG_VALUE_n` 交给 git，所以不写任何 git 配置文件。请求照旧经过服务器，由服务器带上令牌。
+  - **ssh、scp、rsync 与基于 SSH 的 git**：临时 agent 套接字放在只有本人能访问的目录里，经 `SSH_AUTH_SOCK` 交给命令。签名照旧由服务器完成。
+  - **生命周期**：命令结束后两者都删除。Ctrl-C 交给命令本身，退出码与命令相同。异常退出留下的临时目录在下次运行时删除。
+
+### 变更
+
+- **Agent 使用规则 v5**：需要登录的终端命令改用 `passmanager run`，不再用 `git-proxy --install` 和 `ssh-agent`。升级后运行 `passmanager show --rules --write`。
+
+### 安全
+
+- **`passmanager git-proxy` 不再打印路径令牌。** 它打印的配置命令改为用 `$(cat …)` 读令牌文件，所以令牌不会出现在终端输出和服务日志里。
+
 ## [0.3.10] - 2026-10-15
 
 ### 安全

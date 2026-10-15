@@ -13,6 +13,7 @@ entropy	crates/pm-service/src/online.rs	b107fe3d7088dc2b	文档注释中的算�
 entropy	crates/passmanager/tests/e2e.rs	bb95cde18f322515	0.1.0 原有端到端测试的假密钥
 entropy	crates/passmanager/tests/online_e2e.rs	f5f9e1d158cefad8	端到端测试的假密钥
 entropy	crates/passmanager/tests/git_proxy_e2e.rs	d3183b3626ae7ceb	端到端测试的假 PAT
+entropy	crates/passmanager/tests/run_e2e.rs	70753fd6732b1ff2	passmanager run 端到端测试的假 PAT
 entropy	crates/pm-web/src/tests.rs	de91e3b4738ff443	网页测试的假密钥
 entropy	crates/pm-net/src/acme.rs	51a53b177855ef11	ASN.1 类型名（证书签名请求）
 entropy	crates/pm-tui/src/app.rs	7330a5f91e3b82ca	随机密码生成的字符表

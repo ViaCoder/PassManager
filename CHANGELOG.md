@@ -4,6 +4,24 @@ English | [简体中文](CHANGELOG.zh-CN.md)
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.3.11-rc.1] - 2026-10-15
+
+### Added
+
+- **`passmanager run <command>`** forwards authentication for a single command, with nothing installed or configured (Unix).
+  Examples: `passmanager run git push`, `passmanager run ssh user@host`, `passmanager run rsync …`.
+  - **git over HTTPS:** a loopback relay on a random port with a one-time path token. The relay is handed to git only through `GIT_CONFIG_COUNT` / `GIT_CONFIG_KEY_n` / `GIT_CONFIG_VALUE_n`, so no git config file is written. Requests still go through the server, which adds the token.
+  - **ssh, scp, rsync and git over SSH:** a temporary agent socket in a private directory, passed as `SSH_AUTH_SOCK`. The server still signs.
+  - **Lifetime:** both are removed when the command exits. Ctrl-C goes to the command, and the exit code is the command's. Directories left behind by a crashed run are removed on the next run.
+
+### Changed
+
+- **Agent rules v5:** shell commands that need a login use `passmanager run` instead of `git-proxy --install` and `ssh-agent`. Run `passmanager show --rules --write` after upgrading.
+
+### Security
+
+- **`passmanager git-proxy` no longer prints its path token.** The configuration commands it prints read the token file with `$(cat …)`, so the token stays out of terminal output and out of the service journal.
+
 ## [0.3.10] - 2026-10-15
 
 ### Security

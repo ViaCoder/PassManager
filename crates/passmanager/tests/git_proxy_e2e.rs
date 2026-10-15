@@ -151,6 +151,8 @@ fn git_proxy_push_and_clone() {
         }
     }
     assert!(!outputs.contains(PAT) && !outputs.contains(&STANDARD.encode(format!("x-access-token:{PAT}"))), "PAT 出现在客户端");
+    // 代理自己的输出里也没有路径令牌（打印的配置命令用 $(cat 令牌文件) 代替）。
+    assert!(!o.contains(&token) && o.contains("git-proxy.token"), "代理输出里出现了路径令牌：{o}");
     assert!(!env.service_log().contains(PAT));
     assert!(env.service_log().contains("git-proxy: entry=gitpat"), "服务端审计");
 }

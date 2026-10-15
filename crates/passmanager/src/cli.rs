@@ -218,6 +218,12 @@ mod tests {
             _ => panic!(),
         }
         assert!(parse(&["PassManager", "git-proxy", "--uninstall"]).is_ok());
+        // run：选项在命令之前；命令之后的参数（包括以 - 开头的）都属于命令
+        match parse(&["PassManager", "run", "--host", "h", "git", "push", "--force", "--host", "x"]).unwrap().cmd {
+            Some(crate::Cmd::Run { hosts, command }) => assert!(hosts == ["h"] && command == ["git", "push", "--force", "--host", "x"]),
+            _ => panic!("run"),
+        }
+        assert!(parse(&["PassManager", "run"]).is_err(), "run 必须带命令");
         assert!(parse(&["PassManager", "git-proxy", "--install", "--uninstall"]).is_err());
         assert!(parse(&["PassManager", "git-proxy", "--uninstall", "--host", "x"]).is_err());
         // 帮助里有新命令、没有旧命令。
