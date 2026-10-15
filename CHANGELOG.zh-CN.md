@@ -4,6 +4,20 @@
 
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.3.10] - 2026-10-15
+
+### 安全
+
+- **rustls 0.23.45 → 0.23.46**，修复 0.3.9 发布之后公布的 RUSTSEC-2026-0349、RUSTSEC-2026-0346、RUSTSEC-2026-0347、RUSTSEC-2026-0348。
+  - 与本项目有关的是 RUSTSEC-2026-0349：未经认证的 ServerHello 可能让客户端之后的连接从混合后量子密钥交换退回到传统算法。PassManager 的 Agent 通道有内层的 ML-KEM-1024 + Classic McEliece 加密，内容一直是保密的；这次升级恢复了外层 TLS 的保证。
+  - RUSTSEC-2026-0346 涉及客户端会话值的 `Debug` 输出，PassManager 从不打印这些值。
+  - ECH（0347）与 Brotli 证书解压（0348）都没有用到。
+- 其他依赖没有变化。
+
+### 维护
+
+- 每天定时检查 RustSec 安全公告（`.github/workflows/advisories.yml`），新公告会在下一次发布之前报告，而不是发布之后。发布改为先推到 `release/X.Y.Z` 分支，CI 全部通过后才推送标签。
+
 ## [0.3.9] - 2026-10-15
 
 ### 变更（对 Agent 不兼容）

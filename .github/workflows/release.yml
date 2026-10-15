@@ -1,6 +1,10 @@
 name: Release
 
-# 发布：更新 Cargo.toml 版本与 CHANGELOG.md → 提交 → git tag vX.Y.Z && git push origin vX.Y.Z。
+# 发布流程：
+# 1. CHANGELOG.md 平时写在 [Unreleased] 下；发布时改成 [X.Y.Z]（预发布用 [X.Y.Z-rc.N]），Cargo.toml 版本同步。
+# 2. 先把发布提交推到 release/X.Y.Z 分支，等 ci.yml（全平台测试 + 供应链检查）全部通过。
+# 3. 再更新 main、打标签 vX.Y.Z（或 vX.Y.Z-rc.N）并推送；带 "-" 的标签自动标为预发布。
+#    功能版本先发 rc，在自己的环境里试运行后，只改版本号转为正式版；安全补丁可以直接发正式版。
 # 每个平台在原生运行器上构建，构建完立即在同一台机器上运行发布包做功能测试；全部通过才发布。
 # 手动触发（workflow_dispatch）时只构建和测试，不发布。
 on:

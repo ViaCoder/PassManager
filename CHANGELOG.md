@@ -4,6 +4,20 @@ English | [简体中文](CHANGELOG.zh-CN.md)
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.3.10] - 2026-10-15
+
+### Security
+
+- **rustls 0.23.45 → 0.23.46** for RUSTSEC-2026-0349, RUSTSEC-2026-0346, RUSTSEC-2026-0347 and RUSTSEC-2026-0348, published after 0.3.9 was released.
+  - The relevant one is RUSTSEC-2026-0349: an unauthenticated ServerHello could make later client connections fall back from the hybrid post-quantum key exchange to a classical one. PassManager's agent channel stayed confidential through its inner ML-KEM-1024 + Classic McEliece layer, but the outer TLS guarantee is restored.
+  - RUSTSEC-2026-0346 is about `Debug` output of client session values. PassManager never prints them.
+  - ECH (0347) and Brotli certificate decompression (0348) are not used.
+- No other dependency changed.
+
+### Maintenance
+
+- A daily scheduled check of the RustSec advisories (`.github/workflows/advisories.yml`) reports new advisories before the next release instead of after it. Releases now go through a `release/X.Y.Z` branch that must pass CI before the tag is pushed.
+
 ## [0.3.9] - 2026-10-15
 
 ### Changed (breaking for agents)
