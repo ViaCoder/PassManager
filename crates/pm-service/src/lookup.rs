@@ -93,8 +93,8 @@ fn ssh_how(target: &str, has_password: bool) -> String {
 
 fn git_how(hp: &str) -> String {
     format!(
-        "run plain git with https://{hp}/<owner>/<repo>.git - PassManager's git-proxy adds the token. \
-         If git asks for credentials, run: passmanager git-proxy --install"
+        "passmanager run git <clone|fetch|pull|push|ls-remote> https://{hp}/<owner>/<repo>.git - prefix every git \
+         command with passmanager run; the server adds the token for that one command, nothing is installed or configured"
     )
 }
 
@@ -356,7 +356,9 @@ mod tests {
     fn git_and_errors() {
         let p = payload();
         let v = lookup(&p, "github.com", Some("git")).unwrap();
-        assert!(v.how.contains("git-proxy --install") && v.how.contains("https://github.com/<owner>"), "{}", v.how);
+        // git 的写法与规则块 v5 一致：用 passmanager run，不再叫 Agent 安装 git-proxy。
+        assert!(v.how.starts_with("passmanager run git ") && v.how.contains("https://github.com/<owner>"), "{}", v.how);
+        assert!(!v.how.contains("git-proxy"), "{}", v.how);
         assert_eq!(lookup(&p, "api.cloudflare.com", Some("git")).unwrap_err().code, "OP_NOT_ALLOWED");
         assert_eq!(lookup(&p, "nothing.example.org", None).unwrap_err().code, "NO_CREDENTIAL");
         let e = lookup(&p, "https://dup.example.com/x", None).unwrap_err();

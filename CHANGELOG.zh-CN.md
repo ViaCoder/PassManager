@@ -4,6 +4,12 @@
 
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.3.11-rc.2] - 2026-10-16
+
+### 修复
+
+- **`lookup` 对 git 给出的写法与 Agent 使用规则 v5 一致。** 原来的 `how` 叫 Agent 直接运行 git，git 要求输入凭据时再运行 `passmanager git-proxy --install`；现在给出 `passmanager run git <clone|fetch|pull|push|ls-remote> https://<主机>/<owner>/<repo>.git`。只需升级服务器，客户端不变。
+
 ## [0.3.11-rc.1] - 2026-10-15
 
 ### 新增

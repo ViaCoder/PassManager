@@ -4,6 +4,12 @@ English | [简体中文](CHANGELOG.zh-CN.md)
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.3.11-rc.2] - 2026-10-16
+
+### Fixed
+
+- **`lookup` for git now matches agent rules v5.** Its `how` said to run plain git and, if git asked for credentials, to run `passmanager git-proxy --install`. It now says `passmanager run git <clone|fetch|pull|push|ls-remote> https://<host>/<owner>/<repo>.git`. Only the server needs the upgrade; clients are unchanged.
+
 ## [0.3.11-rc.1] - 2026-10-15
 
 ### Added
