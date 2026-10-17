@@ -441,16 +441,8 @@ impl App {
     pub fn on_mouse(&mut self, m: MouseEvent) {
         self.last_input = Instant::now();
         match m.kind {
-            MouseEventKind::ScrollUp => {
-                if self.dialog.is_none() {
-                    self.move_sel(-1)
-                }
-            }
-            MouseEventKind::ScrollDown => {
-                if self.dialog.is_none() {
-                    self.move_sel(1)
-                }
-            }
+            MouseEventKind::ScrollUp if self.dialog.is_none() => self.move_sel(-1),
+            MouseEventKind::ScrollDown if self.dialog.is_none() => self.move_sel(1),
             MouseEventKind::Down(MouseButton::Left) => {
                 let hit = self
                     .hits
@@ -755,11 +747,9 @@ impl App {
                     self.dialog = None;
                 }
             }
-            Some(Dialog::Info { .. }) => {
-                if esc || enter || k.code == KeyCode::Char(' ') {
-                    self.dialog_button(DBtn::Ok);
-                }
-            }
+            Some(Dialog::Info { .. }) if esc || enter || k.code == KeyCode::Char(' ') => self.dialog_button(DBtn::Ok),
+            // 信息框只认 Esc / Enter / 空格，其他键忽略。
+            Some(Dialog::Info { .. }) => {}
             Some(Dialog::Prompt { input, .. }) => {
                 if esc {
                     self.dialog = None;

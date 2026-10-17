@@ -57,11 +57,11 @@ fn tools() -> Value {
         {
             "name": "ssh",
             "title": "Run SSH command",
-            "description": "Run one shell command on user@host[:port] with the stored password or key; output is redacted. A command starting with \"sudo \" gets the password automatically. Example: {\"target\":\"root@192.0.2.10\",\"command\":\"uptime\"}",
+            "description": "Run one shell command on user@host[:port] with the stored password or key; output is redacted. A command starting with \"sudo \" gets the password automatically. To go through a jump host write jumpuser@jumphost>user@host; each hop uses its own stored credential. Example: {\"target\":\"root@192.0.2.10\",\"command\":\"uptime\"}",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "target": {"type": "string", "description": "user@host or user@host:port (name/user@host to pick a credential)"},
+                    "target": {"type": "string", "description": "user@host or user@host:port (name/user@host to pick a credential; jumpuser@jumphost>user@host through one jump host)"},
                     "command": {"type": "string"}
                 },
                 "required": ["target", "command"]
@@ -71,7 +71,7 @@ fn tools() -> Value {
         {
             "name": "scp",
             "title": "Copy file over SSH",
-            "description": "Copy one file (max 64 MiB) to or from a host. Exactly one side is remote, written user@host:/path; downloaded content is redacted. Example: {\"source\":\"./app.conf\",\"destination\":\"root@192.0.2.10:/etc/app.conf\"}",
+            "description": "Copy one file (max 64 MiB) to or from a host. Exactly one side is remote, written user@host:/path (or jumpuser@jumphost>user@host:/path through one jump host); downloaded content is redacted. Example: {\"source\":\"./app.conf\",\"destination\":\"root@192.0.2.10:/etc/app.conf\"}",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -124,6 +124,13 @@ pub fn connect() -> Result<Client, ApiError> {
 /// scp 风格的远程路径：`[name/]user@host[:port]:/path`（IPv6：`user@[::1]:/path`）。
 /// 返回 (target, path)；本地路径（含 Windows 盘符 `C:\...`）返回 None。
 pub fn split_remote(spec: &str) -> Option<(String, String)> {
+    // 跳板：jump[:port]>user@host[:port]:/path——跳板部分原样保留，只拆最后一跳（`>` 前已有 `:/` 时它属于路径）。
+    if let Some((jump, rest)) = spec.split_once('>')
+        && !jump.contains(":/")
+        && !jump.starts_with(['.', '/'])
+    {
+        return split_remote(rest).map(|(t, p)| (format!("{jump}>{t}"), p));
+    }
     if let Some(i) = spec.find("]:") {
         return Some((spec[..=i].to_string(), spec[i + 2..].to_string()));
     }
@@ -411,6 +418,15 @@ mod tests {
         assert_eq!(r("./a:b"), None);
         assert_eq!(r("/tmp/a.txt"), None);
         assert_eq!(r("notes.txt"), None);
+        // 跳板：只拆最后一跳；跳板可以带端口与引用名。
+        assert_eq!(r("root@198.51.100.1>root@db1:/tmp/x"), Some(("root@198.51.100.1>root@db1".into(), "/tmp/x".into())));
+        assert_eq!(r("root@198.51.100.1:2222>root@db1:/tmp/x"), Some(("root@198.51.100.1:2222>root@db1".into(), "/tmp/x".into())));
+        assert_eq!(r("pw/root@j:2222>u@db1:2200:/x"), Some(("pw/root@j:2222>u@db1:2200".into(), "/x".into())));
+        // `>` 在路径里、本地文件名里：不是跳板。
+        assert_eq!(r("u@db1:/tmp/a>b"), Some(("u@db1".into(), "/tmp/a>b".into())));
+        assert_eq!(r("a>b.txt"), None);
+        assert_eq!(r("./a>u@b:/x"), None);
+        assert_eq!(r("C:\\a>b.txt"), None);
     }
 
     #[test]

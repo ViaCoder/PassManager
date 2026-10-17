@@ -105,20 +105,36 @@ pub fn ssh_target(port: Option<u16>, login: Option<String>, target: &str) -> Str
     t
 }
 
-pub fn ssh(port: Option<u16>, login: Option<String>, target: String, command: Vec<String>) -> ExitCode {
-    tool("ssh", json!({"target": ssh_target(port, login, &target), "command": command.join(" ")}))
-}
-
-/// scp 风格：-P 端口加到远程一侧。
-pub fn scp_spec(port: Option<u16>, spec: &str) -> String {
-    match (port, crate::mcp::split_remote(spec)) {
-        (Some(p), Some((target, path))) if !target.rsplit('@').next().unwrap_or("").contains(':') => format!("{target}:{p}:{path}"),
-        _ => spec.to_string(),
+/// 加上跳板（同 ssh -J）：`跳板>目标`。
+pub fn with_jump(jump: Option<&str>, target: String) -> String {
+    match jump {
+        Some(j) => format!("{}>{target}", ssh_target(None, None, j)),
+        None => target,
     }
 }
 
-pub fn scp(port: Option<u16>, source: String, destination: String) -> ExitCode {
-    tool("scp", json!({"source": scp_spec(port, &source), "destination": scp_spec(port, &destination)}))
+pub fn ssh(port: Option<u16>, login: Option<String>, jump: Option<String>, target: String, command: Vec<String>) -> ExitCode {
+    tool("ssh", json!({"target": with_jump(jump.as_deref(), ssh_target(port, login, &target)), "command": command.join(" ")}))
+}
+
+/// scp 风格：-P 端口与 -J 跳板加到远程一侧。
+pub fn scp_spec(port: Option<u16>, jump: Option<&str>, spec: &str) -> String {
+    match crate::mcp::split_remote(spec) {
+        None => spec.to_string(),
+        Some((target, path)) => {
+            let last = target.rsplit('>').next().unwrap_or(&target);
+            let target = match port {
+                Some(p) if !last.rsplit('@').next().unwrap_or("").contains(':') => format!("{target}:{p}"),
+                _ => target,
+            };
+            format!("{}:{path}", with_jump(jump, target))
+        }
+    }
+}
+
+pub fn scp(port: Option<u16>, jump: Option<String>, source: String, destination: String) -> ExitCode {
+    let j = jump.as_deref();
+    tool("scp", json!({"source": scp_spec(port, j, &source), "destination": scp_spec(port, j, &destination)}))
 }
 
 #[cfg(test)]
@@ -147,8 +163,16 @@ mod tests {
         assert_eq!(ssh_target(Some(2222), None, "u@db1:22"), "u@db1:22");
         assert_eq!(ssh_target(None, None, "ssh://u@db1:2200/"), "u@db1:2200");
         assert_eq!(ssh_target(Some(2200), None, "u@[::1]"), "u@[::1]:2200");
-        assert_eq!(scp_spec(Some(2222), "u@db1:/tmp/a"), "u@db1:2222:/tmp/a");
-        assert_eq!(scp_spec(Some(2222), "./local.txt"), "./local.txt");
+        assert_eq!(scp_spec(Some(2222), None, "u@db1:/tmp/a"), "u@db1:2222:/tmp/a");
+        assert_eq!(scp_spec(Some(2222), None, "./local.txt"), "./local.txt");
+        // -J 跳板（同 ssh -J）
+        assert_eq!(with_jump(Some("root@198.51.100.1"), ssh_target(None, None, "u@db1")), "root@198.51.100.1>u@db1");
+        assert_eq!(with_jump(Some("ssh://root@198.51.100.1:2222"), "u@db1:2200".into()), "root@198.51.100.1:2222>u@db1:2200");
+        assert_eq!(with_jump(None, "u@db1".into()), "u@db1");
+        assert_eq!(scp_spec(None, Some("root@198.51.100.1"), "u@db1:/tmp/a"), "root@198.51.100.1>u@db1:/tmp/a");
+        assert_eq!(scp_spec(Some(2200), Some("root@j:2222"), "u@db1:/tmp/a"), "root@j:2222>u@db1:2200:/tmp/a");
+        assert_eq!(scp_spec(Some(2200), None, "root@j:2222>u@db1:/tmp/a"), "root@j:2222>u@db1:2200:/tmp/a", "-P 只加到最后一跳");
+        assert_eq!(scp_spec(None, Some("root@j"), "./local.txt"), "./local.txt");
     }
 
     #[test]
@@ -161,6 +185,8 @@ mod tests {
             vec!["PassManager", "ssh", "-p", "2222", "-o", "StrictHostKeyChecking=no", "deploy@db1", "ls", "-la"],
             vec!["PassManager", "ssh", "deploy@db1", "sudo systemctl restart nginx"],
             vec!["PassManager", "scp", "-P", "2222", "a.txt", "deploy@db1:/tmp/a.txt"],
+            vec!["PassManager", "ssh", "-J", "root@198.51.100.1", "deploy@db1", "uptime"],
+            vec!["PassManager", "scp", "-J", "root@198.51.100.1", "a.txt", "deploy@db1:/tmp/a.txt"],
             vec!["PassManager", "list"],
             vec!["PassManager", "lookup", "https://api.github.com/user"],
             vec!["PassManager", "lookup", "root@db1", "--use", "scp"],

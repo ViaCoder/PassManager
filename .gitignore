@@ -11,3 +11,6 @@ __pycache__/
 # 本地离线构建：指向 vendor/ 的 cargo 配置（CI 正常从 crates.io 获取依赖）
 /.cargo/config.toml
 /.intentionally-empty-file.o
+
+# 私有数据：只在本地保存，不进 git
+/private/

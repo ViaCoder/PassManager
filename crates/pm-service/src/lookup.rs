@@ -9,7 +9,7 @@ use pm_vault::{Entry, OP_GIT, OP_HTTP, Payload, domain};
 use url::Url;
 
 use crate::http::{host_string, ssh_credentials};
-use crate::ssh::parse_target;
+use crate::ssh::{parse_route, parse_target};
 use crate::{ApiErr, err};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -45,6 +45,62 @@ impl Use {
             Use::Ssh | Use::Scp => 22,
             Use::Http | Use::Git => 443,
         }
+    }
+
+    fn op(self) -> &'static str {
+        match self {
+            Use::Http => OP_HTTP,
+            Use::Git => OP_GIT,
+            Use::Ssh | Use::Scp => pm_vault::OP_SSH,
+        }
+    }
+}
+
+/// 这台主机只在一个端口上绑定了可用于该用途的条目时（例如 git.hk.gy:8121），返回那个端口。
+fn bound_port(payload: &Payload, host: &str, op: &str) -> Option<u16> {
+    let mut ports: Vec<u16> = payload
+        .entries
+        .iter()
+        .filter(|e| e.allows(op))
+        .flat_map(|e| e.domains.iter())
+        .filter_map(|d| match domain::pattern_parts(d) {
+            (h, Some(p)) if domain::matches(&h, host) => Some(p),
+            _ => None,
+        })
+        .collect();
+    ports.sort_unstable();
+    ports.dedup();
+    match ports.as_slice() {
+        [p] => Some(*p),
+        _ => None,
+    }
+}
+
+/// URL 里是否显式写了端口（url 库会把与默认端口相同的端口去掉，所以看原始字符串）。
+fn url_has_port(url: &str) -> bool {
+    let rest = url.split_once("://").map(|(_, r)| r).unwrap_or(url);
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let hostport = authority.rsplit_once('@').map(|(_, h)| h).unwrap_or(authority);
+    if hostport.starts_with('[') { hostport.contains("]:") } else { hostport.contains(':') }
+}
+
+/// 同 [`by_host`]；没写端口（`explicit` 为假）且按默认端口查不到时，改用该主机唯一绑定的端口。
+fn by_host_guess(
+    payload: &Payload,
+    host: &str,
+    port: u16,
+    explicit: bool,
+    use_: Use,
+    name: Option<&str>,
+    user: Option<&str>,
+) -> Result<LookupView, ApiErr> {
+    let r = by_host(payload, host, port, use_, name, user);
+    if r.is_ok() || explicit {
+        return r;
+    }
+    match bound_port(payload, host, use_.op()) {
+        Some(p) if p != port => by_host(payload, host, p, use_, name, user).or(r),
+        _ => r,
     }
 }
 
@@ -203,7 +259,33 @@ pub fn lookup(payload: &Payload, target: &str, use_: Option<&str>) -> Result<Loo
         }
         let host = host_string(&u).ok_or_else(|| err("BAD_REQUEST", format!("\"{url}\" has no host")))?;
         let port = u.port_or_known_default().unwrap_or(443);
-        return by_host(payload, &host, port, use_, name, None);
+        return by_host_guess(payload, &host, port, url_has_port(url), use_, name, None);
+    }
+
+    // 跳板路由 跳板>目标：两跳各自查 ssh 凭据，how 写完整路由
+    if t.contains('>') {
+        if matches!(given, Some(Use::Http | Use::Git)) {
+            return Err(err("BAD_REQUEST", "a jump route jumpuser@jumphost>user@host is only for ssh or scp"));
+        }
+        let (jump, dest) = parse_route(t)?;
+        let jump = jump.ok_or_else(|| err("BAD_REQUEST", format!("invalid target \"{t}\"")))?;
+        let hop = |d: &crate::ssh::Dest| -> Result<(String, Vec<String>, bool), ApiErr> {
+            let (key, pw) = ssh_credentials(payload, d.name.as_deref(), &d.host, d.port)?;
+            let prefix = d.name.as_ref().map(|n| format!("{n}/")).unwrap_or_default();
+            let names = key.iter().chain(pw.iter()).map(|e| e.name.clone()).collect();
+            Ok((format!("{prefix}{}@{}", d.user, host_port(&d.host, d.port, 22)), names, pw.is_some()))
+        };
+        let (jt, mut credentials, _) = hop(&jump)?;
+        let (dt, names, has_pw) = hop(&dest)?;
+        credentials.extend(names.into_iter().filter(|n| !credentials.contains(n)).collect::<Vec<_>>());
+        let use_ = given.unwrap_or(Use::Ssh);
+        return Ok(LookupView {
+            target: format!("{}>{}", host_port(&jump.host, jump.port, 0), host_port(&dest.host, dest.port, 0)),
+            use_: use_.as_str().into(),
+            credentials,
+            fields: vec![],
+            how: ssh_how(&format!("{jt}>{dt}"), has_pw),
+        });
     }
 
     // [名称/]user@host[:port]
@@ -215,9 +297,11 @@ pub fn lookup(payload: &Payload, target: &str, use_: Option<&str>) -> Result<Loo
             let hostport = t.rsplit('@').next().unwrap_or(t);
             let explicit = if hostport.starts_with('[') { hostport.contains("]:") } else { hostport.contains(':') };
             let port = if explicit { d.port } else { use_.default_port() };
-            return by_host(payload, &d.host, port, use_, d.name.as_deref(), None);
+            return by_host_guess(payload, &d.host, port, explicit, use_, d.name.as_deref(), None);
         }
-        return by_host(payload, &d.host, d.port, use_, d.name.as_deref(), Some(&d.user));
+        let hostport = t.rsplit('@').next().unwrap_or(t);
+        let explicit = if hostport.starts_with('[') { hostport.contains("]:") } else { hostport.contains(':') };
+        return by_host_guess(payload, &d.host, d.port, explicit, use_, d.name.as_deref(), Some(&d.user));
     }
 
     // 主机[:端口]（IPv6 写成 [::1] 或 [::1]:端口，也接受不带方括号的 IPv6）；
@@ -238,7 +322,8 @@ pub fn lookup(payload: &Payload, target: &str, use_: Option<&str>) -> Result<Loo
         }
     };
     let host = domain::normalize_host(host);
-    let r = by_host(payload, &host, port, use_, None, None);
+    let explicit = if t.starts_with('[') { t.contains("]:") } else { t.rsplit_once(':').is_some_and(|(h, _)| !h.contains(':')) };
+    let r = by_host_guess(payload, &host, port, explicit, use_, None, None);
     match r {
         Err(e) if e.code == "NO_CREDENTIAL" && payload.entry(t).is_some() => by_name(payload, t, use_),
         other => other,
@@ -314,6 +399,59 @@ mod tests {
         assert!(v.how.contains("deploy@198.51.100.9:2222:/<path>"), "{}", v.how);
         // 只能用于 ssh 的条目不能用于 http。
         assert_eq!(lookup(&p, "https://198.51.100.5/", None).unwrap_err().code, "OP_NOT_ALLOWED");
+    }
+
+    #[test]
+    fn url_port_detection() {
+        assert!(!url_has_port("https://git.example.com/o/r.git"));
+        assert!(url_has_port("https://git.example.com:443/o/r.git"));
+        assert!(url_has_port("https://git.example.com:8121"));
+        assert!(!url_has_port("https://user@git.example.com/o"));
+        assert!(url_has_port("https://user:pw@git.example.com:8121/o"));
+        assert!(!url_has_port("https://[2001:db8::1]/x"));
+        assert!(url_has_port("https://[2001:db8::1]:8443/x"));
+        assert!(!url_has_port("https://a.example.com/path:with:colons"));
+    }
+
+    /// 没写端口时：主机只在一个端口上绑定了可用条目，就用那个端口（例如 MegaGit 只开 8121）。
+    #[test]
+    fn implicit_port_from_binding() {
+        let mut p = payload();
+        p.entries.push(entry("forge", "PAT_SECRET", &["git.example.com:8121"], &["git"]));
+        p.entries.push(entry("alt", "ALTPW", &["203.0.113.5:2222"], &["ssh"]));
+        for t in ["git.example.com", "https://git.example.com/owner/repo.git"] {
+            let v = lookup(&p, t, Some("git")).unwrap();
+            assert_eq!((v.target.as_str(), v.credentials.clone()), ("git.example.com:8121", vec!["forge".to_string()]), "{t}");
+            assert!(v.how.contains("https://git.example.com:8121/<owner>/<repo>.git"), "{}", v.how);
+        }
+        // 显式写了别的端口：不改端口。
+        assert!(lookup(&p, "git.example.com:443", Some("git")).is_err());
+        assert!(lookup(&p, "https://git.example.com:443/o/r.git", Some("git")).is_err());
+        // ssh 同理。
+        let v = lookup(&p, "root@203.0.113.5", None).unwrap();
+        assert!(v.how.contains("root@203.0.113.5:2222"), "{}", v.how);
+        // 默认端口本来就能查到：结果不变。
+        assert_eq!(lookup(&p, "root@198.51.100.254", None).unwrap().credentials, vec!["init".to_string()]);
+        // 同一主机绑定了两个端口：有歧义，不猜。
+        p.entries.push(entry("forge2", "PAT2", &["git.example.com:8122"], &["git"]));
+        assert!(lookup(&p, "git.example.com", Some("git")).is_err());
+        assert!(!json(&lookup(&p, "git.example.com:8121", Some("git")).unwrap()).contains("8122"), "不泄露同主机的其他绑定");
+    }
+
+    /// 跳板路由：两跳各自查凭据，how 写完整路由；任何一跳没有凭据就报那一跳的错误。
+    #[test]
+    fn jump_route() {
+        let p = payload();
+        let v = lookup(&p, "root@198.51.100.254>deploy@198.51.100.9:2222", None).unwrap();
+        assert_eq!((v.use_.as_str(), v.credentials.clone()), ("ssh", vec!["init".to_string()]), "两跳同一条目只列一次");
+        assert_eq!(v.target, "198.51.100.254:22>198.51.100.9:2222", "与单跳一样，target 总带端口");
+        assert!(v.how.contains("\"target\":\"root@198.51.100.254>deploy@198.51.100.9:2222\""), "{}", v.how);
+        assert!(v.how.contains("root@198.51.100.254>deploy@198.51.100.9:2222:/<path>") && v.how.contains("sudo"), "{}", v.how);
+        assert!(!json(&v).contains("198.51.100.0/24"));
+        assert_eq!(lookup(&p, "root@198.51.100.254>root@db.example.com", None).unwrap_err().code, "NO_CREDENTIAL");
+        assert_eq!(lookup(&p, "root@db.example.com>root@198.51.100.9", None).unwrap_err().code, "NO_CREDENTIAL");
+        assert_eq!(lookup(&p, "root@198.51.100.254>root@198.51.100.9", Some("http")).unwrap_err().code, "BAD_REQUEST");
+        assert_eq!(lookup(&p, "root@198.51.100.1>root@198.51.100.2>root@198.51.100.3", None).unwrap_err().code, "BAD_REQUEST");
     }
 
     /// user@host 用于 http / git 时，没写端口按 443（而不是 SSH 的 22）；IPv6 主机的各种写法。

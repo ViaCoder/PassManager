@@ -9,6 +9,8 @@
 //!   加密优先 aes256-gcm@openssh.com；主机密钥与公钥认证支持 ecdsa-sha2-nistp384。
 //!   （russh 不支持 sntrup761x25519-sha512，对只提供它与 nistp384 的旧主机会协商 ecdh-sha2-nistp384。）
 //! - 输出与下载内容全部脱敏。
+//! - 跳板：目标写成 `跳板>目标`（各自是 `[<引用名>/]user@host[:port]`，只支持一级）。先用跳板自己的凭据登录跳板，
+//!   再经跳板的 direct-tcpip 通道与目标做完整的 SSH 握手与认证：目标的主机密钥照常核对，跳板只转发密文。
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -67,10 +69,19 @@ pub fn parse_target(t: &str) -> Result<Dest, ApiErr> {
         (hostport.to_string(), 22)
     };
     let host = pm_vault::domain::normalize_host(&host);
-    if host.is_empty() || host.contains(['/', ' ', '@']) || user.contains([' ', '/']) {
+    if host.is_empty() || host.contains(['/', ' ', '@', '>']) || user.contains([' ', '/', '>']) {
         return Err(bad());
     }
     Ok(Dest { name, user, host, port })
+}
+
+/// 解析 `[跳板>]目标`：返回（跳板, 目标）。只支持一级跳板。
+pub fn parse_route(t: &str) -> Result<(Option<Dest>, Dest), ApiErr> {
+    match t.trim().split_once('>') {
+        None => Ok((None, parse_target(t)?)),
+        Some((_, d)) if d.contains('>') => Err(err("BAD_REQUEST", "only one jump host is supported: write jumpuser@jumphost>user@host")),
+        Some((j, d)) => Ok((Some(parse_target(j)?), parse_target(d)?)),
+    }
 }
 
 pub struct Target {
@@ -134,14 +145,38 @@ pub enum Connected {
     PinMismatch { observed: String },
 }
 
-/// 连接并认证。`expected_pin` 为已记录的主机密钥指纹。
-pub async fn connect(t: &Target, expected_pin: Option<String>) -> Result<Connected, ApiErr> {
+/// 一次 SSH 会话：目标会话，以及经跳板时仍需保持的跳板会话。
+pub struct Session {
+    pub handle: Handle<Checker>,
+    jump: Option<Handle<Checker>>,
+}
+
+impl Session {
+    pub fn new(handle: Handle<Checker>, jump: Option<Handle<Checker>>) -> Self {
+        Self { handle, jump }
+    }
+}
+
+/// 连接并认证。`expected_pin` 为已记录的主机密钥指纹；`via` 为已认证的跳板会话及其名称（`host:port`，用于错误信息）时，
+/// 经跳板的 direct-tcpip 通道连接目标。
+pub async fn connect_on(t: &Target, expected_pin: Option<String>, via: Option<(&Handle<Checker>, &str)>) -> Result<Connected, ApiErr> {
     let observed = Arc::new(Mutex::new(None));
     let checker = Checker { expected: expected_pin.clone(), accept_change: t.auto_accept, observed: observed.clone() };
     let config = Arc::new(client_config());
-    let conn = tokio::time::timeout(CONNECT_TIMEOUT, client::connect(config, (t.host.as_str(), t.port), checker)).await;
+    let through = via.map(|(_, name)| format!(" via {name}")).unwrap_or_default();
+    let open = async {
+        match via {
+            None => client::connect(config, (t.host.as_str(), t.port), checker).await,
+            Some((jump, _)) => {
+                // 跳板替我们连到目标的 TCP 端口；之后的 SSH 握手、主机密钥核对与认证都在这条通道里端到端完成。
+                let ch = jump.channel_open_direct_tcpip(t.host.clone(), u32::from(t.port), "127.0.0.1", 0).await?;
+                client::connect_stream(config, ch.into_stream(), checker).await
+            }
+        }
+    };
+    let conn = tokio::time::timeout(CONNECT_TIMEOUT, open).await;
     let mut handle = match conn {
-        Err(_) => return Err(err("UPSTREAM_ERROR", format!("SSH connection to {} timed out", t.host_port()))),
+        Err(_) => return Err(err("UPSTREAM_ERROR", format!("SSH connection to {}{through} timed out", t.host_port()))),
         Ok(Err(e)) => {
             let obs = observed.lock().unwrap().clone();
             if let (Some((_, fp)), Some(exp)) = (&obs, &expected_pin)
@@ -150,7 +185,7 @@ pub async fn connect(t: &Target, expected_pin: Option<String>) -> Result<Connect
             {
                 return Ok(Connected::PinMismatch { observed: fp.clone() });
             }
-            return Err(err("UPSTREAM_ERROR", format!("SSH connection to {} failed: {e}", t.host_port())));
+            return Err(err("UPSTREAM_ERROR", format!("SSH connection to {}{through} failed: {e}", t.host_port())));
         }
         Ok(Ok(h)) => h,
     };
@@ -315,7 +350,15 @@ pub async fn download(handle: &Handle<Checker>, remote_path: &str) -> Result<Vec
     Ok(data)
 }
 
-pub async fn close(handle: Handle<Checker>) {
+/// 断开会话：先断目标，再断跳板。
+pub async fn close(s: Session) {
+    disconnect(s.handle).await;
+    if let Some(j) = s.jump {
+        disconnect(j).await;
+    }
+}
+
+pub async fn disconnect(handle: Handle<Checker>) {
     let _ = handle.disconnect(russh::Disconnect::ByApplication, "", "").await;
 }
 
@@ -335,5 +378,23 @@ mod tests {
         assert!(parse_target("@host").is_err());
         assert!(parse_target("u@host:abc").is_err());
         assert!(parse_target("u@").is_err());
+        assert!(parse_target("u@a>b").is_err());
+    }
+
+    #[test]
+    fn routes() {
+        let d = |n: Option<&str>, u: &str, h: &str, p: u16| Dest { name: n.map(str::to_string), user: u.into(), host: h.into(), port: p };
+        assert_eq!(parse_route("deploy@db1.example.com").unwrap(), (None, d(None, "deploy", "db1.example.com", 22)));
+        assert_eq!(
+            parse_route("root@198.51.100.1>deploy@db1.example.com:2222").unwrap(),
+            (Some(d(None, "root", "198.51.100.1", 22)), d(None, "deploy", "db1.example.com", 2222))
+        );
+        assert_eq!(
+            parse_route("jumppw/root@[2001:db8::1]:2200>ops/u@db2.example.com").unwrap(),
+            (Some(d(Some("jumppw"), "root", "2001:db8::1", 2200)), d(Some("ops"), "u", "db2.example.com", 22))
+        );
+        assert!(parse_route("a@j1>b@j2>c@db").is_err(), "只支持一级跳板");
+        assert!(parse_route(">u@db").is_err());
+        assert!(parse_route("u@j>").is_err());
     }
 }

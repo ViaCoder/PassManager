@@ -4,6 +4,21 @@ English | [简体中文](CHANGELOG.zh-CN.md)
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.3.11-rc.3] - 2026-10-17
+
+### Added
+
+- **SSH through a jump host.** Write the target as `jumpuser@jumphost>user@host` in the `ssh` and `scp` tools (for scp: `jumpuser@jumphost>user@host:/path`), or use `-J jumpuser@jumphost` with `passmanager ssh` / `passmanager scp`, as with OpenSSH. One jump host is supported.
+  - **Each hop uses only its own stored credential.** The server logs in to the jump host with the credential bound to it, opens a `direct-tcpip` channel to the target, and runs the full SSH handshake and login with the target inside that channel. The jump host only relays ciphertext; it never sees the target's credential, and the target never sees the jump host's.
+  - **Host keys are checked on both hops.** A changed key on either hop stops with `HOST_KEY_CHANGED` before any login data is sent to that hop; if the jump host's key changed, no forwarding is requested at all.
+  - **`lookup` understands routes** and lists the credentials for both hops; its `how` contains the full route.
+  - **Compatibility:** the route is part of the target string, so only the server needs the upgrade. Older clients pass it through unchanged, except for scp when the jump host has an explicit port (`jump:2222>…`), which needs this client.
+- **`lookup` fills in a non-default port.** When the target has no port and nothing is bound to the default port, but the host is bound on exactly one other port (for example `git.example.com:8121`), `lookup` answers with that port. An explicit port is never changed, and two bound ports for the same host stay ambiguous.
+
+### Changed
+
+- Code adjusted for the lints of Rust 1.99 (`collapsible_match`, `needless_borrows_for_generic_args`); behaviour is unchanged.
+
 ## [0.3.11-rc.2] - 2026-10-16
 
 ### Fixed

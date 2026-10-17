@@ -685,21 +685,21 @@ impl Shared {
             Request::AgentSign { key, data, flags, binding } => self.agent_sign(&key, &data, flags, binding).await,
             Request::GitProxy { .. } => Err(err("BAD_REQUEST", "git proxy requests must be the streaming form")),
             Request::Ssh { target, command } => {
-                let dest = ssh::parse_target(&target)?;
+                let (_, dest) = ssh::parse_route(&target)?;
                 // 命令中的占位符（{{name.field}} 等）按目标主机代入，例如把口令经管道交给远端程序。
                 let command = {
                     let inner = self.inner.lock().await;
                     let v = inner.vault.as_ref().ok_or_else(|| self.locked_err())?;
                     http::substitute_all(&v.payload, &command, &dest.host, dest.port, pm_vault::OP_SSH)?.0
                 };
-                let (handle, t, redactor) = self.ssh_session(&target).await?;
+                let (session, t, redactor) = self.ssh_session(&target).await?;
                 // 命令以 `sudo ` 开头且有口令条目时，由服务通过 stdin 提供 sudo 密码；只有私钥时原样执行。
                 let (cmd, sudo) = match command.trim_start().strip_prefix("sudo ") {
                     Some(rest) if !t.secret.is_empty() => (Zeroizing::new(rest.trim_start().to_string()), true),
                     _ => (command.clone(), false),
                 };
-                let r = ssh::exec(&handle, &t, &cmd, sudo, &redactor).await;
-                ssh::close(handle).await;
+                let r = ssh::exec(&session.handle, &t, &cmd, sudo, &redactor).await;
+                ssh::close(session).await;
                 ok(r?)
             }
             Request::Upload { target, path, data_base64 } => {
@@ -707,16 +707,16 @@ impl Shared {
                 if data.len() > MAX_FILE {
                     return Err(err("TOO_LARGE", "file exceeds 64 MiB"));
                 }
-                let (handle, _t, _) = self.ssh_session(&target).await?;
-                let r = ssh::upload(&handle, &path, &data).await;
-                ssh::close(handle).await;
+                let (session, _t, _) = self.ssh_session(&target).await?;
+                let r = ssh::upload(&session.handle, &path, &data).await;
+                ssh::close(session).await;
                 r?;
                 ok(serde_json::json!({ "uploaded": path, "size": data.len() }))
             }
             Request::Download { target, path } => {
-                let (handle, _t, redactor) = self.ssh_session(&target).await?;
-                let r = ssh::download(&handle, &path).await;
-                ssh::close(handle).await;
+                let (session, _t, redactor) = self.ssh_session(&target).await?;
+                let r = ssh::download(&session.handle, &path).await;
+                ssh::close(session).await;
                 let data = r?;
                 let (red, n) = redactor.redact(&data);
                 ok(DownloadResult { size: red.len(), data_base64: STANDARD.encode(&red), redactions: n })
@@ -1134,27 +1134,51 @@ impl Shared {
         }
     }
 
-    async fn ssh_session(&self, target: &str) -> Result<(russh::client::Handle<ssh::Checker>, ssh::Target, Arc<Redactor>), ApiErr> {
-        let dest = ssh::parse_target(target)?;
-        let (target, expected, redactor) = {
+    /// 打开 SSH 会话；目标写成 `跳板>目标` 时先登录跳板，再经跳板登录目标（两跳各用自己绑定的凭据与主机密钥记录）。
+    async fn ssh_session(&self, target: &str) -> Result<(ssh::Session, ssh::Target, Arc<Redactor>), ApiErr> {
+        let (jump, dest) = ssh::parse_route(target)?;
+        let (jump, (target, expected), redactor) = {
             let inner = self.inner.lock().await;
             let v = inner.vault.as_ref().ok_or_else(|| self.locked_err())?;
-            let (key, pw) = http::ssh_credentials(&v.payload, dest.name.as_deref(), &dest.host, dest.port)?;
-            let t = ssh::Target::from_entries(key.as_ref(), pw.as_ref(), &dest.host, dest.port, &dest.user);
-            let expected = v.payload.pin(PinKind::Ssh, &t.host_port()).map(|p| p.fingerprint.clone());
-            (t, expected, inner.redactor.clone())
+            let hop = |d: &ssh::Dest| -> Result<(ssh::Target, Option<String>), ApiErr> {
+                let (key, pw) = http::ssh_credentials(&v.payload, d.name.as_deref(), &d.host, d.port)?;
+                let t = ssh::Target::from_entries(key.as_ref(), pw.as_ref(), &d.host, d.port, &d.user);
+                let expected = v.payload.pin(PinKind::Ssh, &t.host_port()).map(|p| p.fingerprint.clone());
+                Ok((t, expected))
+            };
+            (jump.as_ref().map(hop).transpose()?, hop(&dest)?, inner.redactor.clone())
         };
-        match ssh::connect(&target, expected.clone()).await? {
-            ssh::Connected::PinMismatch { observed } => Err(self
-                .pin_mismatch(PinKind::Ssh, &target.host_port(), &target.host_port(), expected.as_deref().unwrap_or("?"), &observed)
-                .await),
+        let Some((jt, jexp)) = jump else {
+            return Ok((ssh::Session::new(self.ssh_hop(&target, expected, None).await?, None), target, redactor));
+        };
+        let jh = self.ssh_hop(&jt, jexp, None).await?;
+        match self.ssh_hop(&target, expected, Some((&jh, &jt.host_port()))).await {
+            Ok(h) => Ok((ssh::Session::new(h, Some(jh)), target, redactor)),
+            Err(e) => {
+                ssh::disconnect(jh).await;
+                Err(e)
+            }
+        }
+    }
+
+    /// 连接一跳：核对或首次记录主机密钥，主机密钥变化时不发送任何认证数据。
+    async fn ssh_hop(
+        &self,
+        t: &ssh::Target,
+        expected: Option<String>,
+        via: Option<(&russh::client::Handle<ssh::Checker>, &str)>,
+    ) -> Result<russh::client::Handle<ssh::Checker>, ApiErr> {
+        match ssh::connect_on(t, expected.clone(), via).await? {
+            ssh::Connected::PinMismatch { observed } => {
+                Err(self.pin_mismatch(PinKind::Ssh, &t.host_port(), &t.host_port(), expected.as_deref().unwrap_or("?"), &observed).await)
+            }
             ssh::Connected::Session { handle, observed } => {
                 if let Some((algo, fp)) = observed
                     && expected.as_deref() != Some(fp.as_str())
                 {
-                    self.record_pin(PinKind::Ssh, &target.host_port(), &algo, &fp).await;
+                    self.record_pin(PinKind::Ssh, &t.host_port(), &algo, &fp).await;
                 }
-                Ok((handle, target, redactor))
+                Ok(handle)
             }
         }
     }

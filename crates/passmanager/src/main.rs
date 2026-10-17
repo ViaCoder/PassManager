@@ -150,7 +150,7 @@ enum Cmd {
         #[arg(long = "compressed", hide = true)]
         _compressed: bool,
     },
-    /// 通过 SSH 执行命令（OpenSSH 风格）：PassManager ssh [-p 端口] [-l 用户] user@host <命令>
+    /// 通过 SSH 执行命令（OpenSSH 风格）：PassManager ssh [-p 端口] [-l 用户] [-J 跳板] user@host <命令>
     Ssh {
         /// 端口（同 ssh -p）
         #[arg(short = 'p', long)]
@@ -158,6 +158,9 @@ enum Cmd {
         /// 用户（同 ssh -l）
         #[arg(short = 'l', long = "login")]
         login: Option<String>,
+        /// 跳板（同 ssh -J）：jumpuser@jumphost[:port]，跳板与目标各用自己保存的凭据
+        #[arg(short = 'J', long = "jump")]
+        jump: Option<String>,
         /// 兼容 ssh 的常见选项（忽略）
         #[arg(short = 'o', hide = true)]
         _options: Vec<String>,
@@ -476,6 +479,9 @@ enroll 已把它装成开机 / 登录时自动启动的用户服务（Linux：sy
         /// 端口（同 scp -P）
         #[arg(short = 'P', long)]
         port: Option<u16>,
+        /// 跳板（同 scp -J）：jumpuser@jumphost[:port]
+        #[arg(short = 'J', long = "jump")]
+        jump: Option<String>,
         /// 兼容 scp 的常见选项（忽略）
         #[arg(short = 'q', hide = true)]
         _quiet: bool,
@@ -523,8 +529,8 @@ fn main() -> ExitCode {
         Some(Cmd::Lookup { target, use_ }) => cli::tool("lookup", serde_json::json!({"target": target, "use": use_})),
         Some(Cmd::List) => cli::tool("list", serde_json::json!({})),
         Some(Cmd::Http { args, request, headers, data, json, .. }) => cli::http(args, request, headers, data, json),
-        Some(Cmd::Ssh { port, login, target, command, .. }) => cli::ssh(port, login, target, command),
-        Some(Cmd::Scp { port, source, destination, .. }) => cli::scp(port, source, destination),
+        Some(Cmd::Ssh { port, login, jump, target, command, .. }) => cli::ssh(port, login, jump, target, command),
+        Some(Cmd::Scp { port, jump, source, destination, .. }) => cli::scp(port, jump, source, destination),
         Some(Cmd::Init {
             domain,
             lan,
