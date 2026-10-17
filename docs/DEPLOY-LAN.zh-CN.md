@@ -122,7 +122,13 @@ PAT 从不到达 Agent 机器。
 `passmanager token revoke <ID>` 吊销（未使用的注册码由 `token list` 列出，也用同样的方式作废）。
 
 安装脚本把自身的程序复制到 `/var/lib/passmanager/agent-bin/`；其他平台用 `--agent-bundle <目录>` 提供发布包
-（`PassManager-<版本>-<目标>.tar.gz`，可附 `SHA256SUMS`）；与服务器同一目标的发布包不会替换服务器自身的程序。服务器在请求时从不联网下载。
+（`PassManager-<版本>-<目标>.tar.gz` / `.zip`）和这个发布的 `SHA256SUMS`（必须有）；与服务器同一目标的发布包不会替换服务器自身的程序。
+服务器在请求时从不联网下载。
+
+agent-bin 目录里的 `SHA256SUMS` 同时打开接入说明的第 2 步：curl 不支持 X25519MLKEM768 的机器（macOS、Windows、较旧的 Linux）会得到现成的命令，
+从固定到服务器标签的 GitHub 发布页下载本平台的发布包，并校验写在命令里的 SHA-256。要在运行中的服务器上添加或更新这些发布包而不重新运行安装脚本：
+把服务器这个版本的发布资产和 `SHA256SUMS` 下载到同一个目录，以 root 运行 `agent-bundle.sh <目录>`（它在服务器包里，和 `install-server.sh` 放在一起）。
+接入说明只列出与服务器同一版本的发布包。
 
 ### 3.1 导入密钥（服务器，root）
 

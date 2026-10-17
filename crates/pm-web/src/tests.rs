@@ -112,7 +112,7 @@ impl Backend for Mock {
                     let lang = pm_proto::agent_text::Lang::parse(&lang).unwrap();
                     let b = pm_proto::agent_text::BuildInfo { version: "0.3.0".into(), ..Default::default() };
                     let url = format!("pm-enroll://pm.test:8443/{BOOT_CODE}#FPR");
-                    let text = pm_proto::agent_text::setup_text(lang, "https://pm.test", BOOT_CODE, &url, &b, 10);
+                    let text = pm_proto::agent_text::setup_text(lang, "https://pm.test", BOOT_CODE, &url, &b, &[], 10);
                     Resp::ok(pm_proto::AgentSetupView { id: "e1".into(), label, text, expires_in_secs: 600 })
                 }
                 Req::EnrollPeek { code, .. } => {

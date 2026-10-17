@@ -643,7 +643,7 @@ mod tests {
         assert!(v.url.starts_with("pm-enroll://pm.test:8121/"), "{}", v.url);
         let code = pm_net::enroll::EnrollUrl::parse(&v.url).unwrap().code;
         let text =
-            pm_proto::agent_text::setup_text(pm_proto::agent_text::Lang::En, &on.web_origin(), &code, &v.url, &Default::default(), 10);
+            pm_proto::agent_text::setup_text(pm_proto::agent_text::Lang::En, &on.web_origin(), &code, &v.url, &Default::default(), &[], 10);
         assert!(text.contains(&format!("https://pm.test:8121/a/{code}")), "{text}");
         assert!(on.allowed("203.0.113.7".parse().unwrap()) && on.allowed("2001:db8::9".parse().unwrap()));
         assert!(on.allowed("198.51.100.20".parse().unwrap()) && !on.allowed("203.0.113.8".parse().unwrap()));

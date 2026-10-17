@@ -68,6 +68,22 @@ struct Inner {
     blocked_until: Option<Instant>,
 }
 
+/// SHA256SUMS 的大小上限（一个发布只有几行）。
+const MAX_SUMS: u64 = 64 << 10;
+
+/// agent-bin 目录里当前发布的 SHA256SUMS（管理员从 GitHub 发布页复制过来，和 agent-bin 里的程序同一来源）：
+/// 接入说明据此给出各平台发布包的下载命令和 SHA-256。没有、太大或读不了时为空（说明里只给源码构建）。
+pub fn release_sums(layout: &Layout) -> Vec<pm_proto::agent_text::ReleaseAsset> {
+    let p = layout.data_dir.join("agent-bin").join("SHA256SUMS");
+    match std::fs::symlink_metadata(&p) {
+        Ok(md) if md.file_type().is_file() && md.len() <= MAX_SUMS => match std::fs::read(&p) {
+            Ok(b) => pm_proto::agent_text::parse_sums(&String::from_utf8_lossy(&b)),
+            Err(_) => Vec::new(),
+        },
+        _ => Vec::new(),
+    }
+}
+
 pub struct Shared {
     pub layout: Layout,
     pub info: InstallInfo,
@@ -892,7 +908,9 @@ impl Shared {
                 let label = if label.trim().is_empty() { "agent".to_string() } else { label };
                 let v = on.enroll_create(&label).map_err(|m| err("BAD_REQUEST", m))?;
                 let code = pm_net::enroll::EnrollUrl::parse(&v.url).map_err(|m| err("INTERNAL", m))?.code;
-                let text = pm_proto::agent_text::setup_text(lang, &on.web_origin(), &code, &v.url, &build_info(), v.expires_in_secs / 60);
+                let sums = release_sums(&self.layout);
+                let text =
+                    pm_proto::agent_text::setup_text(lang, &on.web_origin(), &code, &v.url, &build_info(), &sums, v.expires_in_secs / 60);
                 log(&format!("enrollment code {} created for \"{}\" (setup text)", v.id, v.label));
                 ok(pm_proto::AgentSetupView { id: v.id, label: v.label, text, expires_in_secs: v.expires_in_secs })
             }
@@ -1532,5 +1550,32 @@ mod tests {
         };
         let got = agent_allowed_host_keys(&e, &all);
         assert_eq!(got, vec!["SHA256:explicit", "FP-db1", "FP-lan", "FP-v6"]);
+    }
+
+    #[test]
+    fn release_sums_reads_only_a_small_regular_file() {
+        let t = tempfile::tempdir().unwrap();
+        let l = Layout { mode: Mode::User, data_dir: t.path().join("data"), run_dir: t.path().join("run"), socket: t.path().join("run/s") };
+        // 没有文件：空
+        assert!(release_sums(&l).is_empty());
+        let dir = l.data_dir.join("agent-bin");
+        std::fs::create_dir_all(&dir).unwrap();
+        // 正常文件：解析出每一行
+        let line = format!("{}  PassManager-0.3.0-universal-apple-darwin.tar.gz\n", "a".repeat(64));
+        std::fs::write(dir.join("SHA256SUMS"), &line).unwrap();
+        let v = release_sums(&l);
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0].name, "PassManager-0.3.0-universal-apple-darwin.tar.gz");
+        // 太大：不读
+        std::fs::write(dir.join("SHA256SUMS"), line.repeat(2000)).unwrap();
+        assert!(release_sums(&l).is_empty());
+        // 符号链接：不跟随
+        std::fs::remove_file(dir.join("SHA256SUMS")).unwrap();
+        std::fs::write(t.path().join("elsewhere"), &line).unwrap();
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(t.path().join("elsewhere"), dir.join("SHA256SUMS")).unwrap();
+            assert!(release_sums(&l).is_empty());
+        }
     }
 }

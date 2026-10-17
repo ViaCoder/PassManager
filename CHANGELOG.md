@@ -4,6 +4,17 @@ English | [简体中文](CHANGELOG.zh-CN.md)
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.3.11-rc.4] - 2026-10-18
+
+### Added
+
+- **Enrolling macOS, Windows and older Linux machines without building from source.** Their built-in curl and PowerShell cannot do the post-quantum TLS (X25519MLKEM768) that the server requires, so the one-line installer fails there with exit code 35 and the setup text used to send them to a source build. When the server has the `SHA256SUMS` of its own release in the agent-bin directory, `passmanager show --label <name>` now adds a step 2 with ready commands for each platform: download the release package from the GitHub release page pinned to the server's tag, check its SHA-256 (written into the command), unpack it and enroll. The source build moves to step 3. The server's TLS policy is unchanged; the SHA-256 reaches the agent machine through the setup text that the administrator copies from the server.
+- **`scripts/agent-bundle.sh`** puts the release packages into the agent-bin directory of a running server without re-running the installer: it checks every package against `SHA256SUMS`, unpacks the Linux and macOS binaries, never replaces the server's own binary and copies `SHA256SUMS` for the setup text. `install-server.sh --agent-bundle` uses it.
+
+### Changed
+
+- **`--agent-bundle` requires `SHA256SUMS`.** A bundle directory without it (or with a symbolic link instead of a file) is refused before anything is installed.
+
 ## [0.3.11-rc.3] - 2026-10-17
 
 ### Added

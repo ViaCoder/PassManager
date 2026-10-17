@@ -50,7 +50,7 @@ chmod +x "$F"/*
 
 PKG="$T/pkg"; mkdir -p "$PKG"
 cp "$BIN" "$PKG/PassManager"
-cp "$SRC/scripts/install-server.sh" "$PKG/"
+cp "$SRC/scripts/install-server.sh" "$SRC/scripts/agent-bundle.sh" "$PKG/"
 SOCK="$T/swtpm/tpm.sock"
 mkdir -p "$(dirname "$SOCK")"
 python3 -I -c "import socket,sys; s=socket.socket(socket.AF_UNIX); s.bind(sys.argv[1])" "$SOCK"
@@ -147,7 +147,25 @@ AB="$R2/var/lib/passmanager-dryrun/data/agent-bin"
 check "发布包：校验通过的 macOS 程序已解出" '[ "$(cat "$AB/PassManager-universal-apple-darwin")" = mac-client ]'
 # 与服务器架构无关：aarch64 包要么因校验不一致被跳过，要么（aarch64 服务器上）让位给本机程序；内容都不会被安装。
 check "发布包：校验不一致的跳过并警告" '! grep -q arm-client "$AB"/* && grep -Eq "跳过 PassManager-0.3.0-aarch64-unknown-linux-gnu.tar.gz|PassManager-0.3.0-aarch64-unknown-linux-gnu.tar.gz：使用本机程序" "$T/out3.txt"'
-check "发布包：Windows 包与未知文件忽略" '[ ! -e "$AB/PassManager-x86_64-pc-windows-msvc" ] && [ -z "$(find "$AB" -type f ! -name PassManager-x86_64-unknown-linux-gnu ! -name PassManager-aarch64-unknown-linux-gnu ! -name PassManager-universal-apple-darwin)" ]'
+check "发布包：Windows 包与未知文件忽略" '[ ! -e "$AB/PassManager-x86_64-pc-windows-msvc" ] && [ -z "$(find "$AB" -type f ! -name PassManager-x86_64-unknown-linux-gnu ! -name PassManager-aarch64-unknown-linux-gnu ! -name PassManager-universal-apple-darwin ! -name SHA256SUMS)" ]'
+check "发布包：SHA256SUMS 复制到 Agent 程序目录（接入说明用）" 'cmp -s "$AB/SHA256SUMS" "$B/SHA256SUMS"'
+
+echo "== agent-bundle.sh 单独运行（已部署的服务器更新 Agent 程序目录）"
+SA="$T/ab-standalone"
+if bash "$SRC/scripts/agent-bundle.sh" --agent-bin "$SA" --native x86_64-unknown-linux-gnu "$B" > "$T/out-ab.txt" 2>&1; then
+  ok "agent-bundle.sh 运行成功"
+else
+  bad "agent-bundle.sh 运行失败"; cat "$T/out-ab.txt"
+fi
+check "agent-bundle：macOS 程序已解出" '[ "$(cat "$SA/PassManager-universal-apple-darwin")" = mac-client ]'
+check "agent-bundle：本机目标不用发布包里的" '[ ! -e "$SA/PassManager-x86_64-unknown-linux-gnu" ] && grep -q "使用本机程序" "$T/out-ab.txt"'
+check "agent-bundle：校验不一致的跳过并警告" '[ ! -e "$SA/PassManager-aarch64-unknown-linux-gnu" ] && grep -q "跳过 PassManager-0.3.0-aarch64-unknown-linux-gnu.tar.gz" "$T/out-ab.txt"'
+check "agent-bundle：SHA256SUMS 已复制、没有留下临时文件" 'cmp -s "$SA/SHA256SUMS" "$B/SHA256SUMS" && [ -z "$(find "$SA" -name ".*.new")" ]'
+NS="$T/bundle-nosums"; mkdir -p "$NS"; cp "$B"/PassManager-*.tar.gz "$NS/"
+check "agent-bundle：没有 SHA256SUMS 时拒绝，什么都不装" '! bash "$SRC/scripts/agent-bundle.sh" --agent-bin "$T/ab-none" --native "" "$NS" > /dev/null 2>&1 && [ ! -e "$T/ab-none" ]'
+ln -s "$B/SHA256SUMS" "$NS/SHA256SUMS"
+check "agent-bundle：SHA256SUMS 是符号链接时拒绝" '! bash "$SRC/scripts/agent-bundle.sh" --agent-bin "$T/ab-none" --native "" "$NS" > /dev/null 2>&1 && [ ! -e "$T/ab-none" ]'
+check "install-server：发布包目录没有 SHA256SUMS 时在动手之前拒绝" '! DRY_RUN=1 ROOT="$T/r-nosums" PATH="$F:$PATH" bash "$PKG/install-server.sh" --domain pm.example.com --lan-cidr 198.51.100.0/24 --skip-acme --agent-bundle "$NS" < /dev/null > "$T/out-nosums.txt" 2>&1 && grep -q "没有 SHA256SUMS" "$T/out-nosums.txt" && [ ! -e "$T/r-nosums/var/lib/passmanager-dryrun" ]'
 
 echo "== 单端口模式与允许列表"
 RP="$T/root-port"

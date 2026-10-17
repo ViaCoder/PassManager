@@ -21,7 +21,7 @@
 #   --web-port N         网页端口（默认 443；两端口模式）                  站点文件键 WEB_PORT
 #   --agent-port N       Agent 端口（默认 8443；两端口模式）               站点文件键 AGENT_PORT
 #   --tpm-socket PATH    可选：swtpm 的 Unix 数据套接字；不给时只自动检测 /dev/tpmrm0   站点文件键 TPM_SOCKET
-#   --agent-bundle DIR   可选：放有发布包（PassManager-<版本>-<目标>.tar.gz，可附 SHA256SUMS）的目录，
+#   --agent-bundle DIR   可选：放有发布包（PassManager-<版本>-<目标>.tar.gz，以及必须有的 SHA256SUMS）的目录，
 #                        供一键接入（passmanager show --label）给其他平台的 Agent 机器下载；本机程序总会提供
 #                                                                          站点文件键 AGENT_BUNDLE
 #   --site-file FILE     读取站点配置文件（命令行参数优先）
@@ -131,6 +131,9 @@ case "$TPM_SOCKET" in
 esac
 if [ -n "$AGENT_BUNDLE" ] && [ ! -d "$AGENT_BUNDLE" ]; then
   echo "--agent-bundle 不是目录：$AGENT_BUNDLE" >&2; exit 2
+fi
+if [ -n "$AGENT_BUNDLE" ] && { [ ! -f "$AGENT_BUNDLE/SHA256SUMS" ] || [ -L "$AGENT_BUNDLE/SHA256SUMS" ]; }; then
+  echo "--agent-bundle 目录里没有 SHA256SUMS（从同一个 GitHub 发布页下载）：$AGENT_BUNDLE" >&2; exit 2
 fi
 LAN_SET="$(IFS=,; printf '%s' "${LANS[*]}" | sed 's/,/, /g')"
 
@@ -349,37 +352,8 @@ case "$(uname -m)" in
 esac
 [ -n "$NATIVE_T" ] && install -m 0644 "$BIN_SRC" "$AGENT_BIN_DIR/PassManager-$NATIVE_T"
 if [ -n "$AGENT_BUNDLE" ]; then
-  for f in "$AGENT_BUNDLE"/PassManager-*.tar.gz; do
-    [ -e "$f" ] || continue
-    name="$(basename "$f")"
-    t=""
-    for k in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu universal-apple-darwin aarch64-apple-darwin x86_64-apple-darwin; do
-      case "$name" in *"-$k.tar.gz") t="$k" ;; esac
-    done
-    [ -n "$t" ] || continue
-    if [ "$t" = "$NATIVE_T" ]; then
-      echo "   $name：使用本机程序（与服务器版本一致），不用发布包里的"
-      continue
-    fi
-    if [ -f "$AGENT_BUNDLE/SHA256SUMS" ]; then
-      if ! (cd "$AGENT_BUNDLE" && grep -E "[[:space:]]\*?$name\$" SHA256SUMS | sha256sum -c --status - 2>/dev/null); then
-        warn "跳过 $name：与 SHA256SUMS 不一致或没有记录"
-        continue
-      fi
-    fi
-    tmpd="$(mktemp -d)"
-    if tar -xzf "$f" -C "$tmpd" 2>/dev/null; then
-      b="$(find "$tmpd" -type f -name PassManager | head -n 1)"
-      if [ -n "$b" ]; then
-        install -m 0644 "$b" "$AGENT_BIN_DIR/PassManager-$t"
-      else
-        warn "跳过 $name：包里没有 PassManager"
-      fi
-    else
-      warn "跳过 $name：无法解压"
-    fi
-    rm -rf "$tmpd"
-  done
+  # 发布包：逐个按 SHA256SUMS 校验后解出，并复制 SHA256SUMS（接入说明据此给出各平台的下载命令）
+  bash "$HERE/agent-bundle.sh" --agent-bin "$AGENT_BIN_DIR" --native "$NATIVE_T" "$AGENT_BUNDLE"
 fi
 for f in "$AGENT_BIN_DIR"/PassManager-*; do
   [ -e "$f" ] && echo "   $(basename "$f")"

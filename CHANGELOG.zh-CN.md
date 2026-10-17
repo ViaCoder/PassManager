@@ -4,6 +4,17 @@
 
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.3.11-rc.4] - 2026-10-18
+
+### 新增
+
+- **macOS、Windows 和较旧的 Linux 不用再从源码构建就能接入。** 这些机器自带的 curl 和 PowerShell 不支持服务器要求的后量子 TLS（X25519MLKEM768），一行安装命令会以退出码 35 失败，以前的接入说明只能让它们从源码构建。现在只要服务器的 agent-bin 目录里有它自己那个发布的 `SHA256SUMS`，`passmanager show --label <名称>` 就会多出第 2 步：给出每个平台现成的命令——从固定到服务器标签的 GitHub 发布页下载发布包，校验写在命令里的 SHA-256，解压后注册。源码构建改为第 3 步。服务器的 TLS 策略不变；SHA-256 经管理员从服务器上复制的接入说明到达 Agent 机器。
+- **`scripts/agent-bundle.sh`**：不重新运行安装脚本，就能把发布包放进运行中服务器的 agent-bin 目录。它逐个按 `SHA256SUMS` 校验，解出 Linux 与 macOS 的程序，从不替换服务器自己的程序，并复制 `SHA256SUMS` 供接入说明使用。`install-server.sh --agent-bundle` 也改为调用它。
+
+### 变更
+
+- **`--agent-bundle` 必须有 `SHA256SUMS`。** 目录里没有它（或者它是符号链接）时，在安装任何东西之前就拒绝。
+
 ## [0.3.11-rc.3] - 2026-10-17
 
 ### 新增

@@ -114,7 +114,7 @@ main() {{
       break
     fi
   done
-  [ -n "$target" ] || die "the server has no client binary for $os/$arch; build the client from source (see the setup text, step 2)"
+  [ -n "$target" ] || die "the server has no client binary for $os/$arch; use step 2 of the setup text (release package from GitHub, or the pinned source)"
   command -v curl > /dev/null 2>&1 || die "curl is required"
   [ -n "${{HOME:-}}" ] || die "HOME is not set"
   dir="$HOME/.local/bin"

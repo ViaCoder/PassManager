@@ -3,6 +3,7 @@
 //!
 //! - 接入说明只包含一个一次性注册码（10 分钟、只能用一次）与服务端公钥指纹，没有其他秘密；公开版本两者都没有；
 //! - 源码构建路径固定到服务器自身的构建信息（发布标签 + 提交）；开发构建没有对应的公开标签时给出明确说明，不给错误的固定值；
+//! - 服务器上有这个发布的 SHA256SUMS 时，另给出从 GitHub 发布页下载各平台包的命令，SHA-256 写在命令里（下载后校验）；
 //! - 使用规则写在 `<!-- passmanager:begin -->` 与 `<!-- passmanager:end -->` 之间，原地更新、不重复。
 
 /// 使用规则的版本（规则内容变化时加 1）。
@@ -142,6 +143,83 @@ pub fn instruction_block(lang: Lang) -> String {
     format!("{BEGIN}\n{title}\n\n{}{END}\n", rules(lang))
 }
 
+/// 一个发布包：文件名与 SHA-256（来自 GitHub 发布页的 SHA256SUMS）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReleaseAsset {
+    pub name: String,
+    pub sha256: String,
+}
+
+/// 解析 SHA256SUMS：每行 `<64 位十六进制>  <文件名>`（文件名前的 `*` 表示二进制模式）。
+/// 不合法的行（哈希不是 64 位十六进制、文件名带路径或空白）直接跳过。
+pub fn parse_sums(text: &str) -> Vec<ReleaseAsset> {
+    text.lines()
+        .filter_map(|l| {
+            let (sha, name) = l.trim_end().split_once(char::is_whitespace)?;
+            let name = name.trim_start().trim_start_matches('*');
+            let sha_ok = sha.len() == 64 && sha.bytes().all(|b| b.is_ascii_hexdigit());
+            let name_ok = !name.is_empty() && !name.contains(['/', '\\']) && !name.contains(char::is_whitespace);
+            (sha_ok && name_ok).then(|| ReleaseAsset { name: name.to_string(), sha256: sha.to_ascii_lowercase() })
+        })
+        .collect()
+}
+
+/// 发布包的平台：（说明里的名称，目标，是不是 Windows）。和 release.yml、scripts/cross-build.sh 的产物一致。
+const RELEASE_TARGETS: &[(&str, &str, bool)] = &[
+    ("macOS (Apple Silicon / Intel)", "universal-apple-darwin", false),
+    ("Linux x86_64", "x86_64-unknown-linux-gnu", false),
+    ("Linux ARM64", "aarch64-unknown-linux-gnu", false),
+    ("Windows x64 (PowerShell)", "x86_64-pc-windows-msvc", true),
+    ("Windows ARM64 (PowerShell)", "aarch64-pc-windows-msvc", true),
+];
+
+/// 发布包的文件名（不含扩展名）：`PassManager-<版本>-<目标>`。
+pub fn asset_stem(version: &str, target: &str) -> String {
+    format!("PassManager-{version}-{target}")
+}
+
+/// 从 GitHub 发布页下载本平台的包、校验 SHA-256、注册的命令（每个有 SHA-256 的平台一段）。
+/// 只用这个发布的包（文件名里的版本必须等于 `version`）；一个平台都没有时返回 None。
+fn release_steps(lang: Lang, version: &str, tag: &str, sums: &[ReleaseAsset], enroll_url: &str) -> Option<String> {
+    let mut out = String::new();
+    for (label, target, windows) in RELEASE_TARGETS {
+        let stem = asset_stem(version, target);
+        let file = format!("{stem}.{}", if *windows { "zip" } else { "tar.gz" });
+        let Some(a) = sums.iter().find(|a| a.name == file) else { continue };
+        let url = format!("{REPO}/releases/download/{tag}/{file}");
+        if *windows {
+            out.push_str(&format!(
+                "   {label}:
+     $f = '{stem}'
+     Invoke-WebRequest -UseBasicParsing '{url}' -OutFile \"$f.zip\"
+     if ((Get-FileHash \"$f.zip\" -Algorithm SHA256).Hash -ne '{sha}') {{ throw 'SHA-256 mismatch - stop' }}
+     Expand-Archive \"$f.zip\" -DestinationPath \"$env:LOCALAPPDATA\\PassManager\" -Force
+     & \"$env:LOCALAPPDATA\\PassManager\\$f\\PassManager.exe\" enroll '{enroll_url}'
+",
+                sha = a.sha256
+            ));
+        } else {
+            let check = if target.ends_with("apple-darwin") { "shasum -a 256 -c -" } else { "sha256sum -c -" };
+            out.push_str(&format!(
+                "   {label}:
+     f={stem}
+     curl --proto '=https' -fsSLO '{url}'
+     printf '%s  %s\\n' {sha} \"$f.tar.gz\" | {check} && tar -xzf \"$f.tar.gz\" && mkdir -p ~/.local/bin && cp \"$f/PassManager\" ~/.local/bin/PassManager && ln -sf PassManager ~/.local/bin/passmanager && ~/.local/bin/PassManager enroll '{enroll_url}'
+",
+                sha = a.sha256
+            ));
+        }
+    }
+    if out.is_empty() {
+        return None;
+    }
+    out.push_str(match lang {
+        Lang::En => "   If the SHA-256 check fails (\"FAILED\" or \"SHA-256 mismatch\"), stop and tell the user; do not run the binary.\n",
+        Lang::Zh => "   SHA-256 校验失败时（显示 \"FAILED\" 或 \"SHA-256 mismatch\"）停止并告诉用户，不要运行这个程序。\n",
+    });
+    Some(out)
+}
+
 /// 第 1 步的一行命令。
 ///
 /// - `--proto '=https'` 加引号：zsh（macOS 默认）会把未加引号的 `=https` 当作命令路径展开（EQUALS 选项）而报错；
@@ -205,8 +283,18 @@ fn git_note(lang: Lang) -> &'static str {
 
 /// `passmanager show --label <名称>`（服务器上的 root）打印的接入说明（含一次性注册码）。`origin` 例如
 /// `https://pm.example.com`；`enroll_url` 是完整的 `pm-enroll://主机:端口/注册码#指纹`。
-pub fn setup_text(lang: Lang, origin: &str, code: &str, enroll_url: &str, build: &BuildInfo, minutes: u64) -> String {
+pub fn setup_text(
+    lang: Lang,
+    origin: &str,
+    code: &str,
+    enroll_url: &str,
+    build: &BuildInfo,
+    sums: &[ReleaseAsset],
+    minutes: u64,
+) -> String {
     let one_liner = one_liner(origin, code);
+    // 有固定的发布、服务器上又有它的 SHA256SUMS：先给下载发布包的方式，源码构建放到后面
+    let release = build.pinned().and_then(|(tag, _)| release_steps(lang, &build.version, tag, sums, enroll_url));
     let source = match (build.pinned(), lang) {
         (Some(pin), _) => source_steps(lang, Some(pin), enroll_url),
         (None, Lang::En) => format!(
@@ -237,12 +325,24 @@ The enrollment code below is valid for {minutes} minutes and works once. Do not 
    Any other error (for example 22: the code expired or was already used; 6 or 7: server unreachable): stop and tell the user.
 
 2. Only if step 1 exits with code 35 (TLS handshake failure; curl without ML-KEM support, e.g. macOS or older
-   distributions) or on Windows: build the client from the pinned source and enroll with it (this configures MCP, the
-   rules and git as well).
+   distributions) or on Windows: {fallback}
 {source}
-3. Restart the agent so that it loads the PassManager MCP server, then follow these rules:
+{restart}. Restart the agent so that it loads the PassManager MCP server, then follow these rules:
 {rules}",
             git = git_note(lang),
+            fallback = match &release {
+                Some(r) => format!(
+                    "download the release package for this platform from GitHub, check its SHA-256 (pinned below)
+   and enroll with it (this configures MCP, the rules and git as well).
+{r}
+3. Only if step 2 is not possible (no access to github.com, or no package for this platform): build the client from
+   the pinned source and enroll with it."
+                ),
+                None => "build the client from the pinned source and enroll with it (this configures MCP, the
+   rules and git as well)."
+                    .to_string(),
+            },
+            restart = if release.is_some() { 4 } else { 3 },
             rules = rules(Lang::En)
         ),
         Lang::Zh => format!(
@@ -257,11 +357,20 @@ The enrollment code below is valid for {minutes} minutes and works once. Do not 
    不支持 X25519MLKEM768：转到第 2 步。其他错误（例如 22：注册码已过期或已用过；6 或 7：连不上服务器）：停止并告诉用户。
 
 2. 只有第 1 步以退出码 35 失败（TLS 握手失败；curl 不支持 ML-KEM，例如 macOS 或较旧的发行版）或在 Windows 上时：
-   从固定的源码构建客户端并用它注册（同样会配置 MCP、规则与 git）。
+   {fallback}
 {source}
-3. 重启 Agent 使其加载 PassManager MCP 服务，然后遵守以下规则：
+{restart}. 重启 Agent 使其加载 PassManager MCP 服务，然后遵守以下规则：
 {rules}",
             git = git_note(lang),
+            fallback = match &release {
+                Some(r) => format!(
+                    "从 GitHub 发布页下载本平台的包，校验 SHA-256（固定值写在下面的命令里），再用它注册（同样会配置 MCP、规则与 git）。
+{r}
+3. 只有第 2 步做不到时（访问不了 github.com，或者没有本平台的包）：从固定的源码构建客户端并用它注册。"
+                ),
+                None => "从固定的源码构建客户端并用它注册（同样会配置 MCP、规则与 git）。".to_string(),
+            },
+            restart = if release.is_some() { 4 } else { 3 },
             rules = rules(Lang::Zh)
         ),
     }
@@ -366,7 +475,7 @@ mod tests {
     #[test]
     fn setup_text_contents() {
         for lang in [Lang::En, Lang::Zh] {
-            let t = setup_text(lang, "https://pm.example.com", "CODE123", URL, &pinned(), 10);
+            let t = setup_text(lang, "https://pm.example.com", "CODE123", URL, &pinned(), &[], 10);
             assert_eq!(t.matches("CODE123").count(), 2, "一行命令与 enroll 各一次");
             assert!(t.contains("sh -c \"$(curl --proto '=https' --tlsv1.3 -fsSL https://pm.example.com/a/CODE123 || echo \"exit $?\")\""));
             assert!(t.contains("--proto '=https'") && !t.contains("--proto =https"), "zsh 下必须加引号");
@@ -383,6 +492,7 @@ mod tests {
                 "CODE123",
                 URL,
                 &BuildInfo { version: "0.3.0".into(), ..Default::default() },
+                &[],
                 10,
             );
             assert!(!dev.contains("git clone") && !dev.contains("rev-parse"), "开发构建不给固定值");
@@ -447,5 +557,88 @@ mod tests {
         assert!(rules(Lang::En).lines().count() <= 16, "{}", rules(Lang::En));
         assert_eq!(Lang::parse("ZH").unwrap(), Lang::Zh);
         assert!(Lang::parse("fr").is_err());
+    }
+
+    /// 测试用的 SHA256SUMS：0.3.0 的 macOS、Linux x86_64、Windows x64，外加一个别的版本的包。
+    fn sums() -> Vec<ReleaseAsset> {
+        parse_sums(&format!(
+            "{}  PassManager-0.3.0-universal-apple-darwin.tar.gz\n{} *PassManager-0.3.0-x86_64-unknown-linux-gnu.tar.gz\n{}  PassManager-0.3.0-x86_64-pc-windows-msvc.zip\n{}  PassManager-0.2.9-aarch64-unknown-linux-gnu.tar.gz\n",
+            "a".repeat(64),
+            "B".repeat(64),
+            "c".repeat(64),
+            "d".repeat(64)
+        ))
+    }
+
+    #[test]
+    fn parse_sums_accepts_only_wellformed_lines() {
+        let v = sums();
+        assert_eq!(v.len(), 4);
+        // `*`（二进制模式）去掉；哈希统一成小写
+        assert_eq!(v[1], ReleaseAsset { name: "PassManager-0.3.0-x86_64-unknown-linux-gnu.tar.gz".into(), sha256: "b".repeat(64) });
+        // 不合法的行跳过：哈希太短、不是十六进制、文件名带路径或空白、没有文件名
+        let bad = format!(
+            "{}  x\nzz{}  y\n{}  ../x\n{}  a b\n{}\n\n",
+            "a".repeat(63),
+            "a".repeat(62),
+            "a".repeat(64),
+            "a".repeat(64),
+            "a".repeat(64)
+        );
+        assert!(parse_sums(&bad).is_empty());
+        assert_eq!(asset_stem("0.3.0", "x86_64-pc-windows-msvc"), "PassManager-0.3.0-x86_64-pc-windows-msvc");
+    }
+
+    #[test]
+    fn release_steps_per_platform() {
+        let r = release_steps(Lang::En, "0.3.0", "v0.3.0", &sums(), URL).unwrap();
+        // 三个平台：下载地址固定到标签，SHA-256 写在命令里
+        for f in [
+            "PassManager-0.3.0-universal-apple-darwin.tar.gz",
+            "PassManager-0.3.0-x86_64-unknown-linux-gnu.tar.gz",
+            "PassManager-0.3.0-x86_64-pc-windows-msvc.zip",
+        ] {
+            assert!(r.contains(&format!("{REPO}/releases/download/v0.3.0/{f}")), "{r}");
+        }
+        assert!(r.contains(&format!("printf '%s  %s\\n' {} \"$f.tar.gz\" | shasum -a 256 -c -", "a".repeat(64))));
+        assert!(r.contains(&format!("{} \"$f.tar.gz\" | sha256sum -c -", "b".repeat(64))));
+        assert!(r.contains(&format!("Hash -ne '{}'", "c".repeat(64))) && r.contains("throw 'SHA-256 mismatch - stop'"));
+        assert_eq!(r.matches(&format!("enroll '{URL}'")).count(), 3);
+        // 别的版本的包不用；没有包的平台不出现
+        assert!(!r.contains("0.2.9") && !r.contains("Linux ARM64") && !r.contains("Windows ARM64"));
+        // 校验失败就停
+        assert!(r.contains("stop and tell the user"));
+        assert!(release_steps(Lang::Zh, "0.3.0", "v0.3.0", &sums(), URL).unwrap().contains("停止并告诉用户"));
+        // 没有这个版本的包：None
+        assert!(release_steps(Lang::En, "0.4.0", "v0.4.0", &sums(), URL).is_none());
+        assert!(release_steps(Lang::En, "0.3.0", "v0.3.0", &[], URL).is_none());
+    }
+
+    #[test]
+    fn setup_text_with_release_packages() {
+        for lang in [Lang::En, Lang::Zh] {
+            // 固定的发布 + SHA256SUMS：第 2 步下载发布包，第 3 步源码构建，第 4 步重启
+            let t = setup_text(lang, "https://pm.example.com", "CODE123", URL, &pinned(), &sums(), 10);
+            assert!(t.contains("releases/download/v0.3.0/PassManager-0.3.0-universal-apple-darwin.tar.gz"), "{t}");
+            assert!(t.contains("\n3. ") && t.contains("\n4. ") && t.contains("git clone --branch v0.3.0"), "{t}");
+            // 不执行下载的脚本（`| shasum`、`| sha256sum` 是校验，不算）
+            let piped_to_sh = t.split("| sh").skip(1).any(|r| r.is_empty() || r.starts_with([' ', '\n', '"']));
+            assert!(!t.contains("irm ") && !t.contains("iex") && !piped_to_sh, "不执行下载的脚本");
+            assert_eq!(t.matches(&format!("enroll '{URL}'")).count(), 4, "三个平台 + 源码构建");
+            // 没有 SHA256SUMS：和以前一样只有 3 步
+            let t = setup_text(lang, "https://pm.example.com", "CODE123", URL, &pinned(), &[], 10);
+            assert!(!t.contains("releases/download") && t.contains("\n3. ") && !t.contains("\n4. "));
+            // 开发构建：没有固定的发布，也不给下载命令
+            let dev = setup_text(
+                lang,
+                "https://pm.example.com",
+                "CODE123",
+                URL,
+                &BuildInfo { version: "0.3.0".into(), ..Default::default() },
+                &sums(),
+                10,
+            );
+            assert!(!dev.contains("releases/download") && !dev.contains("git clone"));
+        }
     }
 }

@@ -108,8 +108,16 @@ machine; revoke the token in the web UI or with `passmanager token revoke <id>` 
 be revoked the same way).
 
 The installer copies its own binary into `/var/lib/passmanager/agent-bin/`; for other platforms pass
-`--agent-bundle <dir>` with the release archives (`PassManager-<version>-<target>.tar.gz`, optionally `SHA256SUMS`); an archive for
-the server's own target never replaces the server's binary. The server never downloads anything at request time.
+`--agent-bundle <dir>` with the release archives (`PassManager-<version>-<target>.tar.gz` / `.zip`) and the release's `SHA256SUMS`
+(required); an archive for the server's own target never replaces the server's binary. The server never downloads anything at
+request time.
+
+`SHA256SUMS` in the agent-bin directory also enables step 2 of the setup text: machines whose curl cannot do X25519MLKEM768
+(macOS, Windows, older Linux) get ready commands that download the release package for their platform from the GitHub release
+page pinned to the server's tag and check the SHA-256 written into the command. To add or update the packages on a running server
+without re-running the installer, download the release assets and `SHA256SUMS` of the server's version into one directory and run,
+as root, `agent-bundle.sh <dir>` (it is in the server package next to `install-server.sh`). Only the packages of the server's own
+version appear in the setup text.
 
 ### 3.1 Importing secrets (server, root)
 

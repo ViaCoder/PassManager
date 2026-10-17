@@ -27,7 +27,7 @@ name="PassManager-$version-lan-$arch-linux"
 stage="$(mktemp -d)"
 trap 'rm -rf "$stage"' EXIT
 mkdir -p "$stage/$name"
-install -m 0755 "$bin" scripts/install-server.sh "$stage/$name/"
+install -m 0755 "$bin" scripts/install-server.sh scripts/agent-bundle.sh "$stage/$name/"
 install -m 0644 README.md README.zh-CN.md CHANGELOG.md CHANGELOG.zh-CN.md LICENSE LICENSE-CONTRIBUTING.md \
   docs/DESIGN.md docs/DESIGN.zh-CN.md "$stage/$name/"
 sed 's|](DEPLOY-LAN.zh-CN.md)|](README-DEPLOY.zh-CN.md)|' docs/DEPLOY-LAN.md > "$stage/$name/README-DEPLOY.md"
