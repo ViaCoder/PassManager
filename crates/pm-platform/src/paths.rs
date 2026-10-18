@@ -257,6 +257,10 @@ pub struct ServerConfig {
     /// 不配置时只自动检测 /dev/tpmrm0。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tpm_socket: Option<String>,
+    /// 可选：本机 tangd 的回环地址（例如 `127.0.0.1:7500`）。配置后网页端口提供 `/tang/`（Clevis 网络绑定加密），
+    /// 访问限制与网页相同（局域网网段与允许列表）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tang: Option<String>,
 }
 
 pub const LETS_ENCRYPT: &str = "https://acme-v02.api.letsencrypt.org/directory";
@@ -292,6 +296,7 @@ impl Default for ServerConfig {
             dns: default_dns(),
             renew_days: default_renew_days(),
             tpm_socket: None,
+            tang: None,
         }
     }
 }
@@ -331,11 +336,23 @@ impl ServerConfig {
         {
             return Err(format!("TPM 套接字路径必须是绝对路径：{t}"));
         }
+        if let Some(t) = &self.tang {
+            parse_tang(t)?;
+        }
         if !(self.dns == "cloudflare" || self.dns.starts_with("challtest:")) {
             return Err(format!("未知的 DNS 方式：{}", self.dns));
         }
         Ok(())
     }
+}
+
+/// 解析 tangd 地址：只接受本机回环（`127.0.0.1:端口` 或 `[::1]:端口`），转发的明文请求不离开本机。
+pub fn parse_tang(s: &str) -> Result<std::net::SocketAddr, String> {
+    let a: std::net::SocketAddr = s.trim().parse().map_err(|_| format!("tangd 地址无效（应为 127.0.0.1:端口）：{s}"))?;
+    if !a.ip().is_loopback() || a.port() == 0 {
+        return Err(format!("tangd 地址必须是本机回环地址与非零端口：{s}"));
+    }
+    Ok(a)
 }
 
 /// 解析 IPv4 CIDR（`a.b.c.d/n`，或单个地址视为 /32）。
@@ -553,6 +570,19 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn tang_address_is_loopback_only() {
+        // 回环地址与端口可用；其他地址、0 端口、没有端口、垃圾都是配置错误。
+        assert_eq!(parse_tang("127.0.0.1:7500").unwrap().port(), 7500);
+        assert!(parse_tang(" [::1]:7500 ").is_ok());
+        for bad in ["192.0.2.1:7500", "0.0.0.0:7500", "127.0.0.1:0", "127.0.0.1", "localhost:7500", ""] {
+            assert!(parse_tang(bad).is_err(), "{bad}");
+        }
+        let c = ServerConfig { domain: "pm.example.com".into(), lan: vec!["198.51.100.0/24".into()], ..Default::default() };
+        assert!(ServerConfig { tang: Some("127.0.0.1:7500".into()), ..c.clone() }.validate().is_ok());
+        assert!(ServerConfig { tang: Some("198.51.100.5:7500".into()), ..c }.validate().is_err());
+    }
 
     #[test]
     fn allowlist_parsing_and_source_check() {

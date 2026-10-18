@@ -12,6 +12,7 @@
 
 pub mod bootstrap;
 pub mod front;
+pub mod tang;
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -229,6 +230,8 @@ pub struct WebConfig {
     pub port: u16,
     /// 一键接入用的 Agent 程序目录（`PassManager-<目标>`）；None 表示不提供一键接入。
     pub agent_bin_dir: Option<std::path::PathBuf>,
+    /// 本机 tangd 的回环地址；Some 时提供 `/tang/`（见 [`tang`]）。
+    pub tang: Option<std::net::SocketAddr>,
 }
 
 impl WebConfig {
@@ -398,7 +401,8 @@ pub fn router(st: St) -> Router {
             }),
         );
     }
-    r.route("/", get(dashboard))
+    r = r
+        .route("/", get(dashboard))
         .route("/login", get(login_page))
         .route("/l/{token}", get(link_page).post(link_post))
         .route("/logout", post(logout))
@@ -417,8 +421,16 @@ pub fn router(st: St) -> Router {
         .route("/settings", get(settings).post(settings_post))
         .route("/security", get(security))
         .route("/a/{code}", get(boot_script))
-        .route("/a/{code}/bin/{target}", get(boot_bin))
-        .fallback(|| async { (StatusCode::NOT_FOUND, "not found") })
+        .route("/a/{code}/bin/{target}", get(boot_bin));
+    // Tang（Clevis 网络绑定加密）：只在配置了本机 tangd 时提供。
+    if st.cfg.tang.is_some() {
+        r = r
+            .route("/tang/adv", get(tang::adv))
+            .route("/tang/adv/", get(tang::adv))
+            .route("/tang/adv/{thp}", get(tang::adv_thp))
+            .route("/tang/rec/{kid}", post(tang::rec).layer(axum::extract::DefaultBodyLimit::max(tang::BODY_LIMIT)));
+    }
+    r.fallback(|| async { (StatusCode::NOT_FOUND, "not found") })
         .layer(axum::extract::DefaultBodyLimit::max(FORM_LIMIT))
         .layer(axum::middleware::from_fn_with_state(st.clone(), request_guard))
         .layer(axum::middleware::from_fn(security_headers))

@@ -4,6 +4,20 @@ English | [简体中文](CHANGELOG.zh-CN.md)
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.3.11-rc.5] - 2026-10-18
+
+### Added
+
+- **Network-bound encryption (Clevis + Tang).** After `passmanager init --tang 127.0.0.1:<port>`, the web port forwards the two Clevis requests under `/tang/` (`GET /tang/adv[/<thp>]`, `POST /tang/rec/<kid>`) unchanged to tangd (Debian's `tang` package) on the loopback interface. Other machines bind a key to this server with `clevis encrypt tang '{"url":"https://pm.example.com:8120/tang","thp":"<thumbprint>"}'`: a disk image cannot be unlocked away from a network that reaches the server, without a TPM.
+  - **Only mature implementations.** tangd holds the keys and does the exchange (McCallum-Relyea, so the server never sees the client's key); PassManager is only the HTTPS front.
+  - **The same access rules as the web pages:** the source must be in the LAN ranges or the allowlist and the Host must be this site; the transport is TLS 1.3 with the hybrid post-quantum group.
+  - **Only what belongs to Tang is forwarded:** thumbprints and key IDs must use tangd's own character set, an exchange request must be `application/jwk+json` and at most 8 KiB, and only tangd's two reply types are passed back (anything else is a 502). The tangd address must be a loopback address (otherwise a configuration error, exit code 78).
+  - **Known limit:** Tang's exchange uses the P-521 elliptic curve and is not post-quantum by itself; the transport to the server is.
+
+### Changed
+
+- **`passmanager init --allow` says that the firewall does not change with it.** The allowlist firewall rules are written by `install-server.sh`; running only `init` updates the service's own source check, while the firewall keeps the old list (new sources time out).
+
 ## [0.3.11-rc.4] - 2026-10-18
 
 ### Added

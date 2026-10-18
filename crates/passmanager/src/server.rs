@@ -117,6 +117,13 @@ fn init_inner(o: &InitOpts) -> Result<(), String> {
     };
     let allow = if cfg.allow.is_empty() { String::new() } else { format!("，以及 {}", cfg.allow.join(", ")) };
     println!("== 初始化 PassManager 服务器（{}，{ports}，只允许局域网 {}{allow}）==", cfg.domain, cfg.lan.join(", "));
+    if let Some(t) = &cfg.tang {
+        println!("Tang：网页端口的 /tang/ 转发到本机 tangd {t}");
+    }
+    // 防火墙（inet passmanager 表）由 install-server.sh 生成，init 只改应用内的来源检查。
+    if o.allow.is_some() && l.mode == Mode::System {
+        println!("注意：允许列表只在应用内生效；防火墙请用同样的 --allow 重新运行 install-server.sh（它整体替换 inet passmanager 表）");
+    }
 
     std::fs::create_dir_all(&l.data_dir).map_err(|e| e.to_string())?;
     if l.mode == Mode::System {

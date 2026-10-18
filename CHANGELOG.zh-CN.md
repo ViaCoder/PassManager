@@ -4,6 +4,20 @@
 
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.3.11-rc.5] - 2026-10-18
+
+### 新增
+
+- **网络绑定加密（Clevis + Tang）。** `passmanager init --tang 127.0.0.1:<端口>` 之后，网页端口在 `/tang/` 上把 Clevis 的两种请求（`GET /tang/adv[/<thp>]`、`POST /tang/rec/<kid>`）原样转给本机回环上的 tangd（Debian 的 `tang` 包）。其他机器用 `clevis encrypt tang '{"url":"https://pm.example.com:8120/tang","thp":"<指纹>"}'` 把密钥绑定到这台服务器：磁盘镜像离开能访问服务器的网络就解不开，不需要 TPM。
+  - **只用成熟的实现。** 密钥与交换由 tangd 完成（McCallum-Relyea 交换，服务器看不到客户端的密钥）；PassManager 只做 HTTPS 入口。
+  - **访问限制与网页相同：** 来源必须在局域网网段或允许列表，Host 必须是本站；传输是 TLS 1.3 + 混合后量子组。
+  - **只转发该转发的：** 指纹与密钥 ID 只接受 tangd 自己的字符集，交换请求必须是 `application/jwk+json` 且不超过 8 KiB，tangd 的回答只接受它的两种类型（其他一律 502）；tangd 地址只能是回环地址（否则配置错误，退出码 78）。
+  - **已知限制：** Tang 的交换基于 P-521 椭圆曲线，本身不是后量子的；后量子的是到达服务器的传输。
+
+### 变更
+
+- **`passmanager init --allow` 会提醒防火墙不随之改变。** 允许列表的防火墙规则由 `install-server.sh` 生成；只运行 `init` 时，应用内的来源检查已经更新，防火墙仍是旧的列表（新加的来源连接超时）。
+
 ## [0.3.11-rc.4] - 2026-10-18
 
 ### 新增

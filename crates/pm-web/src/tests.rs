@@ -192,7 +192,7 @@ fn state() -> (St, Arc<Mock>) {
     let st = AppState::new(
         mock.clone(),
         LoginLinks::new(),
-        WebConfig { domain: "pm.test".into(), port: 443, agent_bin_dir: Some(agent_bin_dir()) },
+        WebConfig { domain: "pm.test".into(), port: 443, agent_bin_dir: Some(agent_bin_dir()), tang: None },
     );
     (st, mock)
 }
@@ -276,7 +276,7 @@ async fn non_default_port_in_host_origin_and_urls() {
     for bad in ["pm.example.com", "pm.example.com:443", "pm.example.com:8443", "pm.example.com:81210", "evil.example:8121"] {
         assert!(!host_ok("pm.example.com", 8121, bad), "{bad}");
     }
-    let cfg = WebConfig { domain: "pm.example.com".into(), port: 8121, agent_bin_dir: None };
+    let cfg = WebConfig { domain: "pm.example.com".into(), port: 8121, agent_bin_dir: None, tang: None };
     assert_eq!(cfg.origin(), "https://pm.example.com:8121");
     assert_eq!(WebConfig { port: 443, ..cfg }.origin(), "https://pm.example.com");
     let o = "https://pm.example.com:8121".to_string();
@@ -297,8 +297,11 @@ async fn non_default_port_in_host_origin_and_urls() {
     }
     // 一键接入脚本：下载地址带端口。
     let mock = Arc::new(Mock::default());
-    let st =
-        AppState::new(mock, LoginLinks::new(), WebConfig { domain: "pm.test".into(), port: 8121, agent_bin_dir: Some(agent_bin_dir()) });
+    let st = AppState::new(
+        mock,
+        LoginLinks::new(),
+        WebConfig { domain: "pm.test".into(), port: 8121, agent_bin_dir: Some(agent_bin_dir()), tang: None },
+    );
     let b = axum::http::Request::builder().method(Method::GET).uri(format!("/a/{BOOT_CODE}")).header("host", "pm.test:8121");
     let r = router(st.clone()).oneshot(b.body(Body::empty()).unwrap()).await.unwrap();
     assert_eq!(r.status(), StatusCode::OK);
@@ -827,7 +830,8 @@ async fn bootstrap_routes() {
     }
     assert_eq!(last, StatusCode::TOO_MANY_REQUESTS);
     // 没有配置程序目录：一律 404。
-    let st3 = AppState::new(mock.clone(), LoginLinks::new(), WebConfig { domain: "pm.test".into(), port: 443, agent_bin_dir: None });
+    let st3 =
+        AppState::new(mock.clone(), LoginLinks::new(), WebConfig { domain: "pm.test".into(), port: 443, agent_bin_dir: None, tang: None });
     assert_eq!(boot(&st3, Method::GET, &format!("/a/{BOOT_CODE}")).await.0, StatusCode::NOT_FOUND);
 }
 
@@ -1052,7 +1056,8 @@ async fn referrer_policy_is_same_origin_and_browser_posts_work() {
 
     // 真实浏览器在 same-origin 策略下发送的同源 POST（非 443 端口）：登录确认、保存条目、锁定都成功。
     let mock = Arc::new(Mock::default());
-    let st = AppState::new(mock.clone(), LoginLinks::new(), WebConfig { domain: "pm.test".into(), port: 8121, agent_bin_dir: None });
+    let st =
+        AppState::new(mock.clone(), LoginLinks::new(), WebConfig { domain: "pm.test".into(), port: 8121, agent_bin_dir: None, tang: None });
     let browser = [
         ("host", "pm.test:8121"),
         ("origin", "https://pm.test:8121"),
@@ -1179,4 +1184,91 @@ async fn static_assets_are_versioned_by_content_hash() {
         let req = axum::http::Request::builder().uri(format!("{path}?v={cur}")).header("host", "evil.example").body(Body::empty()).unwrap();
         assert_eq!(router(st.clone()).oneshot(req).await.unwrap().status(), StatusCode::FORBIDDEN, "Host 校验");
     }
+}
+
+/// 替身 tangd：每个连接读到 EOF（与真的 tangd 一样）、记下请求、回答 `reply`。
+async fn fake_tangd(reply: &'static [u8]) -> (std::net::SocketAddr, Arc<Mutex<Vec<String>>>) {
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = l.local_addr().unwrap();
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let s2 = seen.clone();
+    tokio::spawn(async move {
+        while let Ok((mut c, _)) = l.accept().await {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let mut buf = Vec::new();
+            let _ = c.read_to_end(&mut buf).await;
+            s2.lock().unwrap().push(String::from_utf8_lossy(&buf).into_owned());
+            let _ = c.write_all(reply).await;
+        }
+    });
+    (addr, seen)
+}
+
+fn tang_state(up: Option<std::net::SocketAddr>) -> St {
+    AppState::new(
+        Arc::new(Mock::default()),
+        LoginLinks::new(),
+        WebConfig { domain: "pm.test".into(), port: 8120, agent_bin_dir: None, tang: up },
+    )
+}
+
+async fn tang_call(st: &St, m: Method, uri: &str, host: &str, ct: Option<&str>, body: &[u8]) -> (StatusCode, String, String) {
+    let mut b = axum::http::Request::builder().method(m).uri(uri).header("host", host);
+    if let Some(ct) = ct {
+        b = b.header("content-type", ct);
+    }
+    let r = router(st.clone()).oneshot(b.body(Body::from(body.to_vec())).unwrap()).await.unwrap();
+    let ct = r.headers().get("content-type").and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
+    let st = r.status();
+    (st, ct, String::from_utf8_lossy(&r.into_body().collect().await.unwrap().to_bytes()).into_owned())
+}
+
+#[tokio::test]
+async fn tang_forwards_adv_and_rec_only() {
+    let (up, seen) = fake_tangd(b"HTTP/1.1 200 OK\r\nContent-Type: application/jose+json\r\nContent-Length: 7\r\n\r\n{\"a\":1}").await;
+    let st = tang_state(Some(up));
+    // 广告：/tang/adv、/tang/adv/、/tang/adv/{thp}，路径去掉 /tang 前缀后原样转给 tangd。
+    for (uri, want) in [("/tang/adv", "GET /adv "), ("/tang/adv/", "GET /adv "), ("/tang/adv/Thp_-1", "GET /adv/Thp_-1 ")] {
+        let (s, ct, b) = tang_call(&st, Method::GET, uri, "pm.test:8120", None, b"").await;
+        assert_eq!((s, ct.as_str(), b.as_str()), (StatusCode::OK, "application/jose+json", "{\"a\":1}"), "{uri}");
+        assert!(seen.lock().unwrap().last().unwrap().starts_with(want), "{uri}");
+    }
+    // 交换：正文与类型原样转发。
+    let (s, _, _) = tang_call(&st, Method::POST, "/tang/rec/kid1", "pm.test:8120", Some("application/jwk+json"), b"{\"kty\":\"EC\"}").await;
+    assert_eq!(s, StatusCode::OK);
+    let last = seen.lock().unwrap().last().unwrap().clone();
+    assert!(last.starts_with("POST /rec/kid1 HTTP/1.1\r\n") && last.ends_with("\r\n\r\n{\"kty\":\"EC\"}"), "{last}");
+    let n = seen.lock().unwrap().len();
+    // 本站先拒绝的请求不到达 tangd：类型不对、正文过大、坏的 ID、错误的 Host、其他方法与路径。
+    let big = vec![b'x'; 9 << 10];
+    for (m, uri, host, ct, body, want) in [
+        (Method::POST, "/tang/rec/kid1", "pm.test:8120", Some("text/plain"), &b"{}"[..], StatusCode::UNSUPPORTED_MEDIA_TYPE),
+        (Method::POST, "/tang/rec/kid1", "pm.test:8120", Some("application/jwk+json"), &big[..], StatusCode::PAYLOAD_TOO_LARGE),
+        (Method::POST, "/tang/rec/a.b", "pm.test:8120", Some("application/jwk+json"), b"{}", StatusCode::NOT_FOUND),
+        (Method::GET, "/tang/adv/a%2Fb", "pm.test:8120", None, b"", StatusCode::NOT_FOUND),
+        (Method::GET, "/tang/adv", "evil.test:8120", None, b"", StatusCode::FORBIDDEN),
+        (Method::GET, "/tang/rec/kid1", "pm.test:8120", None, b"", StatusCode::METHOD_NOT_ALLOWED),
+        (Method::GET, "/tang/other", "pm.test:8120", None, b"", StatusCode::NOT_FOUND),
+    ] {
+        let (s, _, _) = tang_call(&st, m.clone(), uri, host, ct, body).await;
+        assert_eq!(s, want, "{m} {uri} {host}");
+    }
+    assert_eq!(seen.lock().unwrap().len(), n, "被拒绝的请求没有转给 tangd");
+}
+
+#[tokio::test]
+async fn tang_bad_upstream_is_502_and_unconfigured_is_404() {
+    // tangd 回了别的类型、坏的回答、或者不可达：502，不转发正文。
+    for reply in [&b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n<x>"[..], b"garbage"] {
+        let (up, _) = fake_tangd(reply).await;
+        let (s, _, b) = tang_call(&tang_state(Some(up)), Method::GET, "/tang/adv", "pm.test:8120", None, b"").await;
+        assert_eq!((s, b.as_str()), (StatusCode::BAD_GATEWAY, "tang unavailable"));
+    }
+    let closed = { tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap().local_addr().unwrap() };
+    assert_eq!(tang_call(&tang_state(Some(closed)), Method::GET, "/tang/adv", "pm.test:8120", None, b"").await.0, StatusCode::BAD_GATEWAY);
+    // tangd 的拒绝只转发状态码。
+    let (up, _) = fake_tangd(b"HTTP/1.1 404 Not Found\r\n\r\n").await;
+    assert_eq!(tang_call(&tang_state(Some(up)), Method::GET, "/tang/adv/x", "pm.test:8120", None, b"").await.0, StatusCode::NOT_FOUND);
+    // 没有配置 tangd：没有 /tang/ 路由。
+    assert_eq!(tang_call(&tang_state(None), Method::GET, "/tang/adv", "pm.test:8120", None, b"").await.0, StatusCode::NOT_FOUND);
 }

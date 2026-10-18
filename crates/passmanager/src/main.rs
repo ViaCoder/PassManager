@@ -229,6 +229,9 @@ enum Cmd {
         /// 可选：swtpm 数据套接字（Unix 套接字，存在时优先于自动检测的 /dev/tpmrm0；空字符串取消配置）
         #[arg(long)]
         tpm_socket: Option<String>,
+        /// 可选：本机 tangd 的回环地址（如 127.0.0.1:7500）；网页端口上提供 /tang/ 给 Clevis（网络绑定加密），来源限制与网页相同；空字符串取消
+        #[arg(long)]
+        tang: Option<String>,
         /// 只写配置，不启动服务
         #[arg(long)]
         no_start: bool,
@@ -545,6 +548,7 @@ fn main() -> ExitCode {
             acme_root_pem,
             dns,
             tpm_socket,
+            tang,
             no_start,
         }) => server::init(server::InitOpts {
             domain,
@@ -558,6 +562,7 @@ fn main() -> ExitCode {
             acme_root_pem,
             dns,
             tpm_socket,
+            tang,
             cf_token_stdin,
             skip_acme,
             no_start,

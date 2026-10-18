@@ -19,6 +19,8 @@ pub struct InitOpts {
     pub acme_root_pem: Option<PathBuf>,
     pub dns: Option<String>,
     pub tpm_socket: Option<String>,
+    /// 本机 tangd 的回环地址（`/tang/`）。Some(空) 表示取消；None 表示不改。
+    pub tang: Option<String>,
     pub cf_token_stdin: bool,
     pub skip_acme: bool,
     pub no_start: bool,
@@ -75,6 +77,10 @@ pub fn merge_config(prev: Option<ServerConfig>, o: &InitOpts) -> ServerConfig {
         // 空字符串表示取消配置（只自动检测 /dev/tpmrm0）。
         c.tpm_socket = Some(s.trim().to_string()).filter(|s| !s.is_empty());
     }
+    if let Some(t) = &o.tang {
+        // 空字符串表示取消（不再提供 /tang/）。
+        c.tang = Some(t.trim().to_string()).filter(|t| !t.is_empty());
+    }
     c
 }
 
@@ -118,6 +124,19 @@ mod tests {
             &InitOpts { tpm_socket: Some(String::new()), ..Default::default() },
         );
         assert!(cleared.tpm_socket.is_none());
+    }
+
+    #[test]
+    fn tang_merge_sets_keeps_and_clears() {
+        let base = merge_config(
+            None,
+            &InitOpts { domain: Some("pm.example.com".into()), lan: vec!["198.51.100.0/24".into()], ..Default::default() },
+        );
+        let t = merge_config(Some(base), &InitOpts { tang: Some(" 127.0.0.1:7500 ".into()), ..Default::default() });
+        assert_eq!(t.tang.as_deref(), Some("127.0.0.1:7500"));
+        assert!(t.validate().is_ok());
+        assert_eq!(merge_config(Some(t.clone()), &InitOpts::default()).tang, t.tang, "不给 --tang 时保留");
+        assert!(merge_config(Some(t), &InitOpts { tang: Some(String::new()), ..Default::default() }).tang.is_none(), "空值取消");
     }
 
     #[test]
