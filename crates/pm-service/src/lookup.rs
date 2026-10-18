@@ -330,9 +330,60 @@ pub fn lookup(payload: &Payload, target: &str, use_: Option<&str>) -> Result<Loo
     }
 }
 
+/// 是不是 Tang 的说明请求：目标写 `tang`、用途写 `tang`，或目标是本服务器的 `/tang` 地址（`origin` 是本服务器网页地址，
+/// 非服务器模式为 None）。其他主机的 `/tang` 地址不算：那不是本服务器的 Tang。
+pub fn is_tang(target: &str, use_: Option<&str>, origin: Option<&str>) -> bool {
+    let t = target.trim().to_ascii_lowercase();
+    let own = origin.is_some_and(|o| {
+        let base = format!("{}/tang", o.to_ascii_lowercase());
+        t == base || t.starts_with(&format!("{base}/"))
+    });
+    t == "tang" || own || use_.is_some_and(|u| u.trim().eq_ignore_ascii_case("tang"))
+}
+
+/// `lookup tang` 的结果：没有凭据，`how` 是填好本服务器地址与 Tang 签名密钥指纹的步骤。
+pub fn tang_view(origin: &str, thps: &[String]) -> LookupView {
+    LookupView {
+        target: format!("{origin}/tang"),
+        use_: "tang".into(),
+        credentials: vec![],
+        fields: vec![],
+        how: pm_proto::agent_text::tang_how(origin, thps),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tang_targets() {
+        let o = Some("https://pm.example.com:8120");
+        for t in ["tang", " TANG ", "https://pm.example.com:8120/tang", "https://PM.example.com:8120/tang/adv"] {
+            assert!(is_tang(t, None, o), "{t}");
+        }
+        assert!(is_tang("anything", Some("tang"), None), "用途写 tang");
+        assert!(is_tang("tang", None, None), "非服务器模式也认出来（返回 NO_TANG）");
+        // 其他主机或端口的 /tang、只是前缀相同的路径、普通目标：不是。
+        for t in [
+            "https://other.example.com/tang",
+            "https://pm.example.com:8121/tang",
+            "https://pm.example.com:8120/tangx",
+            "tangd",
+            "root@tang",
+        ] {
+            assert!(!is_tang(t, None, o), "{t}");
+        }
+        assert!(!is_tang("https://pm.example.com:8120/tang", Some("http"), None), "非服务器模式不认 URL");
+    }
+
+    #[test]
+    fn tang_view_has_no_credentials() {
+        let v = tang_view("https://pm.example.com:8120", &["thpA".into()]);
+        assert_eq!((v.target.as_str(), v.use_.as_str()), ("https://pm.example.com:8120/tang", "tang"));
+        assert!(v.credentials.is_empty() && v.fields.is_empty());
+        assert!(v.how.contains(r#""thp":"thpA""#));
+    }
     use pm_vault::Field;
     use zeroize::Zeroizing;
 

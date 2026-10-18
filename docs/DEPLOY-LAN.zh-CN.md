@@ -191,6 +191,36 @@ passmanager reseal                                           # L2 → L3（会�
 效果与代价：磁盘镜像、快照、备份离开这份 TPM 状态就解不开；运行中的系统里的 root 仍然能解封；
 不绑定 PCR；**TPM 状态丢失、被清除或迁移到别的主机后，密码库永久无法打开（没有恢复途径）。**
 
+### 4.1 网络绑定加密（Clevis + Tang）
+
+没有 TPM 的其他机器可以把密钥绑定到这台服务器：Debian 的 `tang`（服务器）与 `clevis`（客户端）完成密钥与交换，
+PassManager 只在网页端口上提供 HTTPS 入口 `/tang/`（来源限制与网页相同，TLS 1.3 + 混合后量子组）。
+
+```sh
+# 服务器（root）。先写监听地址再装包：安装时 tangd.socket 会立即启动（否则先监听 80）。
+mkdir -p /etc/systemd/system/tangd.socket.d
+printf '[Socket]\nListenStream=\nListenStream=127.0.0.1:7500\n' > /etc/systemd/system/tangd.socket.d/loopback.conf
+apt-get install tang
+systemctl daemon-reload && systemctl restart tangd.socket
+curl -sf -o /dev/null http://127.0.0.1:7500/adv     # 第一次请求时 tangd 生成签名与交换密钥
+tang-show-keys 7500                                 # 签名密钥指纹（thp），给客户端用
+passmanager init --tang 127.0.0.1:7500              # 网页端口提供 /tang/（会重启服务）
+
+# 客户端（需要 OpenSSL 3.5，例如 Debian 13；源地址须在局域网网段或允许列表里）
+echo test | clevis encrypt tang '{"url":"https://pm.example.com:8120/tang","thp":"<指纹>"}' | clevis decrypt
+```
+
+- 远程主机（Agent）：只能访问 PassManager 的 Agent 调用 `lookup tang`（MCP，或 `passmanager lookup tang`）。
+  服务器当场从 tangd 读取当前签名密钥，返回 pin（地址与指纹，经已固定指纹的 Agent 通道送达）和远程主机上的步骤：
+  安装与连通检查、加密并核对、开机解密到 `/run` 并等待本服务器的单元、把原路径换成指向该副本、撤销。
+  没有配置 `--tang` 时返回 `NO_TANG`；tangd 无应答时返回 `UPSTREAM_ERROR`。
+- 允许一台远程主机：把它的地址加入站点文件的 `ALLOW_IPS`，重新运行
+  `./install-server.sh --site-file site.local.env --skip-acme`（防火墙与服务一起更新）。
+  再移除后，那台主机不能再解密；已在它 `/run` 里的副本保留到它重启。
+- Tang 的交换（P-521 上的 McCallum-Relyea）本身不是后量子的；后量子的是到服务器的传输。
+- 服务器不可达时，绑定的密钥解不开：依赖它开机的机器会等待。`/var/lib/tang` 里的密钥丢失后，所有绑定都无法解开，
+  请与 PassManager 的数据一起备份（快照）。
+
 ## 5. 故障与恢复
 
 - 退出码：78 = 配置错误（不重启，查看 `journalctl -u passmanager`）；75 = 暂时性故障（TPM 还没出现、端口被占用），

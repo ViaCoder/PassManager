@@ -1272,3 +1272,27 @@ async fn tang_bad_upstream_is_502_and_unconfigured_is_404() {
     // 没有配置 tangd：没有 /tang/ 路由。
     assert_eq!(tang_call(&tang_state(None), Method::GET, "/tang/adv", "pm.test:8120", None, b"").await.0, StatusCode::NOT_FOUND);
 }
+
+#[tokio::test]
+async fn tang_thumbprints_from_tangd() {
+    use base64::Engine;
+    // 广告里一个签名密钥（RFC 7638 3.1 的 RSA 例子）和一个交换密钥：只返回签名密钥的指纹。
+    let n = "0vx7agoebGcQSuuPiLJXZptN9nndrQmbXEps2aiAFbWhM78LhWx4cbbfAAtVT86zwu1RK7aPFFxuhDR1L6tSoc_BJECPebWKRXjBZCiFV4n3oknjhMstn64tZ_2W-5JsGY4Hc5n9yBXArwl93lqt7_RN5w6Cf0h4QyQ5v-65YGjQR0_FDW2QvzqY368QQMicAtaSqzs8KJZgnYb9c7d0zgdAZHzu6qMQvRL5hajrn1n91CbOpbISD08qNLyrdkt-bFTWhAI4vMQFh6WeZu0fM4lFd2NcRwr3XPksINHaQ-G_xBniIqbw0Ls1jF44-csFCur-kEgU8awapJzKnqDKgw";
+    let keys = serde_json::json!({"keys": [
+        {"kty": "EC", "crv": "P-521", "x": "eA", "y": "eQ", "key_ops": ["deriveKey"]},
+        {"kty": "RSA", "e": "AQAB", "n": n, "key_ops": ["verify"]},
+    ]});
+    let p = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(keys.to_string());
+    let body = serde_json::json!({"payload": p, "protected": "e30", "signature": "AA"}).to_string();
+    let reply = format!("HTTP/1.1 200 OK\r\nContent-Type: application/jose+json\r\nContent-Length: {}\r\n\r\n{body}", body.len());
+    let (up, seen) = fake_tangd(Box::leak(reply.into_bytes().into_boxed_slice())).await;
+    assert_eq!(tang::thumbprints(up).await.unwrap(), vec!["NzbLsXh8uDCcd-6MNwXF4W_7noWXFZAfHkxZsRGC9Xs"]);
+    assert!(seen.lock().unwrap()[0].starts_with("GET /adv HTTP/1.1\r\n"), "向 tangd 取的是 /adv");
+    // 别的类型、tangd 的拒绝、不可达：都是错误。
+    for bad in [&b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n<x>"[..], b"HTTP/1.1 404 Not Found\r\n\r\n"] {
+        let (up, _) = fake_tangd(bad).await;
+        assert!(tang::thumbprints(up).await.is_err());
+    }
+    let closed = { tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap().local_addr().unwrap() };
+    assert!(tang::thumbprints(closed).await.unwrap_err().starts_with("tangd unavailable"));
+}

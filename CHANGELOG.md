@@ -4,6 +4,19 @@ English | [简体中文](CHANGELOG.zh-CN.md)
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.3.11-rc.6] - 2026-10-18
+
+### Added
+
+- **`lookup tang`: agents learn this server's Tang from the server itself.** An agent that can reach only PassManager, with no local notes, calls `lookup tang` (or this server's `https://…/tang` URL). The server reads tangd's current signing key, computes its thumbprint (RFC 7638, the same value as `tang-show-keys`) and returns the pin together with tested steps for a remote host: check OpenSSL and reachability, `clevis encrypt` and verify by SHA-256, a systemd unit that decrypts into `/run` at boot and waits until the server answers, switch the original path to that copy (owner and mode kept), and undo. Only the server needs the upgrade; older clients get the same answer.
+  - The thumbprint arrives over the pinned agent channel, so the client does not have to trust a first download.
+  - Without `--tang` the answer is `NO_TANG`; when tangd does not answer, `UPSTREAM_ERROR`.
+- **Agent rules v6:** one line points to `lookup tang`, and the MCP `lookup` description mentions it. Run `passmanager show --rules --write` after upgrading.
+
+### Documentation
+
+- `docs/DEPLOY-LAN.md` 4.1: setting up tangd behind `/tang/`, allowing and removing a remote host, and what agents get from `lookup tang`.
+
 ## [0.3.11-rc.5] - 2026-10-18
 
 ### Added

@@ -26,7 +26,7 @@ fn tools() -> Value {
         {
             "name": "lookup",
             "title": "Find credential",
-            "description": "Call this first. Finds the stored credential for one target and returns `how`: a ready-to-copy http, ssh or scp call with the right placeholders. target is the URL, user@host or host you will use (or {{name}} when the user names a credential). Example: {\"target\":\"https://api.github.com/user\"}",
+            "description": "Call this first. Finds the stored credential for one target and returns `how`: a ready-to-copy http, ssh or scp call with the right placeholders. target is the URL, user@host or host you will use (or {{name}} when the user names a credential; or tang to keep a secret file on a remote host encrypted at rest). Example: {\"target\":\"https://api.github.com/user\"}",
             "inputSchema": {
                 "type": "object",
                 "properties": {

@@ -629,6 +629,19 @@ impl Shared {
         }
     }
 
+    /// `lookup tang`：取本机 tangd 当前签名密钥的指纹，返回填好本服务器地址与指纹的步骤。
+    async fn tang_lookup(&self) -> R {
+        let on = self.online.as_ref();
+        let up = on.and_then(|o| o.cfg.tang.as_deref()).and_then(|t| pm_platform::paths::parse_tang(t).ok());
+        let (Some(on), Some(up)) = (on, up) else {
+            return Err(err("NO_TANG", "this PassManager server does not offer Tang (network-bound encryption)"));
+        };
+        let thps = pm_web::tang::thumbprints(up)
+            .await
+            .map_err(|e| err("UPSTREAM_ERROR", format!("Tang on the PassManager server is not working: {e}")))?;
+        ok(lookup::tang_view(&on.web_origin(), &thps))
+    }
+
     async fn handle(self: &Arc<Self>, req: Request) -> R {
         self.touch().await;
         match req {
@@ -666,6 +679,12 @@ impl Shared {
                  where the secret goes; PassManager picks the credential for the target host. Ask the user to upgrade this \
                  PassManager client (0.3.9 adds lookup).",
             )),
+            // Tang 的说明不涉及密码库：只要本服务器配置了 tangd。
+            Request::Lookup { target, use_ }
+                if lookup::is_tang(&target, use_.as_deref(), self.online.as_ref().map(|o| o.web_origin()).as_deref()) =>
+            {
+                self.tang_lookup().await
+            }
             Request::Lookup { target, use_ } => {
                 let inner = self.inner.lock().await;
                 let v = inner.vault.as_ref().ok_or_else(|| self.locked_err())?;

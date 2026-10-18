@@ -178,6 +178,43 @@ to the service's `SupplementaryGroups`; permissions are never changed. `journalc
 ECONNREFUSED apart if the TPM still cannot be reached.
 Losing or clearing the TPM state, or moving to another host, makes the vault permanently unreadable — there is no recovery.
 
+### 4.1 Network-bound encryption (Clevis + Tang)
+
+Other machines without a TPM can bind keys to this server: Debian's `tang` (server) and `clevis`
+(client) hold the keys and do the exchange, and PassManager is only the HTTPS front at `/tang/` on
+the web port (the same source rules as the web pages, TLS 1.3 with the hybrid post-quantum group).
+
+```sh
+# Server (root). The listen address first: installing the package starts tangd.socket at once
+# (on port 80 otherwise).
+mkdir -p /etc/systemd/system/tangd.socket.d
+printf '[Socket]\nListenStream=\nListenStream=127.0.0.1:7500\n' > /etc/systemd/system/tangd.socket.d/loopback.conf
+apt-get install tang
+systemctl daemon-reload && systemctl restart tangd.socket
+curl -sf -o /dev/null http://127.0.0.1:7500/adv     # tangd makes its signing and exchange keys at the first request
+tang-show-keys 7500                                 # the signing key's thumbprint (thp) for the clients
+passmanager init --tang 127.0.0.1:7500              # /tang/ on the web port (restarts the service)
+
+# Client (needs OpenSSL 3.5, e.g. Debian 13; its source must be in the LAN ranges or the allowlist)
+echo test | clevis encrypt tang '{"url":"https://pm.example.com:8120/tang","thp":"<thumbprint>"}' | clevis decrypt
+```
+
+- Remote hosts (agents): an agent that can reach only PassManager calls `lookup tang` (MCP, or
+  `passmanager lookup tang`). The server reads the current signing key from tangd and returns its pin
+  (URL and thumbprint, delivered over the pinned agent channel) with the steps for a remote host:
+  install and reachability checks, encrypt and verify, a boot unit that decrypts into `/run` and waits
+  for this server, switching the original path to that copy, and undo. Without `--tang` the answer is
+  `NO_TANG`; when tangd does not answer, `UPSTREAM_ERROR`.
+- Allowing a remote host: add its address to `ALLOW_IPS` in the site file and re-run
+  `./install-server.sh --site-file site.local.env --skip-acme` (firewall and service together).
+  Removing it again stops new decryptions from that host; a copy already in its `/run` stays until it
+  reboots.
+- Tang's exchange (McCallum-Relyea over P-521) is not post-quantum by itself; the transport to the
+  server is.
+- While the server cannot be reached, bound keys do not decrypt: machines that need it at boot wait.
+  Losing the keys in `/var/lib/tang` makes every binding undecryptable: back them up (snapshot)
+  with PassManager's data.
+
 ## 5. Failures
 
 Exit code 78 = configuration error (no restart); 75 = transient (retried). All files are written atomically and a damaged vault

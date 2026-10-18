@@ -4,6 +4,19 @@
 
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.3.11-rc.6] - 2026-10-18
+
+### 新增
+
+- **`lookup tang`：Agent 从服务器本身得知本服务器的 Tang 用法。** 只能访问 PassManager、没有本地笔记的 Agent 调用 `lookup tang`（或本服务器的 `https://…/tang` 地址）。服务器当场读取 tangd 当前的签名密钥，计算指纹（RFC 7638，与 `tang-show-keys` 相同），返回 pin 与远程主机上经过实测的步骤：检查 OpenSSL 与连通、`clevis encrypt` 并用 SHA-256 核对、开机把文件解密到 `/run` 并等待服务器应答的 systemd 单元、把原路径换成指向该副本（保留属主与权限）、撤销。只需升级服务器，旧客户端得到同样的回答。
+  - 指纹经已固定指纹的 Agent 通道送达，客户端不必信任首次下载。
+  - 没有配置 `--tang` 时返回 `NO_TANG`；tangd 无应答时返回 `UPSTREAM_ERROR`。
+- **Agent 使用规则 v6**：加一行指向 `lookup tang`，MCP 的 `lookup` 说明也提到它。升级后运行 `passmanager show --rules --write`。
+
+### 文档
+
+- `docs/DEPLOY-LAN.zh-CN.md` 4.1：在 `/tang/` 后面部署 tangd、允许与移除远程主机、Agent 从 `lookup tang` 得到什么。
+
 ## [0.3.11-rc.5] - 2026-10-18
 
 ### 新增

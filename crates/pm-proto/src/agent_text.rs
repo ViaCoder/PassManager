@@ -7,7 +7,7 @@
 //! - 使用规则写在 `<!-- passmanager:begin -->` 与 `<!-- passmanager:end -->` 之间，原地更新、不重复。
 
 /// 使用规则的版本（规则内容变化时加 1）。
-pub const INSTRUCTIONS_VERSION: u32 = 5;
+pub const INSTRUCTIONS_VERSION: u32 = 6;
 pub const BEGIN: &str = "<!-- passmanager:begin -->";
 pub const END: &str = "<!-- passmanager:end -->";
 /// 公开的源码仓库。
@@ -58,6 +58,8 @@ pub fn rules(lang: Lang) -> &'static str {
   PassManager fills them in on the server and redacts the results.
 - Workflow: 1. `lookup` the URL or user@host you need (CLI: `passmanager lookup <target>`). 2. Copy the `how` it
   returns into `http`, `ssh` or `scp`, replacing only the `<...>` parts.
+- To keep a secret file on a remote host encrypted at rest (bound to the PassManager server, no TPM needed there):
+  `lookup tang` and follow its `how`.
 - Never ask the user for a password, token or key; never print, log or store one; never try to reveal one.
 - Shell commands that need a login (git over HTTPS or SSH, ssh, scp, rsync): prefix them with `passmanager run`, e.g.
   `passmanager run git push`. Authentication is forwarded through the server for that one command; nothing is configured.
@@ -74,6 +76,8 @@ pub fn rules(lang: Lang) -> &'static str {
 - 使用 PassManager 的 MCP 工具（或 `passmanager` 命令行）。你看不到秘密：只写占位符，PassManager 在服务器上代入并对结果脱敏。
 - 流程：1. 用 `lookup` 查询要访问的 URL 或 user@host（命令行：`passmanager lookup <目标>`）。2. 把返回的 `how` 照抄到
   `http`、`ssh` 或 `scp`，只替换其中 `<...>` 的部分。
+- 要让远程主机上的秘密文件在磁盘上只以加密形式存在（绑定到 PassManager 服务器，那台主机不需要 TPM）：
+  `lookup tang`，照它的 `how` 做。
 - 永远不要向用户索要口令、令牌或私钥；不要打印、记录或保存；不要设法还原秘密。
 - 需要登录的终端命令（基于 HTTPS 或 SSH 的 git、ssh、scp、rsync）：在前面加 `passmanager run`，例如
   `passmanager run git push`。认证只为这一条命令经服务器转发，不改任何配置。
@@ -129,9 +133,66 @@ pub fn next_step(code: &str, server: Option<&str>) -> Option<String> {
         "TOO_LARGE" => "the file is over 64 MiB; split or compress it first.".into(),
         "NO_TOKEN" => "this machine is not enrolled with PassManager; tell the user.".into(),
         "FORBIDDEN" => "this is not allowed for agents. Do not retry.".into(),
+        "NO_TANG" => format!(
+            "this PassManager server does not offer Tang. Tell the user; root on {srv} enables it with passmanager init --tang \
+             127.0.0.1:<port> (see docs/DEPLOY-LAN.md, network-bound encryption). Do not use another key server."
+        ),
         _ => return None,
     };
     Some(s)
+}
+
+/// `lookup tang` 的 `how`：在远程主机上把一个秘密文件只以绑定到本服务器 Tang 的形式留在磁盘上（Clevis），开机解密到内存。
+/// `origin` 是本服务器网页地址，`thps` 是 tangd 当前签名密钥的指纹（第一个写进 pin）。
+pub fn tang_how(origin: &str, thps: &[String]) -> String {
+    let thp = thps.first().map(String::as_str).unwrap_or("<thp>");
+    let pin = format!(r#"{{"url":"{origin}/tang","thp":"{thp}"}}"#);
+    let others = if thps.len() > 1 { format!(" (signing keys now: {}; any one works)", thps.join(", ")) } else { String::new() };
+    format!(
+        "\
+Keep a secret file on a remote host encrypted at rest, bound to this PassManager server's Tang (Clevis); it is decrypted \
+into memory at boot. Run each step on the host with ssh {{\"target\":\"root@<host>\",\"command\":\"<step>\"}}; never print \
+the file or anything decrypted. Replace only <host>, <file> (the secret's path), <name> (a short id) and <service> (the \
+service that reads it).
+Pin{others}: {pin}
+1. Install: apt-get install -y clevis curl && openssl version (3.5 or newer, e.g. Debian 13: the server speaks only TLS 1.3 \
+with a hybrid post-quantum group). Older: tell the user this host cannot use it.
+2. Reach: curl -sS -o /dev/null -w '%{{http_code}}\\n' {origin}/tang/adv must print 200. Connection reset or timed out: the \
+host's address is not allowed by this server (LAN ranges or allowlist); tell the user (root on the server adds it to \
+ALLOW_IPS in the site file and re-runs install-server.sh --site-file <site file> --skip-acme). Do not retry.
+3. Encrypt and check: umask 077; mkdir -p /etc/tang-files; clevis encrypt tang '{pin}' < <file> > /etc/tang-files/<name>.jwe \
+&& [ \"$(clevis decrypt < /etc/tang-files/<name>.jwe | sha256sum)\" = \"$(sha256sum < <file>)\" ] && echo same
+   Go on only if it printed same. Note the file's owner and mode: stat -c '%U:%G %a' <file>
+4. Decrypt at boot (waits until the server answers): write the unit with a quoted heredoc, cat > \
+/etc/systemd/system/tang-<name>.service <<'EOF' then these lines, then EOF:
+[Unit]
+Description=Decrypt <name> (Tang)
+Wants=network-online.target
+After=network-online.target
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+TimeoutStartSec=infinity
+UMask=0077
+RuntimeDirectory=tang-files
+RuntimeDirectoryPreserve=yes
+ExecStart=/bin/sh -c 'until clevis decrypt < /etc/tang-files/<name>.jwe > /run/tang-files/<name>.tmp; do sleep 15; done; mv /run/tang-files/<name>.tmp /run/tang-files/<name>'
+[Install]
+WantedBy=multi-user.target
+   If that is not root:root 600, add under [Service] ExecStartPost=/bin/chown <user>:<group> /run/tang-files/<name> and \
+ExecStartPost=/bin/chmod <mode> /run/tang-files/<name> with those values. Then: mkdir -p /etc/systemd/system/<service>.service.d \
+&& printf '[Unit]\\nRequires=tang-<name>.service\\nAfter=tang-<name>.service\\n' > \
+/etc/systemd/system/<service>.service.d/tang-<name>.conf && systemctl daemon-reload && systemctl enable --now tang-<name>.service \
+&& cmp -s /run/tang-files/<name> <file> && [ \"$(stat -c '%U:%G %a' /run/tang-files/<name>)\" = \"$(stat -c '%U:%G %a' <file>)\" ] \
+&& echo ready
+5. Switch (only after ready): ln -sfn /run/tang-files/<name> <file>.tang && mv -T <file>.tang <file> && systemctl restart <service> \
+&& systemctl is-active <service>
+Undo (one command): cp --preserve=mode,ownership --remove-destination /run/tang-files/<name> <file>; rm \
+/etc/systemd/system/<service>.service.d/tang-<name>.conf; systemctl disable --now tang-<name>.service; rm \
+/etc/systemd/system/tang-<name>.service /etc/tang-files/<name>.jwe; systemctl daemon-reload
+While this server cannot be reached the file is not decrypted (the host waits at boot). Tang's own exchange is not \
+post-quantum; the HTTPS transport to this server is."
+    )
 }
 
 /// 写入 Agent 全局指令文件的块（含标记）。`passmanager show --rules` 打印的也是它。
@@ -529,6 +590,27 @@ mod tests {
     }
 
     #[test]
+    fn tang_how_fills_pin() {
+        let t = tang_how("https://pm.example.com:8120", &["thpA".into()]);
+        println!("{t}");
+        // pin 用本服务器的地址与指纹，每一步都在；只有占位符需要替换，没有残留的 <thp>。
+        assert!(t.contains(r#"'{"url":"https://pm.example.com:8120/tang","thp":"thpA"}'"#), "{t}");
+        assert!(t.contains("curl -sS -o /dev/null -w '%{http_code}\\n' https://pm.example.com:8120/tang/adv"));
+        for s in
+            ["1. Install", "2. Reach", "3. Encrypt", "4. Decrypt at boot", "5. Switch", "Undo (one command):", "echo same", "echo ready"]
+        {
+            assert!(t.contains(s), "{s}");
+        }
+        assert!(!t.contains("<thp>") && !t.contains("signing keys now"));
+        // 实测发现的两处：撤销要保留属主与权限；照抄的命令末尾不能带句号。
+        assert!(t.contains("cp --preserve=mode,ownership --remove-destination") && t.contains("ExecStartPost=/bin/chmod <mode>"));
+        assert!(!t.contains("daemon-reload."), "命令末尾不能有句号");
+        // 多个签名密钥：全部列出，pin 用第一个。
+        let m = tang_how("https://pm.example.com", &["a1".into(), "b2".into()]);
+        assert!(m.contains(r#""thp":"a1""#) && m.contains("signing keys now: a1, b2"));
+    }
+
+    #[test]
     fn next_steps() {
         let n = next_step("NO_CREDENTIAL", Some("pm.example.com")).unwrap();
         assert!(n.contains("ssh root@pm.example.com passmanager import") && n.contains("Do not guess"), "{n}");
@@ -539,6 +621,7 @@ mod tests {
         {
             assert!(next_step(c, None).is_some(), "{c}");
         }
+        assert!(next_step("NO_TANG", Some("pm.example.com")).unwrap().contains("root on pm.example.com"));
         assert!(next_step("INTERNAL", None).is_none());
     }
 
