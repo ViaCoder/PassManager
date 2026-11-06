@@ -27,8 +27,8 @@ use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use minijinja::value::Serde;
 use minijinja::{Environment, Value, context};
-use pm_proto::{AliasView, FieldInput, SecurityView, ServerStatusView, SettingsView, TokenView};
 use pm_proto::{EntryInput, EntryView, PendingEnrollView, PendingPinView, PinView, Request as Req, Response as Resp};
+use pm_proto::{FieldInput, SecurityView, ServerStatusView, SettingsView, TokenView};
 use serde::de::DeserializeOwned;
 
 pub use front::ConnInfo;
@@ -376,7 +376,6 @@ fn nav_of(template: &str) -> &'static str {
     match template {
         "dashboard.html" => "home",
         "entries.html" | "entry_form.html" => "entries",
-        "aliases.html" => "aliases",
         "tokens.html" => "tokens",
         "pins.html" => "pins",
         "settings.html" => "settings",
@@ -393,7 +392,6 @@ pub const TEMPLATES: &[(&str, &str)] = &[
     ("dashboard.html", include_str!("../templates/dashboard.html")),
     ("entries.html", include_str!("../templates/entries.html")),
     ("entering.html", include_str!("../templates/entering.html")),
-    ("aliases.html", include_str!("../templates/aliases.html")),
     ("entry_form.html", include_str!("../templates/entry_form.html")),
     ("tokens.html", include_str!("../templates/tokens.html")),
     ("pins.html", include_str!("../templates/pins.html")),
@@ -438,8 +436,6 @@ pub fn router(st: St) -> Router {
         .route("/entries/{name}/edit", get(entry_edit))
         .route("/entries/{name}", post(entry_update))
         .route("/entries/{name}/delete", post(entry_delete))
-        .route("/aliases", get(aliases).post(alias_save))
-        .route("/aliases/{name}/delete", post(alias_delete))
         .route("/tokens", get(tokens).post(token_create))
         .route("/tokens/{id}/revoke", post(token_revoke))
         .route("/enrollments/{id}/cancel", post(enroll_cancel))
@@ -812,8 +808,10 @@ struct EntryForm {
     new_rows: Vec<usize>,
     /// SSH 私钥条目：允许 ssh-agent 桥签名的主机密钥指纹（每行一个）。
     host_keys: String,
-    /// 限定的用途（`http` / `ssh` / `git`；全不选表示不限）。
+    /// 限定的用途（`http` / `ssh` / `git`，至少一种）。
     ops: Vec<String>,
+    /// URL 别名：留空表示没有。
+    alias: String,
 }
 
 /// 解析表单：返回（表单回显，单值密钥，字段列表）。
@@ -849,6 +847,7 @@ fn form_of(f: &HashMap<String, String>) -> (EntryForm, Option<String>, Option<Ve
         new_rows: vec![],
         host_keys: g("host_keys"),
         ops: pm_vault_ops().iter().filter(|o| f.get(&format!("op_{o}")).is_some_and(|v| v == "1")).map(|o| o.to_string()).collect(),
+        alias: g("alias"),
     };
     let fields = (kind == "fields").then_some(fields);
     let secret = if kind == "fields" { None } else { secret };
@@ -884,6 +883,7 @@ fn input_of(form: &EntryForm, secret: Option<String>, fields: Option<Vec<FieldIn
         host_keys: (form.kind == "ssh-key")
             .then(|| form.host_keys.split_whitespace().filter(|s| s.starts_with("SHA256:")).map(str::to_string).collect()),
         ops: Some(form.ops.clone()),
+        alias: Some(form.alias.clone()),
     }
 }
 
@@ -923,6 +923,7 @@ async fn entry_edit(State(st): State<St>, h: HeaderMap, conn: Option<Extension<C
         new_rows: vec![],
         host_keys: e.host_keys.join("\n"),
         ops: e.ops.clone(),
+        alias: e.alias.clone(),
     };
     page(&st, &c, "entry_form.html", context! { form => sv(with_rows(form)), original => e.name, public_key => e.public_key })
 }
@@ -986,66 +987,6 @@ async fn entry_delete(
     };
     match call::<serde_json::Value>(&st, Req::DeleteEntry { name }).await {
         Ok(_) => done("/entries", "deleted"),
-        Err(e) => message(&st, Some(&c), StatusCode::BAD_REQUEST, "删除失败", &err_text(&e)),
-    }
-}
-
-// ---------------- URL 别名 ----------------
-
-async fn aliases(State(st): State<St>, h: HeaderMap, conn: Option<Extension<ConnInfo>>, Query(q): Query<DoneQ>) -> Response {
-    let c = match require(&st, &h, &conn) {
-        Ok(c) => c,
-        Err(r) => return r,
-    };
-    match call::<Vec<AliasView>>(&st, Req::Aliases).await {
-        Ok(list) => page(&st, &c, "aliases.html", context! { aliases => sv(&list), form => sv(AliasView::default()), ..flash_ctx(&q) }),
-        Err(e) => page(
-            &st,
-            &c,
-            "aliases.html",
-            context! { aliases => sv(Vec::<AliasView>::new()), form => sv(AliasView::default()), ..err_flash(&e) },
-        ),
-    }
-}
-
-/// 新增或替换。校验失败时保留填写的内容（别名里没有密钥）。
-async fn alias_save(
-    State(st): State<St>,
-    h: HeaderMap,
-    conn: Option<Extension<ConnInfo>>,
-    Form(f): Form<HashMap<String, String>>,
-) -> Response {
-    let c = match require_post(&st, &h, &conn, &f) {
-        Ok(c) => c,
-        Err(r) => return r,
-    };
-    let get = |k: &str| f.get(k).cloned().unwrap_or_default();
-    let (name, url, note) = (get("name"), get("url"), get("note"));
-    match call::<serde_json::Value>(&st, Req::PutAlias { name: name.clone(), url: url.clone(), note: note.clone() }).await {
-        Ok(_) => done("/aliases", "saved"),
-        Err(e) => {
-            let list: Vec<AliasView> = call(&st, Req::Aliases).await.unwrap_or_default();
-            let form = AliasView { name, url, note };
-            let mut r = page(&st, &c, "aliases.html", context! { aliases => sv(&list), form => sv(&form), ..err_flash(&e) });
-            *r.status_mut() = StatusCode::BAD_REQUEST;
-            r
-        }
-    }
-}
-
-async fn alias_delete(
-    State(st): State<St>,
-    h: HeaderMap,
-    conn: Option<Extension<ConnInfo>>,
-    Path(name): Path<String>,
-    Form(f): Form<HashMap<String, String>>,
-) -> Response {
-    let c = match require_post(&st, &h, &conn, &f) {
-        Ok(c) => c,
-        Err(r) => return r,
-    };
-    match call::<serde_json::Value>(&st, Req::DeleteAlias { name }).await {
-        Ok(_) => done("/aliases", "deleted"),
         Err(e) => message(&st, Some(&c), StatusCode::BAD_REQUEST, "删除失败", &err_text(&e)),
     }
 }

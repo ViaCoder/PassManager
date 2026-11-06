@@ -17,7 +17,6 @@ type MockEntry = (EntryView, String, Vec<(String, String)>);
 struct Mock {
     /// (视图, 单值密钥, 字段 (名, 值))
     entries: Mutex<Vec<MockEntry>>,
-    aliases: Mutex<Vec<AliasView>>,
     locked: Mutex<bool>,
     log: Mutex<Vec<String>>,
 }
@@ -32,22 +31,6 @@ impl Backend for Mock {
                 return Resp::err("LOCKED", "locked");
             }
             match req {
-                Req::Aliases => Resp::ok(self.aliases.lock().unwrap().clone()),
-                Req::PutAlias { name, url, note } => {
-                    if !url.starts_with("https://") {
-                        return Resp::err("BAD_REQUEST", "地址必须是具体的 https URL");
-                    }
-                    let mut l = self.aliases.lock().unwrap();
-                    l.retain(|a| a.name != name);
-                    l.push(AliasView { name, url, note });
-                    Resp::ok("saved")
-                }
-                Req::DeleteAlias { name } => {
-                    let mut l = self.aliases.lock().unwrap();
-                    let n = l.len();
-                    l.retain(|a| a.name != name);
-                    if l.len() == n { Resp::err("UNKNOWN_ALIAS", "没有这个别名") } else { Resp::ok("deleted") }
-                }
                 Req::Entries => Resp::ok(self.entries.lock().unwrap().iter().map(|(e, _, _)| e.clone()).collect::<Vec<_>>()),
                 Req::AddEntry { entry } => {
                     if entry.domains.iter().any(|d| d == "*.com") {
@@ -78,6 +61,7 @@ impl Backend for Mock {
                         public_key: (kind == "ssh-key").then(|| "ecdsa-sha2-nistp384 SHA256:FAKEFINGERPRINT".to_string()),
                         host_keys: entry.host_keys.clone().unwrap_or_default(),
                         ops: entry.ops.clone().unwrap_or_default(),
+                        alias: entry.alias.clone().unwrap_or_default(),
                     };
                     self.entries.lock().unwrap().push((v, entry.secret.unwrap_or_default(), fields));
                     Resp::ok("added")
@@ -722,7 +706,6 @@ fn every_template_escapes_injected_values() {
             "kind": P, "host_port": P, "old_fingerprint": P, "new_fingerprint": P, "seen_at": 0}],
         "pins": [{"kind": P, "host_port": P, "algo": P, "fingerprint": P, "first_seen": 0}],
         "settings": {"auto_lock_hours": P},
-        "aliases": [{"name": P, "url": P, "note": P}],
         "sec": {"level": 2, "method": P, "description": P, "l1_reason": P, "mode": P, "runtime_issues": [P], "warnings": [P],
             "report": {"generated": 0, "platform": P, "client_user": P, "findings": [finding], "skipped": P}},
     });
@@ -1327,32 +1310,20 @@ async fn tang_thumbprints_from_tangd() {
 }
 
 #[tokio::test]
-async fn aliases_page_adds_lists_and_deletes() {
+async fn entry_form_has_the_alias_box() {
     let (st, mock) = state();
     let (cookie, csrf) = login(&st).await;
-    let empty = send(&st, Method::GET, "/aliases", Some(&cookie), None, &[]).await;
-    assert_eq!(empty.status, StatusCode::OK);
-    assert!(empty.body.contains("还没有别名") && empty.body.contains("aria-current"));
-    // 没有登录或没有 CSRF：不改变任何东西。
-    assert_ne!(send(&st, Method::GET, "/aliases", None, None, &[]).await.status, StatusCode::OK);
-    let bad_csrf = format!("name=billing&url={}", enc("https://api.example.com/v1"));
-    assert_ne!(send(&st, Method::POST, "/aliases", Some(&cookie), Some(&bad_csrf), &[]).await.status, StatusCode::SEE_OTHER);
-    assert!(mock.aliases.lock().unwrap().is_empty());
-    // 新增。
-    let add = format!("csrf={csrf}&name=billing&url={}&note=n1", enc("https://api.example.com/v1"));
-    assert_eq!(send(&st, Method::POST, "/aliases", Some(&cookie), Some(&add), &[]).await.status, StatusCode::SEE_OTHER);
-    let list = send(&st, Method::GET, "/aliases", Some(&cookie), None, &[]).await;
-    assert!(list.body.contains("alias://billing") && list.body.contains("api.example.com") && list.body.contains("n1"));
-    // 校验失败：显示原因，保留填写的内容。
-    let bad = format!("csrf={csrf}&name=two&url={}", enc("http://plain.example.com"));
-    let r = send(&st, Method::POST, "/aliases", Some(&cookie), Some(&bad), &[]).await;
-    assert_eq!(r.status, StatusCode::BAD_REQUEST);
-    assert!(r.body.contains("https URL") && r.body.contains("plain.example.com"), "{}", r.body);
-    // 删除；再删一次是错误。
-    let del = format!("csrf={csrf}");
-    assert_eq!(send(&st, Method::POST, "/aliases/billing/delete", Some(&cookie), Some(&del), &[]).await.status, StatusCode::SEE_OTHER);
-    assert!(mock.aliases.lock().unwrap().is_empty());
-    assert_eq!(send(&st, Method::POST, "/aliases/billing/delete", Some(&cookie), Some(&del), &[]).await.status, StatusCode::BAD_REQUEST);
+    let form = send(&st, Method::GET, "/entries/new", Some(&cookie), None, &[]).await;
+    assert!(form.body.contains("name=\"alias\"") && form.body.contains("做不到的"), "限制写在输入框下面");
+    // 没有单独的别名页。
+    assert_eq!(send(&st, Method::GET, "/aliases", Some(&cookie), None, &[]).await.status, StatusCode::NOT_FOUND);
+    assert!(!form.body.contains("href=\"/aliases\""));
+    // 填了就交给服务端；列表与编辑页显示它。
+    let add = format!("csrf={csrf}&name=api&domains=api.example.com&kind=password&op_http=1&alias=billing&secret={}", enc("s3cret"));
+    assert_eq!(send(&st, Method::POST, "/entries", Some(&cookie), Some(&add), &[]).await.status, StatusCode::SEE_OTHER);
+    assert_eq!(mock.entries.lock().unwrap()[0].0.alias, "billing");
+    assert!(send(&st, Method::GET, "/entries", Some(&cookie), None, &[]).await.body.contains("alias://billing"));
+    assert!(send(&st, Method::GET, "/entries/api/edit", Some(&cookie), None, &[]).await.body.contains("value=\"billing\""));
 }
 
 #[test]
@@ -1387,7 +1358,7 @@ async fn admin_allow_limits_only_the_admin_ui() {
     };
     assert_ne!(call("/login", Some("198.51.100.10")).await, StatusCode::NOT_FOUND);
     for peer in [Some("198.51.100.11"), Some("203.0.113.7"), Some("127.0.0.1"), None] {
-        for uri in ["/", "/login", "/entries", "/aliases", "/l/abc", "/static/style.css"] {
+        for uri in ["/", "/login", "/entries", "/l/abc", "/static/style.css"] {
             assert_eq!(call(uri, peer).await, StatusCode::NOT_FOUND, "{uri} from {peer:?}");
         }
     }

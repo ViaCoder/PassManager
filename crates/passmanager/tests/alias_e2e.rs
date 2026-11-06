@@ -139,7 +139,7 @@ fn admin_allow_limits_the_web_ui_on_real_connections() {
     let o = reinit(&mut env, &["--admin-allow", "198.51.100.10 198.51.100.12"]);
     assert!(o.status.success(), "{}", all(&o));
     env.start();
-    for p in ["/", "/login", "/entries", "/aliases"] {
+    for p in ["/", "/login", "/entries"] {
         assert_eq!(web_status(&env, p), 404, "{p}");
     }
     assert!(stdout(&env.run(&["status"])).contains("198.51.100.10"), "status 显示来源限制");

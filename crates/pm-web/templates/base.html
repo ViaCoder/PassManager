@@ -42,7 +42,6 @@
   <nav aria-label="主导航">
     <a href="/"{% if nav == "home" %} aria-current="page"{% endif %}>{{ icon("activity") }}<span>状态</span></a>
     <a href="/entries"{% if nav == "entries" %} aria-current="page"{% endif %}>{{ icon("key") }}<span>条目</span></a>
-    <a href="/aliases"{% if nav == "aliases" %} aria-current="page"{% endif %}>{{ icon("link") }}<span>URL 别名</span></a>
     <a href="/tokens"{% if nav == "tokens" %} aria-current="page"{% endif %}>{{ icon("token") }}<span>Agent 令牌</span></a>
     <a href="/pins"{% if nav == "pins" %} aria-current="page"{% endif %}>{{ icon("server") }}<span>主机指纹</span></a>
     <a href="/settings"{% if nav == "settings" %} aria-current="page"{% endif %}>{{ icon("settings") }}<span>设置</span></a>

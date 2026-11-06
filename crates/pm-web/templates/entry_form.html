@@ -28,6 +28,15 @@
       </ul>
     </div>
     <div class="field">
+      <label for="f-alias">别名 <span class="opt">可选，用来隐藏这台主机的地址</span></label>
+      <input id="f-alias" name="alias" maxlength="63" pattern="[a-z0-9][a-z0-9\-]*" value="{{ form.alias }}" spellcheck="false" aria-describedby="h-alias">
+      <ul class="hint" id="h-alias">
+        <li>填写后 Agent 只能写 <code>alias://别名/路径</code>：真实地址由服务器代入，并从返回给 Agent 的结果里去掉。清空即恢复。</li>
+        <li>这台主机的所有端口和用途都不能再被 Agent 直接访问，包括 SSH。条目要绑定一个具体主机，并勾选 HTTP。</li>
+        <li>做不到的：同一台服务器的其他域名或 IP 不受保护；Agent 如果在能访问它的机器上有 shell，可以自己拼出地址。</li>
+      </ul>
+    </div>
+    <div class="field">
       <label for="f-note">说明 <span class="opt">可选</span></label>
       <input id="f-note" name="note" maxlength="200" value="{{ form.note }}">
     </div>

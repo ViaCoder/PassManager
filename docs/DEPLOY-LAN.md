@@ -179,7 +179,9 @@ passmanager import --name init-pw --domain '*.example.com' --domain 198.51.100.0
 
 ### 3.1.1 URL aliases
 
-An alias hides an address from agents. Set it in the web UI (URL 别名) or as root on the server:
+An alias hides an address from agents. Fill in the 别名 box of an entry in the web UI: the entry must be bound to one concrete
+host and allow `http`, and clearing the box removes the alias. Deleting the entry removes it too. As root on the server, an alias
+can also carry a base path:
 
 ```sh
 passmanager alias add billing https://api.example.com:8443/v1 --note 'billing API'

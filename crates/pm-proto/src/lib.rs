@@ -76,7 +76,10 @@ pub struct EntryInput {
     /// SSH 私钥条目：允许 ssh-agent 桥签名的主机密钥指纹（`SHA256:…`）。None 表示不改。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host_keys: Option<Vec<String>>,
-    /// 允许的用途（`http` / `ssh` / `git`，空表示不限）。None 表示不改。
+    /// URL 别名：None 表示不改，空字符串表示取消，其他值表示设置。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alias: Option<String>,
+    /// 允许的用途（`http` / `ssh` / `git`，至少一种）。None 表示不改。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ops: Option<Vec<String>>,
 }
@@ -307,9 +310,12 @@ pub struct EntryView {
     /// 允许 ssh-agent 桥签名的主机密钥指纹。
     #[serde(default)]
     pub host_keys: Vec<String>,
-    /// 限定的用途（为空表示不限）。
+    /// 限定的用途。
     #[serde(default)]
     pub ops: Vec<String>,
+    /// URL 别名（没有时为空）。
+    #[serde(default)]
+    pub alias: String,
 }
 
 /// git 代理的响应头（经白名单过滤）。

@@ -395,6 +395,46 @@ mod tests {
     }
 
     #[test]
+    fn alias_comes_from_the_entrys_host() {
+        let mut e = entry("x");
+        e.domains = vec!["api.example.com:8443".into()];
+        assert_eq!(alias_for_entry(&e, " b ").unwrap().url, "https://api.example.com:8443");
+        e.domains = vec!["[2001:db8::1]:8443".into()];
+        assert_eq!(alias_for_entry(&e, "b").unwrap().url, "https://[2001:db8::1]:8443");
+        // 不是一个具体主机，或者不能用于 HTTP：不能设别名。
+        for bad in [
+            vec![],
+            vec!["a.example.com".to_string(), "b.example.com".to_string()],
+            vec!["*.example.com".to_string()],
+            vec!["198.51.100.0/24".to_string()],
+        ] {
+            e.domains = bad.clone();
+            assert!(alias_for_entry(&e, "b").is_err(), "{bad:?}");
+        }
+        e.domains = vec!["api.example.com".into()];
+        assert!(alias_for_entry(&e, "Bad Name").is_err());
+        e.ops = vec!["ssh".into()];
+        assert!(alias_for_entry(&e, "b").unwrap_err().contains("HTTP"));
+    }
+
+    #[test]
+    fn alias_of_and_conflicts() {
+        let mut e = entry("x");
+        e.domains = vec!["api.example.com".into()];
+        let a = alias_for_entry(&e, "b").unwrap();
+        let p = Payload { entries: vec![e.clone()], aliases: vec![a.clone()], ..Default::default() };
+        assert_eq!(p.alias_of(&e).unwrap().name, "b");
+        let mut w = entry("w");
+        w.domains = vec!["*.example.com".into()];
+        assert!(p.alias_of(&w).is_none(), "通配符条目不算");
+        assert!(Payload::default().alias_conflict(&a, None).is_ok());
+        assert!(p.alias_conflict(&a, Some("b")).is_ok(), "替换自己");
+        assert!(p.alias_conflict(&a, None).is_err(), "主机已有别名");
+        let same_name = Alias { name: "b".into(), url: "https://other.example.com".into(), note: String::new() };
+        assert!(p.alias_conflict(&same_name, None).unwrap_err().contains("已被使用"));
+    }
+
+    #[test]
     fn entry_risks_flag_broad_bindings() {
         let mut e = entry("x");
         e.domains = vec!["*.example.com".into(), "198.51.100.0/24".into()];

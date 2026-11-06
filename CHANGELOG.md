@@ -4,6 +4,12 @@ English | [简体中文](CHANGELOG.zh-CN.md)
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.3.11-rc.8] - 2026-11-06
+
+### Changed
+
+- **The URL alias is now one box on the entry form,** not a page of its own. Fill it in and the entry's host is reachable only through `alias://<name>`; clear it to go back. The limits are stated under the box, and the entry list shows the alias. `passmanager alias` stays for root.
+
 ## [0.3.11-rc.7] - 2026-11-06
 
 ### Security

@@ -4,6 +4,12 @@
 
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.3.11-rc.8] - 2026-11-06
+
+### 变更
+
+- **URL 别名改成条目表单上的一个输入框，** 不再是单独的页面。填写后，这个条目的主机只能经 `alias://<名称>` 访问；清空即恢复。限制说明写在输入框下面，条目列表显示别名。`passmanager alias` 命令保留给 root。
+
 ## [0.3.11-rc.7] - 2026-11-06
 
 ### 安全

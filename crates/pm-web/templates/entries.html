@@ -14,7 +14,7 @@
   <tbody>
   {% for e in entries %}
   <tr>
-    <td data-label="引用名"><code class="strong">{{ e.name }}</code></td>
+    <td data-label="引用名"><code class="strong">{{ e.name }}</code>{% if e.alias %}<br><span class="tag">{{ icon("link") }}alias://{{ e.alias }}</span>{% endif %}</td>
     <td data-label="域名">{% for d in e.domains %}<code>{{ d }}</code> {% else %}<span class="badge warn">{{ icon("warning") }}未绑定域名</span>{% endfor %}</td>
     <td data-label="说明">{% if e.note %}{{ e.note }}{% else %}<span class="muted">—</span>{% endif %}</td>
     <td data-label="类型"><div class="tags">{% if e.kind == "ssh-key" %}<span class="tag">{{ icon("key") }}SSH 私钥</span>{% elif e.kind == "fields" %}<span class="tag">字段</span> {% for f in e.fields %}<code>{{ f }}</code> {% endfor %}{% else %}<span class="tag">{{ icon("lock") }}密钥</span>{% endif %}{% if e.self_signed %} <span class="tag">自签证书</span>{% endif %}{% if e.ops %} <span class="tag info">仅 {{ e.ops | join("、") }}</span>{% endif %}</div>{% if e.kind == "ssh-key" and e.public_key %}<div class="sub"><code>{{ e.public_key }}</code></div>{% endif %}</td>

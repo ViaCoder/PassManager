@@ -132,6 +132,7 @@ mod tests {
             public_key: None,
             host_keys: vec![],
             ops: vec![],
+            alias: String::new(),
         }];
         app
     }

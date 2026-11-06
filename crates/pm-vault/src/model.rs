@@ -336,6 +336,25 @@ pub fn validate_alias(a: &mut Alias) -> Result<(), String> {
     Ok(())
 }
 
+/// 按条目生成别名：真实地址来自条目绑定的主机，所以条目只能绑定一个具体主机，并且允许 HTTP。
+pub fn alias_for_entry(e: &Entry, name: &str) -> Result<Alias, String> {
+    let [d] = e.domains.as_slice() else {
+        return Err("设别名的条目只能绑定一个具体主机".into());
+    };
+    let (host, port) = domain::pattern_parts(d);
+    if host.starts_with("*.") || host.contains('/') {
+        return Err("设别名的条目只能绑定一个具体主机，不能是通配符或网段".into());
+    }
+    if !e.allows(OP_HTTP) {
+        return Err("别名用于 HTTP 请求，请勾选 HTTP 用途".into());
+    }
+    let h = if host.contains(':') { format!("[{host}]") } else { host };
+    let port = port.map(|p| format!(":{p}")).unwrap_or_default();
+    let mut a = Alias { name: name.trim().to_string(), url: format!("https://{h}{port}"), note: String::new() };
+    validate_alias(&mut a)?;
+    Ok(a)
+}
+
 /// 这个条目值得管理员复查的宽绑定（只提示，不阻止：写在状态与安全页，不含任何秘密）。
 pub fn entry_risks(e: &Entry) -> Vec<String> {
     let mut out = Vec::new();
@@ -410,6 +429,26 @@ impl Payload {
     pub fn aliased_host(&self, host: &str) -> Option<&Alias> {
         let h = domain::normalize_host(host);
         self.aliases.iter().find(|a| alias_parts(&a.url).is_some_and(|(ah, _, _)| ah == h))
+    }
+
+    /// 这个条目的别名：它绑定的具体主机设了别名时。
+    pub fn alias_of(&self, e: &Entry) -> Option<&Alias> {
+        e.domains.iter().find_map(|d| {
+            let (h, _) = domain::pattern_parts(d);
+            if h.starts_with("*.") || h.contains('/') { None } else { self.aliased_host(&h) }
+        })
+    }
+
+    /// 别名 `a` 能否加入：名称和主机都不能属于别的别名（`own` 是要被它替换的那个）。
+    pub fn alias_conflict(&self, a: &Alias, own: Option<&str>) -> Result<(), String> {
+        if self.aliases.iter().any(|x| x.name == a.name && Some(x.name.as_str()) != own) {
+            return Err(format!("别名 {} 已被使用", a.name));
+        }
+        let host = alias_parts(&a.url).map(|p| p.0).unwrap_or_default();
+        match self.aliased_host(&host) {
+            Some(x) if Some(x.name.as_str()) != own => Err(format!("这台主机已经有别名 {}", x.name)),
+            _ => Ok(()),
+        }
     }
 
     /// 旧库的 `ops` 为空表示不限：显式写成全部用途，权限不变，但在界面上可见，也不再依赖"空等于全部"。返回改动的条目数。

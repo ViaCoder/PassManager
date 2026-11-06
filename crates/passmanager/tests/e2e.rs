@@ -413,6 +413,49 @@ fn end_to_end() {
     // 删除后由次具体的 *.example.com 接手；没有任何条目的主机得到 NO_CREDENTIAL。
     let found = agent.call(&Request::Lookup { target: "x.auto.example.com".into(), use_: None }).unwrap();
     assert_eq!(found["credentials"], serde_json::json!(["public"]), "{found}");
+    // 条目表单的别名输入框：填了就只能经别名访问，清空恢复，删除条目时别名一起删。
+    {
+        let input = |alias: Option<&str>, domains: &[&str]| EntryInput {
+            name: "aliased".into(),
+            secret: Some("aliased-secret-value".into()),
+            domains: domains.iter().map(|s| s.to_string()).collect(),
+            ops: Some(vec!["http".into()]),
+            alias: alias.map(String::from),
+            ..Default::default()
+        };
+        let direct = "https://api.aliased.example.org/x";
+        let look = |c: &mut Client, t: &str| c.call(&Request::Lookup { target: t.into(), use_: None });
+        admin.call(&Request::AddEntry { entry: input(Some("billing"), &["api.aliased.example.org"]) }).unwrap();
+        let list: Vec<EntryView> = admin.call_as(&Request::Entries).unwrap();
+        assert_eq!(list.iter().find(|e| e.name == "aliased").unwrap().alias, "billing");
+        assert_eq!(code(look(&mut agent, direct)), "ALIAS_ONLY");
+        assert!(look(&mut agent, "alias://billing").is_ok());
+        // 改别的内容、不传别名：保留。
+        let mut keep = input(None, &["api.aliased.example.org"]);
+        keep.note = "changed".into();
+        admin.call(&Request::UpdateEntry { original: "aliased".into(), entry: keep }).unwrap();
+        assert_eq!(code(look(&mut agent, direct)), "ALIAS_ONLY");
+        // 清空：恢复直接访问，别名失效。
+        admin.call(&Request::UpdateEntry { original: "aliased".into(), entry: input(Some(""), &["api.aliased.example.org"]) }).unwrap();
+        assert!(look(&mut agent, direct).is_ok());
+        assert_eq!(code(look(&mut agent, "alias://billing")), "UNKNOWN_ALIAS");
+        // 不是一个具体主机：拒绝，什么都不改。
+        assert_eq!(
+            code(
+                admin.call(&Request::UpdateEntry { original: "aliased".into(), entry: input(Some("billing"), &["*.aliased.example.org"]) })
+            ),
+            "BAD_REQUEST"
+        );
+        assert!(look(&mut agent, direct).is_ok(), "失败的修改没有留下痕迹");
+        // 再设上，删除条目：别名一起删，主机不会被永久封住。
+        admin
+            .call(&Request::UpdateEntry { original: "aliased".into(), entry: input(Some("billing"), &["api.aliased.example.org"]) })
+            .unwrap();
+        assert_eq!(code(look(&mut agent, direct)), "ALIAS_ONLY");
+        admin.call(&Request::DeleteEntry { name: "aliased".into() }).unwrap();
+        assert_eq!(code(look(&mut agent, "alias://billing")), "UNKNOWN_ALIAS");
+        assert_eq!(code(look(&mut agent, direct)), "NO_CREDENTIAL");
+    }
     assert_eq!(code(agent.call(&Request::Lookup { target: "nothing.invalid".into(), use_: None })), "NO_CREDENTIAL");
     // 旧的 list 不再返回任何条目。
     let e = agent.call(&Request::List).err().unwrap();

@@ -183,7 +183,8 @@ passmanager import --name init-pw --domain '*.example.com' --domain 198.51.100.0
 
 ### 3.1.1 URL 别名
 
-别名向 Agent 隐藏一个地址。在网页（URL 别名）里设置，或在服务器上以 root 运行：
+别名向 Agent 隐藏一个地址。在网页的条目表单里填写“别名”：条目要绑定一个具体主机并允许 `http`，清空即取消，删除条目时别名一起删除。
+在服务器上以 root 运行时，别名还可以带基础路径：
 
 ```sh
 passmanager alias add billing https://api.example.com:8443/v1 --note '账单接口'

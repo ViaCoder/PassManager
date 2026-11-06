@@ -106,6 +106,7 @@ pub fn apply_update(o: &UpdateOpts, cur: &pm_proto::EntryView) -> Result<(EntryI
         kind: None,
         host_keys: None,
         ops: Some(ops),
+        alias: None,
     };
     Ok((input, msgs))
 }
@@ -298,6 +299,7 @@ mod tests {
             public_key: None,
             host_keys: vec![],
             ops: ops.iter().map(|o| o.to_string()).collect(),
+            alias: String::new(),
         }
     }
 

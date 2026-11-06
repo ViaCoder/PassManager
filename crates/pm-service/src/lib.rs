@@ -843,7 +843,9 @@ impl Shared {
             Request::Entries => {
                 let inner = self.inner.lock().await;
                 let v = inner.vault.as_ref().ok_or_else(|| self.locked_err())?;
-                let mut list: Vec<EntryView> = v.payload.entries.iter().map(entry_view).collect();
+                let view =
+                    |e: &Entry| EntryView { alias: v.payload.alias_of(e).map(|a| a.name.clone()).unwrap_or_default(), ..entry_view(e) };
+                let mut list: Vec<EntryView> = v.payload.entries.iter().map(view).collect();
                 list.sort_by(|a, b| a.name.cmp(&b.name));
                 ok(list)
             }
@@ -869,8 +871,14 @@ impl Shared {
                 }
                 validate_entry(&mut e).map_err(|m| err("BAD_REQUEST", m))?;
                 let fp = check_kind(&e, entry.kind.as_deref())?;
+                let alias = entry.alias.as_deref().map(str::trim).filter(|s| !s.is_empty());
+                let alias = alias.map(|n| pm_vault::alias_for_entry(&e, n)).transpose().map_err(|m| err("BAD_REQUEST", m))?;
                 let mut name = String::new();
                 self.mutate(|v| {
+                    // 先检查，后修改：mutate 出错时不保存，但内存里的改动不会撤销。
+                    if let Some(a) = &alias {
+                        v.payload.alias_conflict(a, None).map_err(|m| err("BAD_REQUEST", m))?;
+                    }
                     if auto {
                         let taken: Vec<&str> = v.payload.entries.iter().map(|x| x.name.as_str()).collect();
                         e.name = pm_vault::auto_name(&e.domains, &taken);
@@ -880,6 +888,7 @@ impl Shared {
                     }
                     name = e.name.clone();
                     v.payload.entries.push(e);
+                    v.payload.aliases.extend(alias);
                     Ok(())
                 })
                 .await?;
@@ -912,7 +921,22 @@ impl Shared {
                     if e.name != original && v.payload.entry(&e.name).is_some() {
                         return Err(err("BAD_REQUEST", format!("名称 {} 已存在", e.name)));
                     }
+                    // 别名：None 不改，空字符串取消。名称与绑定都没变时原样保留（命令行设的别名可能带路径）。
+                    let cur = v.payload.alias_of(&old).map(|a| a.name.clone());
+                    let want = entry.alias.as_deref().map(str::trim).map(str::to_string).or(cur.clone()).unwrap_or_default();
+                    let keep = cur.as_deref() == Some(want.as_str()) && e.domains == old.domains;
+                    let next = if keep || want.is_empty() {
+                        None
+                    } else {
+                        let a = pm_vault::alias_for_entry(&e, &want).map_err(|m| err("BAD_REQUEST", m))?;
+                        v.payload.alias_conflict(&a, cur.as_deref()).map_err(|m| err("BAD_REQUEST", m))?;
+                        Some(a)
+                    };
                     v.payload.entries[idx] = e;
+                    if !keep {
+                        v.payload.aliases.retain(|x| Some(x.name.as_str()) != cur.as_deref());
+                        v.payload.aliases.extend(next);
+                    }
                     Ok(())
                 })
                 .await?;
@@ -920,10 +944,13 @@ impl Shared {
             }
             Request::DeleteEntry { name } => {
                 self.mutate(|v| {
-                    let before = v.payload.entries.len();
+                    let gone = v.payload.entry(&name).ok_or_else(|| err("UNKNOWN_CREDENTIAL", "条目不存在"))?;
+                    let alias = v.payload.alias_of(gone).map(|a| a.name.clone());
                     v.payload.entries.retain(|e| e.name != name);
-                    if v.payload.entries.len() == before {
-                        return Err(err("UNKNOWN_CREDENTIAL", "条目不存在"));
+                    // 别名随条目删除：网页上没有别的入口，留下它这台主机就再也解不开了。还有条目用它时保留。
+                    let used = |p: &pm_vault::Payload, n: &str| p.entries.iter().any(|e| p.alias_of(e).is_some_and(|a| a.name == n));
+                    if let Some(n) = alias.filter(|n| !used(&v.payload, n)) {
+                        v.payload.aliases.retain(|x| x.name != n);
                     }
                     Ok(())
                 })
@@ -1418,6 +1445,7 @@ fn entry_view(e: &Entry) -> EntryView {
         host_keys: e.host_keys.clone(),
         ops: e.ops.clone(),
         public_key,
+        alias: String::new(),
         name: e.name.clone(),
         domains: e.domains.clone(),
         note: e.note.clone(),
