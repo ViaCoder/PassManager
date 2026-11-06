@@ -32,7 +32,8 @@ fn import_from_stdin() {
     let mut outputs = String::new();
 
     // ---- 单值、多行，原样保存（只去掉一个末尾换行） ----
-    let o = env.run_stdin(&["import", "--name", "blob", "--domain", &d, "--self-signed"], format!("{BLOB}\n").as_bytes());
+    let o = env
+        .run_stdin(&["import", "--ops", "http,ssh,git", "--name", "blob", "--domain", &d, "--self-signed"], format!("{BLOB}\n").as_bytes());
     assert!(o.status.success(), "{}", stderr(&o));
     assert_eq!(stdout(&o).trim(), format!("已导入 blob（{} 字节，1 个域名）", BLOB.len()));
     outputs += &(stdout(&o) + &stderr(&o));
@@ -42,7 +43,7 @@ fn import_from_stdin() {
 
     // ---- 多字段，CRLF 输入 ----
     let o = env.run_stdin(
-        &["import", "--name", "creds", "--fields", "username,password", "--domain", &d, "--self-signed"],
+        &["import", "--ops", "http,ssh,git", "--name", "creds", "--fields", "username,password", "--domain", &d, "--self-signed"],
         format!("{USER}\r\n{PASS}\r\n").as_bytes(),
     );
     assert!(o.status.success(), "{}", stderr(&o));
@@ -62,13 +63,17 @@ fn import_from_stdin() {
     let ed = format!("127.0.0.1:{echo}");
     assert!(
         env.run_stdin(
-            &["import", "--name", "ef", "--fields", "username,password", "--domain", &ed, "--self-signed"],
+            &["import", "--ops", "http,ssh,git", "--name", "ef", "--fields", "username,password", "--domain", &ed, "--self-signed"],
             format!("{USER}\n{PASS}\n").as_bytes()
         )
         .status
         .success()
     );
-    assert!(env.run_stdin(&["import", "--name", "eb", "--domain", &ed, "--self-signed"], BLOB.as_bytes()).status.success());
+    assert!(
+        env.run_stdin(&["import", "--ops", "http,ssh,git", "--name", "eb", "--domain", &ed, "--self-signed"], BLOB.as_bytes())
+            .status
+            .success()
+    );
     let url = format!("https://127.0.0.1:{echo}/e?u={{{{ef.username}}}}");
     let o = env.agent(&["http", "POST", &url, "-H", "X-P: {{ef.password}}", "-d", "{{eb}} | {{ef.username}}"]);
     let out = stdout(&o);
@@ -80,14 +85,17 @@ fn import_from_stdin() {
 
     // ---- 行数不符、空输入、超限：失败，且不回显内容 ----
     for (args, input) in [
-        (vec!["import", "--name", "bad", "--fields", "username,password", "--domain", &d], format!("{USER}\n").into_bytes()),
         (
-            vec!["import", "--name", "bad", "--fields", "username,password", "--domain", &d],
+            vec!["import", "--ops", "http,ssh,git", "--name", "bad", "--fields", "username,password", "--domain", &d],
+            format!("{USER}\n").into_bytes(),
+        ),
+        (
+            vec!["import", "--ops", "http,ssh,git", "--name", "bad", "--fields", "username,password", "--domain", &d],
             format!("{USER}\n{PASS}\nextra-line-xyz\n").into_bytes(),
         ),
-        (vec!["import", "--name", "bad", "--domain", &d], Vec::new()),
-        (vec!["import", "--name", "bad", "--domain", &d], b"\n".to_vec()),
-        (vec!["import", "--name", "bad", "--domain", &d], vec![b'x'; 64 * 1024 + 1]),
+        (vec!["import", "--ops", "http,ssh,git", "--name", "bad", "--domain", &d], Vec::new()),
+        (vec!["import", "--ops", "http,ssh,git", "--name", "bad", "--domain", &d], b"\n".to_vec()),
+        (vec!["import", "--ops", "http,ssh,git", "--name", "bad", "--domain", &d], vec![b'x'; 64 * 1024 + 1]),
     ] {
         let o = env.run_stdin(&args, &input);
         assert!(!o.status.success(), "{args:?}");
@@ -95,19 +103,36 @@ fn import_from_stdin() {
         assert!(!text.contains("extra-line-xyz") && leaks(&text, &[USER, PASS]).is_empty(), "{text}");
         outputs += &text;
     }
-    assert!(env.run_stdin(&["import", "--name", "max", "--domain", &d], &vec![b'y'; 64 * 1024]).status.success(), "正好 64 KiB 可以");
+    assert!(
+        env.run_stdin(&["import", "--ops", "http,ssh,git", "--name", "max", "--domain", &d], &vec![b'y'; 64 * 1024]).status.success(),
+        "正好 64 KiB 可以"
+    );
 
     // ---- 重复与 --replace ----
-    let o = env.run_stdin(&["import", "--name", "blob", "--domain", &d, "--self-signed"], b"other");
+    let o = env.run_stdin(&["import", "--ops", "http,ssh,git", "--name", "blob", "--domain", &d, "--self-signed"], b"other");
     assert!(!o.status.success() && stderr(&o).contains("已存在"));
-    let o = env.run_stdin(&["import", "--name", "blob", "--domain", &d, "--self-signed", "--replace"], b"replaced-value-123\n");
+    let o = env.run_stdin(
+        &["import", "--ops", "http,ssh,git", "--name", "blob", "--domain", &d, "--self-signed", "--replace"],
+        b"replaced-value-123\n",
+    );
     assert!(o.status.success(), "{}", stderr(&o));
     let (ok, out) = http_digest(&env, port, "{{blob}}");
     assert!(ok && out.contains(&digest_of("replaced-value-123")), "{out}");
     outputs += &out;
 
     // ---- 没有域名：保存，但标为未绑定，Agent 不能使用 ----
-    let o = env.run_stdin(&["import", "--name", "spare"], b"spare-secret-value\n");
+    // 新条目必须写用途（空用途什么都不允许）；--replace 不写时保留原来的用途。
+    let o = env.run_stdin(&["import", "--name", "noops", "--domain", &d], b"noops-secret-value");
+    assert!(!o.status.success() && stderr(&o).contains("至少选择一种用途"), "{}", stderr(&o));
+    let o = env.run_stdin(&["import", "--ops", "ssh", "--name", "keepops", "--domain", "keep.example.com"], b"first-secret-value");
+    assert!(o.status.success(), "{}", stderr(&o));
+    let o = env.run_stdin(&["import", "--name", "keepops", "--replace", "--domain", "keep.example.com"], b"second-secret-value");
+    assert!(o.status.success(), "{}", stderr(&o));
+    let o = env.agent_cmd(&["lookup", "root@keep.example.com"]).output().unwrap();
+    assert!(o.status.success() && stdout(&o).contains("keepops"), "ssh 用途保留：{}", stdout(&o));
+    let o = env.agent_cmd(&["lookup", "https://keep.example.com/x"]).output().unwrap();
+    assert!(!o.status.success() && stdout(&o).contains("OP_NOT_ALLOWED"), "没有因为替换而放宽：{}", stdout(&o));
+    let o = env.run_stdin(&["import", "--ops", "http,ssh,git", "--name", "spare"], b"spare-secret-value\n");
     assert!(o.status.success() && stdout(&o).contains("0 个域名") && stdout(&o).contains("没有绑定域名"), "{}", stdout(&o));
     let found = stdout(&env.agent(&["lookup", "{{spare}}"]));
     assert!(
@@ -139,19 +164,24 @@ fn import_from_stdin() {
     use std::os::fd::FromRawFd;
     // SAFETY: slave 是刚打开的、本进程独占的描述符。
     let tty = unsafe { std::fs::File::from_raw_fd(slave) };
-    let o = env.cmd(&["import", "--name", "tty", "--domain", &d]).stdin(Stdio::from(tty)).output().unwrap();
+    let o = env.cmd(&["import", "--ops", "http,ssh,git", "--name", "tty", "--domain", &d]).stdin(Stdio::from(tty)).output().unwrap();
     // SAFETY: 关闭 master。
     unsafe { libc::close(master) };
     assert!(!o.status.success() && stderr(&o).contains("终端"), "{}", stderr(&o));
 
     // ---- 库锁定 ----
     assert!(env.run(&["lock"]).status.success());
-    let o = env.run_stdin(&["import", "--name", "while-locked", "--domain", &d], b"x-secret\n");
+    let o = env.run_stdin(&["import", "--ops", "http,ssh,git", "--name", "while-locked", "--domain", &d], b"x-secret\n");
     assert!(!o.status.success() && stderr(&o).contains("已锁定"), "{}", stderr(&o));
     assert!(env.run(&["unlock"]).status.success());
 
     // ---- 非 root（系统布局）：拒绝 ----
-    let o = Command::new(BIN).args(["import", "--name", "x"]).env_remove("PASSMANAGER_HOME").stdin(Stdio::null()).output().unwrap();
+    let o = Command::new(BIN)
+        .args(["import", "--ops", "http,ssh,git", "--name", "x"])
+        .env_remove("PASSMANAGER_HOME")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
     if !nix_is_root() {
         assert!(!o.status.success() && stderr(&o).contains("root"), "{}", stderr(&o));
     }

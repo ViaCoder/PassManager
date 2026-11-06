@@ -106,7 +106,10 @@ fn run_forwards_git_and_ssh_for_one_command() {
         let sshd = start_sshd(&env.base.join("sshd"), &client_key.with_extension("pub"));
         let host_pub = std::fs::read_to_string(sshd.host_key.with_extension("pub")).unwrap();
         let pem = std::fs::read_to_string(&client_key).unwrap();
-        let o = env.run_stdin(&["import", "--name", "srv", "--kind", "ssh-key", "--host-key", host_pub.trim()], pem.as_bytes());
+        let o = env.run_stdin(
+            &["import", "--ops", "http,ssh,git", "--name", "srv", "--kind", "ssh-key", "--host-key", host_pub.trim()],
+            pem.as_bytes(),
+        );
         assert!(o.status.success() && stdout(&o).contains(&client_fp), "{}", stderr(&o));
         // ssh-add -L 经临时 agent 列出服务器上的公钥。
         let o = run(&env.base, &["ssh-add", "-L"]);

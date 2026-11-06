@@ -80,7 +80,8 @@ impl Online {
     }
 
     pub fn web_origin(&self) -> String {
-        pm_web::WebConfig { domain: self.cfg.domain.clone(), port: self.cfg.web_port, agent_bin_dir: None, tang: None }.origin()
+        pm_web::WebConfig { domain: self.cfg.domain.clone(), port: self.cfg.web_port, agent_bin_dir: None, tang: None, admin_allow: None }
+            .origin()
     }
 
     /// 应用层来源检查（与防火墙使用同一份列表：局域网网段 + 允许列表；本机回环总是允许）。
@@ -361,6 +362,10 @@ async fn serve_web_with(shared: Arc<Shared>, listener: TcpListener, single: bool
             agent_bin_dir: Some(shared.layout.data_dir.join("agent-bin")),
             // 配置已在启动时校验（validate），这里只取回环地址。
             tang: on.cfg.tang.as_deref().and_then(|t| pm_platform::paths::parse_tang(t).ok()),
+            admin_allow: on.cfg.admin_allow.clone().map(|list| {
+                let allow: pm_web::front::Allow = Arc::new(move |ip| pm_platform::paths::net_allowed(ip, &list));
+                allow
+            }),
         },
     );
     let scfg = on.cfg.clone();

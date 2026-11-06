@@ -4,6 +4,31 @@ English | [简体中文](CHANGELOG.zh-CN.md)
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.3.11-rc.7] - 2026-11-06
+
+### Security
+
+- **Dependencies with new advisories updated:** rustls-webpki 0.103.16 (RUSTSEC-2026-0382, distrusted emSign intermediates), webpki-root-certs 1.0.11 (RUSTSEC-2026-0383), crypto-bigint 0.7.10 (RUSTSEC-2026-0387), ctutils 0.4.8 (RUSTSEC-2026-0385) and tokio 1.53.3 (RUSTSEC-2026-0386).
+- **Compressed responses could bypass redaction.** An agent could ask for `Accept-Encoding: gzip`; the compressed bytes passed through redaction unseen, and the agent could unpack secrets from the result. Requests now always ask for `identity`, and a compressed response is refused instead of returned.
+- **Lessons from OpenSSH's wildcard and principal fixes (10.3, 10.4, CVE-2026-35414):**
+  - **An empty set no longer means everything.** An entry with no uses used to allow every use; it now allows none, and new entries need at least one use. Entries stored that way are rewritten once at unlock to list every use, so nothing stops working.
+  - **Targets are data, not patterns.** `*`, commas, control characters and over-long names in a target no longer reach the matcher, so `*.example.com` as a target cannot match the binding `*.example.com`. SSH user names and hosts are checked against a strict character set and cannot start with `-`.
+  - **Detection:** `passmanager status` and the security page point out wildcard bindings that allow every use and very wide network ranges.
+
+### Added
+
+- **URL aliases.** Set an alias in the web UI or with `passmanager alias add`. Agents use `alias://<name>/<path>`; the whole host is refused for direct use (`ALIAS_ONLY`) through http, ssh, scp, git, lookup and the ssh-agent bridge, and the real address is removed from everything sent to agents, including encoded forms. See `docs/DEPLOY-LAN.md` 3.1.1 for the limits.
+- **One-click web login.** `passmanager web` opens the admin pages from your own computer: it logs in to the server through PassManager, gets a one-time link and goes straight in. `passmanager web --install` registers `passmanager-web://`, which drives the new button on the login page. The handler receives nothing from the link.
+- **The login page helps when you are not logged in:** it offers one-click login first, says when a session has expired, and sends you to the home page if you are already logged in.
+- **`passmanager init --admin-allow`** limits the web admin pages to given addresses without touching `/tang/`, agent setup or the agent channel. An empty list is a configuration error.
+- **The Advisories workflow proposes its own fix.** When a new advisory appears, `scripts/advisory_fix.py` picks the smallest compatible fixed version from the advisory database, tests it, and opens a pull request. It never merges or releases.
+
+### Changed
+
+- **`passmanager import` needs `--ops` for a new entry.** `--replace` without `--ops` keeps the existing uses.
+- **Agent rules v7:** one line about `alias://`. Run `passmanager show --rules --write` after upgrading.
+- GitHub Actions that still ran on Node 20 moved to their Node 24 releases, except `mlugg/setup-zig`, which has none yet.
+
 ## [0.3.11-rc.6] - 2026-10-18
 
 ### Added

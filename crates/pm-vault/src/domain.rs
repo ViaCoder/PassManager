@@ -176,8 +176,19 @@ fn validate_host_pattern(pattern: &str) -> Result<String, DomainError> {
     Ok(p)
 }
 
+/// 目标主机是否合法：IP 地址，或每个标签都合法、总长不超过 253 的域名。
+/// 目标来自 Agent，只是数据：`*`、逗号、控制字符不能进入匹配，否则目标 `*.example.com` 会被模式 `*.example.com` 当成子域名
+/// （OpenSSH 10.3 修复的同类问题：对方提供的数据被当成模式或分隔符解释）。
+pub fn valid_target_host(host: &str) -> bool {
+    let h = normalize_host(host);
+    h.parse::<IpAddr>().is_ok() || (h.len() <= 253 && valid_label_chars(&h))
+}
+
 /// 目标（主机，可选端口）与模式的匹配程度；不匹配时为 None。`port = None` 表示忽略端口。
 pub fn specificity(pattern: &str, host: &str, port: Option<u16>) -> Option<Spec> {
+    if !valid_target_host(host) {
+        return None;
+    }
     let (hp, pport) = pattern_parts(pattern);
     if let (Some(want), Some(got)) = (pport, port)
         && want != got
@@ -236,6 +247,36 @@ pub fn matches_any_port(patterns: &[String], host: &str, port: u16) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn target_hosts_are_data_not_patterns() {
+        for ok in ["example.com", "A.Example.COM.", "db_1.example.com", "198.51.100.7", "[2001:db8::1]", "localhost"] {
+            assert!(valid_target_host(ok), "{ok}");
+        }
+        let long = format!("{}.example.com", ["a"; 130].join("."));
+        for bad in [
+            "",
+            "*.example.com",
+            "*",
+            "a,b.example.com",
+            "a b.example.com",
+            "a\0.example.com",
+            "$x.example.com",
+            "-x.example.com",
+            long.as_str(),
+        ] {
+            assert!(!valid_target_host(bad), "{bad}");
+        }
+        // 目标里的 * 不会被模式 *.example.com 当成子域名；分隔符、控制字符同样不匹配。
+        for bad in ["*.example.com", "*.*.example.com", "a,b.example.com", "evil.net\n.example.com"] {
+            assert!(!matches("*.example.com", bad), "{bad}");
+        }
+        assert!(matches("*.example.com", "a.example.com"));
+        // 匹配是线性的：很长的恶意目标立即被拒绝，没有回溯（OpenSSH 10.4 换掉的指数级最坏情况）。
+        let t = std::time::Instant::now();
+        assert!(!matches("*.example.com", &format!("{}example.com", "a.".repeat(200_000))));
+        assert!(t.elapsed() < std::time::Duration::from_secs(1));
+    }
 
     #[test]
     fn validation() {

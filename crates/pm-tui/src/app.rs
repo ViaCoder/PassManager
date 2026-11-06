@@ -815,6 +815,8 @@ impl App {
                         note: f.note.value().trim().to_string(),
                         self_signed: f.self_signed,
                         auto_accept_host_key: f.auto_accept,
+                        // 新条目明确写出全部用途（编辑时 None 表示保留原来的用途）。
+                        ops: f.original.is_none().then(|| ["http", "ssh", "git"].map(String::from).to_vec()),
                         ..Default::default()
                     };
                     if f.original.is_none() && input.secret.is_none() {

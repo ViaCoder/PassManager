@@ -192,11 +192,29 @@ pub fn decode_file(data: &[u8]) -> Result<(Header, SealedPayload), VaultError> {
 /// v2 载荷的标记（放在 postcard 数据之前）。v1 载荷的第一个字节是条目数，第二个字节是第一个引用名的长度
 /// （≤ 64），不可能是 `'M'`（77），所以不会与旧格式混淆。
 pub const PAYLOAD_V2_MAGIC: &[u8; 5] = b"PMP2\0";
+/// v3 载荷的标记：比 v2 多了别名。
+pub const PAYLOAD_V3_MAGIC: &[u8; 5] = b"PMP3\0";
 
-/// 序列化载荷（v2：支持多字段条目）并填充到 4 KiB 的整数倍（隐藏条目数量与长度）。
+/// v2 载荷的字段（借用，写入时不复制密钥）。
+#[derive(serde::Serialize)]
+struct V2Ref<'a> {
+    entries: &'a Vec<crate::model::Entry>,
+    pins: &'a Vec<crate::model::Pin>,
+    settings: &'a crate::model::Settings,
+}
+
+/// 序列化载荷并填充到 4 KiB 的整数倍（隐藏条目数量与长度）。
+/// 没有别名时写 v2：回滚到旧版本的程序仍能打开库。有别名时写 v3：旧程序打不开，而不是忽略别名、放开原地址。
 pub fn encode_payload(p: &Payload) -> Result<Zeroizing<Vec<u8>>, VaultError> {
-    let mut v = Zeroizing::new(PAYLOAD_V2_MAGIC.to_vec());
-    v.extend_from_slice(&Zeroizing::new(postcard::to_allocvec(p).map_err(|_| VaultError::Corrupt("payload encode"))?));
+    let bad = |_| VaultError::Corrupt("payload encode");
+    if p.aliases.is_empty() {
+        let mut v = Zeroizing::new(PAYLOAD_V2_MAGIC.to_vec());
+        let r = V2Ref { entries: &p.entries, pins: &p.pins, settings: &p.settings };
+        v.extend_from_slice(&Zeroizing::new(postcard::to_allocvec(&r).map_err(bad)?));
+        return pad(v);
+    }
+    let mut v = Zeroizing::new(PAYLOAD_V3_MAGIC.to_vec());
+    v.extend_from_slice(&Zeroizing::new(postcard::to_allocvec(p).map_err(bad)?));
     pad(v)
 }
 
@@ -224,8 +242,13 @@ pub fn decode_payload(data: &[u8]) -> Result<Payload, VaultError> {
         return Err(VaultError::Corrupt("payload length"));
     }
     let body = &data[4..4 + len];
+    if let Some(v3) = body.strip_prefix(PAYLOAD_V3_MAGIC.as_slice()) {
+        return postcard::from_bytes(v3).map_err(|_| VaultError::Corrupt("payload decode"));
+    }
     match body.strip_prefix(PAYLOAD_V2_MAGIC.as_slice()) {
-        Some(v2) => postcard::from_bytes(v2).map_err(|_| VaultError::Corrupt("payload decode")),
+        Some(v2) => {
+            postcard::from_bytes::<crate::model::PayloadV2>(v2).map(Payload::from).map_err(|_| VaultError::Corrupt("payload decode"))
+        }
         // 0.1.0 写入的库：按旧结构读入，下一次保存时自动升级为 v2。
         None => postcard::from_bytes::<crate::model::PayloadV1>(body).map(Payload::from).map_err(|_| VaultError::Corrupt("payload decode")),
     }

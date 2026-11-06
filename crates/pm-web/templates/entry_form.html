@@ -83,7 +83,7 @@
   <section class="card">
     <h2 class="card-title">{{ icon("settings") }}用途与选项</h2>
     <fieldset>
-      <legend>用途 <span class="opt">全不选表示不限</span></legend>
+      <legend>用途 <span class="opt">至少选一种</span></legend>
       <div class="checks">
         <label class="check"><input type="checkbox" name="op_http" value="1" {% if "http" in form.ops %}checked{% endif %}>HTTP 请求</label>
         <label class="check"><input type="checkbox" name="op_ssh" value="1" {% if "ssh" in form.ops %}checked{% endif %}>SSH / SCP / ssh-agent</label>

@@ -17,6 +17,7 @@ type MockEntry = (EntryView, String, Vec<(String, String)>);
 struct Mock {
     /// (视图, 单值密钥, 字段 (名, 值))
     entries: Mutex<Vec<MockEntry>>,
+    aliases: Mutex<Vec<AliasView>>,
     locked: Mutex<bool>,
     log: Mutex<Vec<String>>,
 }
@@ -31,6 +32,22 @@ impl Backend for Mock {
                 return Resp::err("LOCKED", "locked");
             }
             match req {
+                Req::Aliases => Resp::ok(self.aliases.lock().unwrap().clone()),
+                Req::PutAlias { name, url, note } => {
+                    if !url.starts_with("https://") {
+                        return Resp::err("BAD_REQUEST", "地址必须是具体的 https URL");
+                    }
+                    let mut l = self.aliases.lock().unwrap();
+                    l.retain(|a| a.name != name);
+                    l.push(AliasView { name, url, note });
+                    Resp::ok("saved")
+                }
+                Req::DeleteAlias { name } => {
+                    let mut l = self.aliases.lock().unwrap();
+                    let n = l.len();
+                    l.retain(|a| a.name != name);
+                    if l.len() == n { Resp::err("UNKNOWN_ALIAS", "没有这个别名") } else { Resp::ok("deleted") }
+                }
                 Req::Entries => Resp::ok(self.entries.lock().unwrap().iter().map(|(e, _, _)| e.clone()).collect::<Vec<_>>()),
                 Req::AddEntry { entry } => {
                     if entry.domains.iter().any(|d| d == "*.com") {
@@ -164,6 +181,7 @@ impl Backend for Mock {
                     mode: "system".into(),
                     report: Report::default(),
                     runtime_issues: vec![],
+                    warnings: vec!["wide：网段绑定 198.0.0.0/8 很宽，建议缩小".into()],
                 }),
                 other => Resp::err("FORBIDDEN", format!("unexpected {other:?}")),
             }
@@ -192,7 +210,7 @@ fn state() -> (St, Arc<Mock>) {
     let st = AppState::new(
         mock.clone(),
         LoginLinks::new(),
-        WebConfig { domain: "pm.test".into(), port: 443, agent_bin_dir: Some(agent_bin_dir()), tang: None },
+        WebConfig { domain: "pm.test".into(), port: 443, agent_bin_dir: Some(agent_bin_dir()), tang: None, admin_allow: None },
     );
     (st, mock)
 }
@@ -276,7 +294,7 @@ async fn non_default_port_in_host_origin_and_urls() {
     for bad in ["pm.example.com", "pm.example.com:443", "pm.example.com:8443", "pm.example.com:81210", "evil.example:8121"] {
         assert!(!host_ok("pm.example.com", 8121, bad), "{bad}");
     }
-    let cfg = WebConfig { domain: "pm.example.com".into(), port: 8121, agent_bin_dir: None, tang: None };
+    let cfg = WebConfig { domain: "pm.example.com".into(), port: 8121, agent_bin_dir: None, tang: None, admin_allow: None };
     assert_eq!(cfg.origin(), "https://pm.example.com:8121");
     assert_eq!(WebConfig { port: 443, ..cfg }.origin(), "https://pm.example.com");
     let o = "https://pm.example.com:8121".to_string();
@@ -300,7 +318,7 @@ async fn non_default_port_in_host_origin_and_urls() {
     let st = AppState::new(
         mock,
         LoginLinks::new(),
-        WebConfig { domain: "pm.test".into(), port: 8121, agent_bin_dir: Some(agent_bin_dir()), tang: None },
+        WebConfig { domain: "pm.test".into(), port: 8121, agent_bin_dir: Some(agent_bin_dir()), tang: None, admin_allow: None },
     );
     let b = axum::http::Request::builder().method(Method::GET).uri(format!("/a/{BOOT_CODE}")).header("host", "pm.test:8121");
     let r = router(st.clone()).oneshot(b.body(Body::empty()).unwrap()).await.unwrap();
@@ -362,20 +380,20 @@ fn cookie_parsing_and_attributes() {
 fn login_links_are_single_use_and_expire() {
     let l = LoginLinks::default();
     let t0 = Instant::now();
-    let a = l.create_at(t0);
+    let a = l.create_at(t0, false);
     assert!(l.valid_at(&a, t0));
     assert!(l.valid_at(&a, t0 + Duration::from_secs(119)), "GET 确认页不消耗");
     assert!(!l.valid_at(&a, t0 + Duration::from_secs(120)), "2 分钟后过期");
     assert!(!l.consume_at(&a, t0 + Duration::from_secs(121)), "过期的不能用");
     assert!(!l.consume_at(&a, t0), "过期检查时已被取出");
-    let b = l.create_at(t0);
+    let b = l.create_at(t0, false);
     assert!(l.consume_at(&b, t0 + Duration::from_secs(5)));
     assert!(!l.consume_at(&b, t0 + Duration::from_secs(6)), "只能用一次");
     assert!(!l.valid("not-a-token") && !l.consume(""));
     // 同时有效的链接最多 8 个，最早的被淘汰。
-    let first = l.create_at(t0);
+    let first = l.create_at(t0, false);
     for _ in 0..8 {
-        l.create_at(t0 + Duration::from_secs(1));
+        l.create_at(t0 + Duration::from_secs(1), false);
     }
     assert!(!l.valid_at(&first, t0 + Duration::from_secs(2)));
 }
@@ -679,7 +697,7 @@ async fn entry_ops_and_network_domains() {
     assert!(edit.body.contains("name=\"op_ssh\" value=\"1\" checked") && !edit.body.contains("name=\"op_http\" value=\"1\" checked"));
     let upd = format!("csrf={csrf}&name=init-pw&domains={}&kind=password", enc("*.example.com"));
     assert_eq!(send(&st, Method::POST, "/entries/init-pw", Some(&cookie), Some(&upd), &[]).await.status, StatusCode::SEE_OTHER);
-    assert!(mock.entries.lock().unwrap()[0].0.ops.is_empty(), "全不选表示不限");
+    assert!(mock.entries.lock().unwrap()[0].0.ops.is_empty(), "全不选时原样交给服务端，由它的校验拒绝（空用途什么都不允许）");
 }
 
 /// XSS：每个模板里每个可能受用户或配置影响的字段都填成攻击载荷，渲染结果里不能出现未转义的片段，
@@ -704,7 +722,8 @@ fn every_template_escapes_injected_values() {
             "kind": P, "host_port": P, "old_fingerprint": P, "new_fingerprint": P, "seen_at": 0}],
         "pins": [{"kind": P, "host_port": P, "algo": P, "fingerprint": P, "first_seen": 0}],
         "settings": {"auto_lock_hours": P},
-        "sec": {"level": 2, "method": P, "description": P, "l1_reason": P, "mode": P, "runtime_issues": [P],
+        "aliases": [{"name": P, "url": P, "note": P}],
+        "sec": {"level": 2, "method": P, "description": P, "l1_reason": P, "mode": P, "runtime_issues": [P], "warnings": [P],
             "report": {"generated": 0, "platform": P, "client_user": P, "findings": [finding], "skipped": P}},
     });
     let mut locked = base.clone();
@@ -830,8 +849,11 @@ async fn bootstrap_routes() {
     }
     assert_eq!(last, StatusCode::TOO_MANY_REQUESTS);
     // 没有配置程序目录：一律 404。
-    let st3 =
-        AppState::new(mock.clone(), LoginLinks::new(), WebConfig { domain: "pm.test".into(), port: 443, agent_bin_dir: None, tang: None });
+    let st3 = AppState::new(
+        mock.clone(),
+        LoginLinks::new(),
+        WebConfig { domain: "pm.test".into(), port: 443, agent_bin_dir: None, tang: None, admin_allow: None },
+    );
     assert_eq!(boot(&st3, Method::GET, &format!("/a/{BOOT_CODE}")).await.0, StatusCode::NOT_FOUND);
 }
 
@@ -925,7 +947,11 @@ fn assets_are_offline_and_script_free() {
             for (i, _) in l.match_indices(attr) {
                 let v = &l[i + attr.len()..];
                 assert!(
-                    v.starts_with('/') && !v.starts_with("//") || v.starts_with('#') || v.starts_with('{'),
+                    v.starts_with('/') && !v.starts_with("//")
+                        || v.starts_with('#')
+                        || v.starts_with('{')
+                        // 唯一的例外：登录页的一键登录按钮，由本机注册的协议接管。
+                        || (name == "login.html" && attr == "href=\"" && v.starts_with("passmanager-web://login\"")),
                     "{name}: {attr}{}",
                     &v[..20.min(v.len())]
                 );
@@ -1056,8 +1082,11 @@ async fn referrer_policy_is_same_origin_and_browser_posts_work() {
 
     // 真实浏览器在 same-origin 策略下发送的同源 POST（非 443 端口）：登录确认、保存条目、锁定都成功。
     let mock = Arc::new(Mock::default());
-    let st =
-        AppState::new(mock.clone(), LoginLinks::new(), WebConfig { domain: "pm.test".into(), port: 8121, agent_bin_dir: None, tang: None });
+    let st = AppState::new(
+        mock.clone(),
+        LoginLinks::new(),
+        WebConfig { domain: "pm.test".into(), port: 8121, agent_bin_dir: None, tang: None, admin_allow: None },
+    );
     let browser = [
         ("host", "pm.test:8121"),
         ("origin", "https://pm.test:8121"),
@@ -1208,7 +1237,7 @@ fn tang_state(up: Option<std::net::SocketAddr>) -> St {
     AppState::new(
         Arc::new(Mock::default()),
         LoginLinks::new(),
-        WebConfig { domain: "pm.test".into(), port: 8120, agent_bin_dir: None, tang: up },
+        WebConfig { domain: "pm.test".into(), port: 8120, agent_bin_dir: None, tang: up, admin_allow: None },
     )
 }
 
@@ -1295,4 +1324,130 @@ async fn tang_thumbprints_from_tangd() {
     }
     let closed = { tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap().local_addr().unwrap() };
     assert!(tang::thumbprints(closed).await.unwrap_err().starts_with("tangd unavailable"));
+}
+
+#[tokio::test]
+async fn aliases_page_adds_lists_and_deletes() {
+    let (st, mock) = state();
+    let (cookie, csrf) = login(&st).await;
+    let empty = send(&st, Method::GET, "/aliases", Some(&cookie), None, &[]).await;
+    assert_eq!(empty.status, StatusCode::OK);
+    assert!(empty.body.contains("还没有别名") && empty.body.contains("aria-current"));
+    // 没有登录或没有 CSRF：不改变任何东西。
+    assert_ne!(send(&st, Method::GET, "/aliases", None, None, &[]).await.status, StatusCode::OK);
+    let bad_csrf = format!("name=billing&url={}", enc("https://api.example.com/v1"));
+    assert_ne!(send(&st, Method::POST, "/aliases", Some(&cookie), Some(&bad_csrf), &[]).await.status, StatusCode::SEE_OTHER);
+    assert!(mock.aliases.lock().unwrap().is_empty());
+    // 新增。
+    let add = format!("csrf={csrf}&name=billing&url={}&note=n1", enc("https://api.example.com/v1"));
+    assert_eq!(send(&st, Method::POST, "/aliases", Some(&cookie), Some(&add), &[]).await.status, StatusCode::SEE_OTHER);
+    let list = send(&st, Method::GET, "/aliases", Some(&cookie), None, &[]).await;
+    assert!(list.body.contains("alias://billing") && list.body.contains("api.example.com") && list.body.contains("n1"));
+    // 校验失败：显示原因，保留填写的内容。
+    let bad = format!("csrf={csrf}&name=two&url={}", enc("http://plain.example.com"));
+    let r = send(&st, Method::POST, "/aliases", Some(&cookie), Some(&bad), &[]).await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST);
+    assert!(r.body.contains("https URL") && r.body.contains("plain.example.com"), "{}", r.body);
+    // 删除；再删一次是错误。
+    let del = format!("csrf={csrf}");
+    assert_eq!(send(&st, Method::POST, "/aliases/billing/delete", Some(&cookie), Some(&del), &[]).await.status, StatusCode::SEE_OTHER);
+    assert!(mock.aliases.lock().unwrap().is_empty());
+    assert_eq!(send(&st, Method::POST, "/aliases/billing/delete", Some(&cookie), Some(&del), &[]).await.status, StatusCode::BAD_REQUEST);
+}
+
+#[test]
+fn admin_paths() {
+    for p in ["/", "/login", "/l/abc", "/entries", "/aliases", "/static/style.css", "/tangx", "/ab"] {
+        assert!(is_admin_path(p), "{p}");
+    }
+    for p in ["/tang", "/tang/adv", "/tang/rec/k", "/a/code", "/a/code/bin/x"] {
+        assert!(!is_admin_path(p), "{p}");
+    }
+}
+
+/// 只有列表里的来源能打开管理界面；/tang/ 与 /a/ 不受影响；取不到来源时拒绝。
+#[tokio::test]
+async fn admin_allow_limits_only_the_admin_ui() {
+    let allow: front::Allow = Arc::new(|ip| ip.to_string() == "198.51.100.10");
+    let (up, _) = fake_tangd(b"HTTP/1.1 200 OK\r\nContent-Type: application/jose+json\r\nContent-Length: 2\r\n\r\n{}").await;
+    let st = AppState::new(
+        Arc::new(Mock::default()),
+        LoginLinks::new(),
+        WebConfig { domain: "pm.test".into(), port: 8120, agent_bin_dir: None, tang: Some(up), admin_allow: Some(allow) },
+    );
+    let call = |uri: &'static str, peer: Option<&'static str>| {
+        let st = st.clone();
+        async move {
+            let mut req = axum::http::Request::builder().uri(uri).header("host", "pm.test:8120").body(Body::empty()).unwrap();
+            if let Some(p) = peer {
+                req.extensions_mut().insert(ConnInfo { peer: format!("{p}:5000").parse().unwrap(), group: "g".into(), suite: "s".into() });
+            }
+            router(st).oneshot(req).await.unwrap().status()
+        }
+    };
+    assert_ne!(call("/login", Some("198.51.100.10")).await, StatusCode::NOT_FOUND);
+    for peer in [Some("198.51.100.11"), Some("203.0.113.7"), Some("127.0.0.1"), None] {
+        for uri in ["/", "/login", "/entries", "/aliases", "/l/abc", "/static/style.css"] {
+            assert_eq!(call(uri, peer).await, StatusCode::NOT_FOUND, "{uri} from {peer:?}");
+        }
+    }
+    // 舰队主机不在列表里，开机解密不能受影响。
+    assert_eq!(call("/tang/adv", Some("203.0.113.7")).await, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn security_page_shows_warnings_and_entry_form_needs_a_use() {
+    let (st, _) = state();
+    let (cookie, _) = login(&st).await;
+    let sec = send(&st, Method::GET, "/security", Some(&cookie), None, &[]).await;
+    assert!(sec.body.contains("建议复查的宽绑定") && sec.body.contains("198.0.0.0&#x2f;8"), "{}", sec.body);
+    let form = send(&st, Method::GET, "/entries/new", Some(&cookie), None, &[]).await;
+    assert!(form.body.contains("至少选一种") && !form.body.contains("全不选表示不限"));
+    assert!(form.body.contains("name=\"op_http\" value=\"1\" checked"), "新条目默认勾选 HTTP");
+}
+
+#[tokio::test]
+async fn one_click_link_logs_in_on_get_only_once() {
+    let (st, _) = state();
+    let t = st.links.create_auto();
+    assert!(st.links.is_auto(&t));
+    let r = send(&st, Method::GET, &format!("/l/{t}"), None, None, &[]).await;
+    assert_eq!(r.status, StatusCode::OK);
+    // 不是 302：Cookie 是 SameSite=Strict，要先回到本站的页面再跳转。
+    assert_eq!(r.headers.get(header::REFRESH).map(|v| v.to_str().unwrap().to_string()).as_deref(), Some("0; url=/"));
+    assert!(r.body.contains("href=\"/\""), "没有自动跳转时也能点进去：{}", r.body);
+    let cookie = r.headers.get(header::SET_COOKIE).unwrap().to_str().unwrap().to_string();
+    assert!(cookie.contains("HttpOnly") && cookie.contains("SameSite=Strict"), "{cookie}");
+    let c = cookie.split(';').next().unwrap().split_once('=').unwrap().1.to_string();
+    assert_eq!(send(&st, Method::GET, "/entries", Some(&c), None, &[]).await.status, StatusCode::OK, "已登录");
+    // 同一链接不能再用。
+    assert_eq!(send(&st, Method::GET, &format!("/l/{t}"), None, None, &[]).await.status, StatusCode::NOT_FOUND);
+    assert!(!st.links.is_auto(&t));
+    // 普通链接：GET 只显示确认按钮，不消耗（防止链接预览把它用掉）。
+    let p = st.links.create();
+    assert!(!st.links.is_auto(&p));
+    let r = send(&st, Method::GET, &format!("/l/{p}"), None, None, &[]).await;
+    assert!(r.body.contains("确认登录") && r.headers.get(header::SET_COOKIE).is_none());
+    assert!(st.links.valid(&p));
+}
+
+#[tokio::test]
+async fn login_page_helps_when_not_logged_in() {
+    let (st, _) = state();
+    let r = send(&st, Method::GET, "/login", None, None, &[]).await;
+    assert_eq!(r.status, StatusCode::OK);
+    assert!(r.body.contains("href=\"passmanager-web://login\"") && r.body.contains("passmanager web --install"), "{}", r.body);
+    assert!(!r.body.contains("登录已过期"), "第一次来不提过期");
+    // 带着失效的 Cookie：提示过期。
+    let r = send(&st, Method::GET, "/login", Some("stale-session"), None, &[]).await;
+    assert!(r.body.contains("登录已过期"));
+    // 已登录：回到首页。
+    let (cookie, _) = login(&st).await;
+    let r = send(&st, Method::GET, "/login", Some(&cookie), None, &[]).await;
+    assert_eq!(
+        (r.status, r.headers.get(header::LOCATION).map(|v| v.to_str().unwrap().to_string())),
+        (StatusCode::SEE_OTHER, Some("/".to_string()))
+    );
+    // 失效链接的说明指向一键登录。
+    assert!(send(&st, Method::GET, "/l/nope", None, None, &[]).await.body.contains("一键登录"));
 }

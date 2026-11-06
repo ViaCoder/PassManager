@@ -58,7 +58,35 @@ listener serves the web UI and the agent channel and tells them apart by the TLS
   `port = 8121` in `~/.config/passmanager/remote.toml` (the pinned server fingerprint does not change), or enroll again with a new
   `passmanager show --label` text.
 
+### 1.2 Limiting the web UI to some addresses
+
+The web port also carries `/tang/` and the one-time agent setup (`/a/`), so a firewall rule cannot separate them from the
+admin pages. `--admin-allow` limits the admin pages only:
+
+```sh
+passmanager init --admin-allow "198.51.100.10 198.51.100.12"   # restarts the service
+passmanager init --admin-allow any                             # remove the limit
+```
+
+Other sources get a plain 404, including the server itself: open the login link from a listed address. Agents, `/tang/` and
+`/a/` are not affected. The setting survives a re-run of the installer. An empty list is a configuration error, never
+"everyone".
+
 ## 2. Web admin
+
+From your own enrolled computer, one command opens it (no password, no copying a link):
+
+```sh
+passmanager web --ssh root@192.0.2.5      # first time: the server's SSH target, remembered afterwards
+passmanager web --install                 # enables the one-click button on the login page
+```
+
+`passmanager web` logs in to the server through PassManager, runs `passmanager login --auto` and opens the browser, which
+goes straight to the admin pages. The link never appears on a command line or in the output: it is written to a private file
+for a few seconds. `--install` registers the `passmanager-web://` scheme (Linux desktop entry, macOS app in `~/Applications`,
+Windows per-user registry key). The handler receives nothing from the link, so a web page can only start this one fixed
+command. A link from `login --auto` logs in as soon as it is opened: never send one to anyone.
+
 
 `ssh root@pm.example.com passmanager login` prints a one-time link (2 minutes, single use). Open it and click the button.
 Secrets are write-only. Sessions expire after 2 h idle / 12 h absolute.
@@ -122,13 +150,18 @@ version appear in the setup text.
 ### 3.1 Importing secrets (server, root)
 
 ```sh
-passmanager import --name github --domain api.github.com < token.txt
-passmanager import --name mail --fields username,password --domain mail.example.com < creds.txt   # one value per line
-passmanager import --name deploy-key --kind ssh-key --domain db1.example.com:22 \
+passmanager import --name github --ops http --domain api.github.com < token.txt
+passmanager import --name mail --ops http --fields username,password --domain mail.example.com < creds.txt   # one value per line
+passmanager import --name deploy-key --ops ssh --kind ssh-key --domain db1.example.com:22 \
     --host-key "$(ssh-keyscan -t ecdsa db1.example.com 2>/dev/null)" < id_ecdsa       # unencrypted key
 passmanager import --name github --replace --domain api.github.com < new-token.txt
-passmanager import --name pin --interactive                                           # typed without echo
+passmanager import --name pin --ops http --interactive                                           # typed without echo
 ```
+
+Every new entry needs `--ops` (`http`, `ssh`, `git`): an entry with no uses can do nothing, it never means "all uses".
+`--replace` without `--ops` keeps the existing uses. Entries that an older version stored with no uses are rewritten
+once, at unlock, to list every use explicitly (nothing changes for them), and `passmanager status` and the security page
+point out wildcard bindings that allow every use and very wide network ranges.
 
 Content is stored verbatim (one trailing newline stripped, 64 KiB max), never echoed or logged; the command prints only the
 name, byte count and domain count. Entries without `--domain` are shown as "未绑定域名" (unbound) and unusable until a domain is
@@ -143,6 +176,33 @@ SSH password for new machines, usable only for SSH and only after a stored key w
 ```sh
 passmanager import --name init-pw --domain '*.example.com' --domain 198.51.100.0/24 --ops ssh < initial-password.txt
 ```
+
+### 3.1.1 URL aliases
+
+An alias hides an address from agents. Set it in the web UI (URL 别名) or as root on the server:
+
+```sh
+passmanager alias add billing https://api.example.com:8443/v1 --note 'billing API'
+passmanager alias list
+passmanager alias remove billing
+```
+
+Agents write `alias://billing/items?q=1` in `http` (`lookup alias://billing` gives the exact form). The server fills in the
+real address and the credential bound to that host; `{{secret}}` works as usual, and a request without a placeholder is
+allowed. Agents cannot list aliases.
+
+- **The whole host is closed to agents**, on every port and for every use: `http`, `ssh`, `scp`, git, `lookup` and the
+  ssh-agent bridge all answer `ALIAS_ONLY`, and an `ssh` command that names the host is refused.
+- **The real address is removed from everything sent to agents**: bodies, headers, redirects and error messages, in
+  plain, percent, base64 and hex form, case-insensitively. It is replaced by `alias://<name>`.
+- **The path cannot leave the alias**: `..`, `%2e`, `%2f` and `%5c` are refused, as are `Range` requests.
+- An alias is one concrete `https` URL: no wildcards, placeholders, user info, query or fragment; one alias per host.
+
+Limits, stated plainly. The check is on names: another hostname or the plain IP of the same server is a different target
+unless it has its own alias. An agent with a shell on a host that can reach the server can build the address piece by
+piece, and text filtering cannot see through a deliberate transformation such as `rev`; do not give such agents a route to
+hosts that must stay hidden. A vault with aliases is written in a newer format that older versions refuse to open, which
+is deliberate: an older program would ignore the alias. Remove the aliases before rolling back to a version without them.
 
 ### 3.2 ssh-agent bridge (agent machine, Linux / macOS)
 

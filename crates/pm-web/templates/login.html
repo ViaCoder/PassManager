@@ -4,14 +4,25 @@
 <div class="auth">
   <section class="card auth-card">
     <div class="auth-icon">{{ icon("terminal") }}</div>
-    <h1>登录</h1>
-    <p class="lede">网页管理没有密码，只能用服务器上生成的一次性链接登录。</p>
-    <ol class="steps">
-      <li>在服务器上以 root 运行：
-        <div class="cmd">{{ icon("copy") }}<code>passmanager login</code></div>
-      </li>
-      <li>在 2 分钟内打开它输出的一次性链接（只能使用一次）。</li>
-    </ol>
+    <h1>登录 PassManager</h1>
+    {% if expired %}<p class="hint">{{ icon("clock") }}登录已过期（空闲 2 小时或登录满 12 小时），重新登录即可。</p>{% endif %}
+    <p class="lede">网页管理没有密码：你的电脑经 PassManager 登录服务器，生成一次性链接。</p>
+    <a class="btn block" href="passmanager-web://login">{{ icon("unlock") }}一键登录</a>
+    <p class="hint">点击后允许浏览器打开 PassManager，新标签页会自动进入管理界面，这个页面可以关闭。</p>
+    <details>
+      <summary>按钮没有反应？</summary>
+      <ol class="steps">
+        <li>第一次使用，在你的电脑上运行一次，然后再点按钮：
+          <div class="cmd">{{ icon("copy") }}<code>passmanager web --install</code></div>
+        </li>
+        <li>或者直接在你的电脑上运行：
+          <div class="cmd">{{ icon("copy") }}<code>passmanager web --ssh root@&lt;服务器&gt;</code></div>
+        </li>
+        <li>没有客户端时，在服务器上以 root 运行，并在 2 分钟内打开输出的链接：
+          <div class="cmd">{{ icon("copy") }}<code>passmanager login</code></div>
+        </li>
+      </ol>
+    </details>
   </section>
 </div>
 {% endblock %}

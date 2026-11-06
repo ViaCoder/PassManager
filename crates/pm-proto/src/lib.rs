@@ -143,6 +143,17 @@ pub enum Request {
     },
     // ---- 管理类（口令会话） ----
     Entries,
+    /// URL 别名（只给管理员：Agent 看不到真实地址，也不能列出别名）。
+    Aliases,
+    /// 新增或替换别名。
+    PutAlias {
+        name: String,
+        url: String,
+        note: String,
+    },
+    DeleteAlias {
+        name: String,
+    },
     AddEntry {
         entry: EntryInput,
     },
@@ -207,6 +218,8 @@ pub enum Request {
     },
     /// 生成网页的一次性登录链接（只限 root 会话），返回 URL 字符串。
     LoginLink,
+    /// 打开后直接进入管理界面的一次性链接（`passmanager login --auto`，只给 root）。
+    AutoLoginLink,
     /// 服务器状态（封存等级、证书、监听端口、令牌数量），返回 [`ServerStatusView`]。
     ServerStatus,
 }
@@ -407,6 +420,17 @@ pub struct SecurityView {
     pub report: Report,
     /// 运行时发现的问题（例如设备密钥无法解封、等级不一致）。
     pub runtime_issues: Vec<String>,
+    /// 值得复查的宽绑定（只提示，不影响是否就绪；只有条目名与绑定，不含秘密）。
+    #[serde(default)]
+    pub warnings: Vec<String>,
+}
+
+/// 管理员看到的别名。
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default)]
+pub struct AliasView {
+    pub name: String,
+    pub url: String,
+    pub note: String,
 }
 
 /// 新建的注册码。`url` 只显示这一次。
@@ -449,6 +473,9 @@ pub struct ServerStatusView {
     /// 额外允许访问服务端口的地址或网段。
     #[serde(default)]
     pub allow: Vec<String>,
+    /// 只有这些来源能打开管理界面；None 表示不额外限制。
+    #[serde(default)]
+    pub admin_allow: Option<Vec<String>>,
     pub locked: bool,
     pub initialized: bool,
     pub vault_mode: String,

@@ -120,6 +120,9 @@ fn init_inner(o: &InitOpts) -> Result<(), String> {
     if let Some(t) = &cfg.tang {
         println!("Tang：网页端口的 /tang/ 转发到本机 tangd {t}");
     }
+    if let Some(a) = &cfg.admin_allow {
+        println!("管理界面只允许：{}（/tang/ 与 /a/ 不受影响）", a.join(", "));
+    }
     // 防火墙（inet passmanager 表）由 install-server.sh 生成，init 只改应用内的来源检查。
     if o.allow.is_some() && l.mode == Mode::System {
         println!("注意：允许列表只在应用内生效；防火墙请用同样的 --allow 重新运行 install-server.sh（它整体替换 inet passmanager 表）");
@@ -253,11 +256,11 @@ fn root_call<T: serde::de::DeserializeOwned>(req: Request) -> Result<T, String> 
     c.call_as(&req).map_err(|e| format!("{}: {}", e.code, e.message))
 }
 
-pub fn login() -> ExitCode {
-    match root_call::<String>(Request::LoginLink) {
+pub fn login(auto: bool) -> ExitCode {
+    match root_call::<String>(if auto { Request::AutoLoginLink } else { Request::LoginLink }) {
         Ok(url) => {
             println!("{url}");
-            eprintln!("（2 分钟内有效，只能使用一次；打开后点击\"登录\"。）");
+            eprintln!("（2 分钟内有效，只能使用一次{}）", if auto { "；打开即登录" } else { "；打开后点击\"登录\"。" });
             ExitCode::SUCCESS
         }
         Err(e) => fail(e),
@@ -362,6 +365,51 @@ pub fn import(o: crate::import::ImportOpts) -> ExitCode {
 }
 
 /// `passmanager update`（服务器上的 root）：只改绑定、用途与备注，不涉及密钥。
+/// `passmanager alias list`：只给服务器上的 root，会显示真实地址。
+pub fn alias_list() -> ExitCode {
+    if let Err(e) = need_root(&layout()) {
+        return fail(e);
+    }
+    match root_call::<Vec<pm_proto::AliasView>>(Request::Aliases) {
+        Ok(list) => {
+            for a in &list {
+                println!("alias://{}\t{}\t{}", a.name, a.url, a.note);
+            }
+            println!("共 {} 个别名", list.len());
+            ExitCode::SUCCESS
+        }
+        Err(e) => fail(e),
+    }
+}
+
+/// `passmanager alias add`：新增或替换。
+pub fn alias_add(name: String, url: String, note: String) -> ExitCode {
+    if let Err(e) = need_root(&layout()) {
+        return fail(e);
+    }
+    match root_call::<pm_proto::AliasView>(Request::PutAlias { name, url, note }) {
+        Ok(a) => {
+            println!("已保存：alias://{} → {}（这台主机不能再被 Agent 直接访问）", a.name, a.url);
+            ExitCode::SUCCESS
+        }
+        Err(e) => fail(e),
+    }
+}
+
+/// `passmanager alias remove`：删除后这台主机恢复直接访问。
+pub fn alias_remove(name: String) -> ExitCode {
+    if let Err(e) = need_root(&layout()) {
+        return fail(e);
+    }
+    match root_call::<serde_json::Value>(Request::DeleteAlias { name: name.clone() }) {
+        Ok(_) => {
+            println!("已删除：{name}");
+            ExitCode::SUCCESS
+        }
+        Err(e) => fail(e),
+    }
+}
+
 pub fn update(o: crate::import::UpdateOpts) -> ExitCode {
     let l = layout();
     if let Err(e) = need_root(&l) {
@@ -504,6 +552,9 @@ fn print_status(s: &ServerStatusView) {
     if !s.allow.is_empty() {
         println!("允许列表       {}（只开放服务端口）", s.allow.join(", "));
     }
+    if let Some(a) = &s.admin_allow {
+        println!("管理界面来源   {}", a.join(", "));
+    }
     println!(
         "密码库         {}，{}",
         if s.initialized { yes(!s.locked, "已解锁", "已锁定") } else { format!("{RED}未初始化{RESET}") },
@@ -520,6 +571,11 @@ fn print_status(s: &ServerStatusView) {
     }
     println!("Agent 令牌     {}（未使用的注册码 {}）", s.tokens, s.pending_enrollments);
     println!("内层公钥指纹   {}", s.server_key_fingerprint);
+    if let Ok(sec) = root_call::<pm_proto::SecurityView>(Request::Security) {
+        for w in &sec.warnings {
+            println!("建议复查     {w}");
+        }
+    }
     println!("安全检查     {}", yes(s.ready, "全部通过", "未通过（库保持锁定，Agent 得到 NOT_READY）"));
     for i in &s.issues {
         println!("               {RED}✘{RESET} {i}");

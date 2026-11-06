@@ -27,8 +27,8 @@ use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use minijinja::value::Serde;
 use minijinja::{Environment, Value, context};
+use pm_proto::{AliasView, FieldInput, SecurityView, ServerStatusView, SettingsView, TokenView};
 use pm_proto::{EntryInput, EntryView, PendingEnrollView, PendingPinView, PinView, Request as Req, Response as Resp};
-use pm_proto::{FieldInput, SecurityView, ServerStatusView, SettingsView, TokenView};
 use serde::de::DeserializeOwned;
 
 pub use front::ConnInfo;
@@ -43,6 +43,8 @@ pub const SESSION_IDLE: Duration = Duration::from_secs(2 * 3600);
 pub const SESSION_ABSOLUTE: Duration = Duration::from_secs(12 * 3600);
 /// 同时存在的网页会话上限（超过时淘汰最早的）。
 pub const MAX_SESSIONS: usize = 16;
+/// 链接失效时的说明。
+const LINK_GONE: &str = "登录链接不存在、已使用或已过期（有效期 2 分钟）。回到登录页点“一键登录”，或在你的电脑上运行 passmanager web。";
 /// 网页表单请求体上限。
 pub const FORM_LIMIT: usize = 64 << 10;
 
@@ -70,7 +72,8 @@ fn token_hash(t: &str) -> [u8; 32] {
 /// 一次性登录链接：只在内存中保存令牌的哈希，重启即全部失效。
 #[derive(Default)]
 pub struct LoginLinks {
-    m: Mutex<HashMap<[u8; 32], Instant>>,
+    /// 令牌哈希 → （过期时间，是否打开即登录）。
+    m: Mutex<HashMap<[u8; 32], (Instant, bool)>>,
 }
 
 impl LoginLinks {
@@ -80,19 +83,25 @@ impl LoginLinks {
 
     /// 生成新链接，返回令牌（调用方拼成 `{origin}/l/{token}`）。
     pub fn create(&self) -> String {
-        self.create_at(Instant::now())
+        self.create_at(Instant::now(), false)
     }
 
-    fn create_at(&self, now: Instant) -> String {
+    /// 打开即登录的链接：只由 `passmanager login --auto` 生成，交给本机的 `passmanager web` 直接在浏览器里打开，
+    /// 不经过聊天或邮件，所以不需要防止链接预览的确认按钮。
+    pub fn create_auto(&self) -> String {
+        self.create_at(Instant::now(), true)
+    }
+
+    fn create_at(&self, now: Instant, auto: bool) -> String {
         let token = new_token();
         let mut m = self.m.lock().unwrap();
-        m.retain(|_, exp| *exp > now);
+        m.retain(|_, (exp, _)| *exp > now);
         // 同时有效的链接不超过 8 个。
         while m.len() >= 8 {
-            let oldest = *m.iter().min_by_key(|(_, e)| **e).unwrap().0;
+            let oldest = *m.iter().min_by_key(|(_, e)| e.0).unwrap().0;
             m.remove(&oldest);
         }
-        m.insert(token_hash(&token), now + LINK_TTL);
+        m.insert(token_hash(&token), (now + LINK_TTL, auto));
         token
     }
 
@@ -101,7 +110,13 @@ impl LoginLinks {
     }
 
     fn valid_at(&self, token: &str, now: Instant) -> bool {
-        self.m.lock().unwrap().get(&token_hash(token)).is_some_and(|exp| *exp > now)
+        self.m.lock().unwrap().get(&token_hash(token)).is_some_and(|(exp, _)| *exp > now)
+    }
+
+    /// 这个有效的链接是否打开即登录。
+    pub fn is_auto(&self, token: &str) -> bool {
+        let now = Instant::now();
+        self.m.lock().unwrap().get(&token_hash(token)).is_some_and(|(exp, auto)| *exp > now && *auto)
     }
 
     /// 消耗链接：先取出（删除）再检查是否过期，所以同一链接最多成功一次。
@@ -110,7 +125,7 @@ impl LoginLinks {
     }
 
     fn consume_at(&self, token: &str, now: Instant) -> bool {
-        self.m.lock().unwrap().remove(&token_hash(token)).is_some_and(|exp| exp > now)
+        self.m.lock().unwrap().remove(&token_hash(token)).is_some_and(|(exp, _)| exp > now)
     }
 }
 
@@ -232,6 +247,13 @@ pub struct WebConfig {
     pub agent_bin_dir: Option<std::path::PathBuf>,
     /// 本机 tangd 的回环地址；Some 时提供 `/tang/`（见 [`tang`]）。
     pub tang: Option<std::net::SocketAddr>,
+    /// Some 时只有这些来源能打开管理界面（见 [`is_admin_path`]）；None 表示不额外限制。
+    pub admin_allow: Option<front::Allow>,
+}
+
+/// 管理界面的路径：除了 Clevis 的 `/tang/` 和一次性接入 `/a/` 之外的一切（它们和管理界面共用端口）。
+pub fn is_admin_path(path: &str) -> bool {
+    !(path == "/tang" || path.starts_with("/tang/") || path.starts_with("/a/"))
 }
 
 impl WebConfig {
@@ -354,6 +376,7 @@ fn nav_of(template: &str) -> &'static str {
     match template {
         "dashboard.html" => "home",
         "entries.html" | "entry_form.html" => "entries",
+        "aliases.html" => "aliases",
         "tokens.html" => "tokens",
         "pins.html" => "pins",
         "settings.html" => "settings",
@@ -369,6 +392,8 @@ pub const TEMPLATES: &[(&str, &str)] = &[
     ("link.html", include_str!("../templates/link.html")),
     ("dashboard.html", include_str!("../templates/dashboard.html")),
     ("entries.html", include_str!("../templates/entries.html")),
+    ("entering.html", include_str!("../templates/entering.html")),
+    ("aliases.html", include_str!("../templates/aliases.html")),
     ("entry_form.html", include_str!("../templates/entry_form.html")),
     ("tokens.html", include_str!("../templates/tokens.html")),
     ("pins.html", include_str!("../templates/pins.html")),
@@ -413,6 +438,8 @@ pub fn router(st: St) -> Router {
         .route("/entries/{name}/edit", get(entry_edit))
         .route("/entries/{name}", post(entry_update))
         .route("/entries/{name}/delete", post(entry_delete))
+        .route("/aliases", get(aliases).post(alias_save))
+        .route("/aliases/{name}/delete", post(alias_delete))
         .route("/tokens", get(tokens).post(token_create))
         .route("/tokens/{id}/revoke", post(token_revoke))
         .route("/enrollments/{id}/cancel", post(enroll_cancel))
@@ -445,6 +472,13 @@ pub fn router(st: St) -> Router {
 async fn request_guard(State(st): State<St>, req: Request, next: axum::middleware::Next) -> Response {
     if let Err(why) = guard_check(&st.cfg.domain, st.cfg.port, &st.cfg.origin(), req.method(), req.uri(), req.headers()) {
         return (StatusCode::FORBIDDEN, why).into_response();
+    }
+    // 管理界面的来源限制：不说明原因（404），取不到来源时同样拒绝。
+    if let Some(allow) = &st.cfg.admin_allow
+        && is_admin_path(req.uri().path())
+        && !req.extensions().get::<ConnInfo>().is_some_and(|c| allow(c.peer.ip()))
+    {
+        return (StatusCode::NOT_FOUND, "not found").into_response();
     }
     next.run(req).await
 }
@@ -646,8 +680,13 @@ fn ip_of(conn: &Option<Extension<ConnInfo>>) -> String {
 
 // ---------------- 登录 ----------------
 
-async fn login_page(State(st): State<St>, conn: Option<Extension<ConnInfo>>) -> Response {
-    render(&st, "login.html", context! { conn => sv(conn.map(|c| c.0)) })
+async fn login_page(State(st): State<St>, h: HeaderMap, conn: Option<Extension<ConnInfo>>) -> Response {
+    // 已登录时直接回到首页；带着失效的 Cookie 来，说明是会话过期了。
+    let cookie = cookie_token(&h);
+    if cookie.as_deref().is_some_and(|t| st.sessions.touch_at(t, Instant::now()).is_some()) {
+        return Redirect::to("/").into_response();
+    }
+    render(&st, "login.html", context! { conn => sv(conn.map(|c| c.0)), expired => cookie.is_some(), domain => st.cfg.domain.clone() })
 }
 
 /// GET 只显示确认按钮，不消耗令牌（防止链接预览、预取把它用掉）。
@@ -658,13 +697,19 @@ async fn link_page(State(st): State<St>, Path(token): Path<String>, conn: Option
     }
     if !st.links.valid(&token) {
         st.link_limiter.fail(&ip);
-        return message(
-            &st,
-            None,
-            StatusCode::NOT_FOUND,
-            "链接无效",
-            "登录链接不存在、已使用或已过期（有效期 2 分钟）。请在服务器上重新运行 passmanager login。",
-        );
+        return message(&st, None, StatusCode::NOT_FOUND, "链接无效", LINK_GONE);
+    }
+    if st.links.is_auto(&token) {
+        if !st.links.consume(&token) {
+            return message(&st, None, StatusCode::NOT_FOUND, "链接无效", LINK_GONE);
+        }
+        let (tok, _csrf) = st.sessions.create_at(Instant::now());
+        eprintln!("[PassManager] web login from {ip} (one click)");
+        // Cookie 是 SameSite=Strict：这次导航从本地文件发起，算跨站，紧接着的 302 不会带上它。先回到本站的页面，再跳转。
+        let mut r = render(&st, "entering.html", context! { conn => sv(conn.map(|c| c.0)) });
+        r.headers_mut().insert(header::SET_COOKIE, session_cookie(&tok, SESSION_ABSOLUTE.as_secs()));
+        r.headers_mut().insert(header::REFRESH, HeaderValue::from_static("0; url=/"));
+        return r;
     }
     render(&st, "link.html", context! { token, conn => sv(conn.map(|c| c.0)) })
 }
@@ -676,7 +721,7 @@ async fn link_post(State(st): State<St>, Path(token): Path<String>, conn: Option
     }
     if !st.links.consume(&token) {
         st.link_limiter.fail(&ip);
-        return message(&st, None, StatusCode::NOT_FOUND, "链接无效", "登录链接不存在、已使用或已过期。");
+        return message(&st, None, StatusCode::NOT_FOUND, "链接无效", LINK_GONE);
     }
     let (tok, _csrf) = st.sessions.create_at(Instant::now());
     eprintln!("[PassManager] web login from {ip}");
@@ -847,7 +892,12 @@ async fn entry_new(State(st): State<St>, h: HeaderMap, conn: Option<Extension<Co
         Ok(c) => c,
         Err(r) => return r,
     };
-    page(&st, &c, "entry_form.html", context! { form => sv(with_rows(EntryForm { kind: "password".into(), ..Default::default() })) })
+    page(
+        &st,
+        &c,
+        "entry_form.html",
+        context! { form => sv(with_rows(EntryForm { kind: "password".into(), ops: vec!["http".into()], ..Default::default() })) },
+    )
 }
 
 async fn entry_edit(State(st): State<St>, h: HeaderMap, conn: Option<Extension<ConnInfo>>, Path(name): Path<String>) -> Response {
@@ -936,6 +986,66 @@ async fn entry_delete(
     };
     match call::<serde_json::Value>(&st, Req::DeleteEntry { name }).await {
         Ok(_) => done("/entries", "deleted"),
+        Err(e) => message(&st, Some(&c), StatusCode::BAD_REQUEST, "删除失败", &err_text(&e)),
+    }
+}
+
+// ---------------- URL 别名 ----------------
+
+async fn aliases(State(st): State<St>, h: HeaderMap, conn: Option<Extension<ConnInfo>>, Query(q): Query<DoneQ>) -> Response {
+    let c = match require(&st, &h, &conn) {
+        Ok(c) => c,
+        Err(r) => return r,
+    };
+    match call::<Vec<AliasView>>(&st, Req::Aliases).await {
+        Ok(list) => page(&st, &c, "aliases.html", context! { aliases => sv(&list), form => sv(AliasView::default()), ..flash_ctx(&q) }),
+        Err(e) => page(
+            &st,
+            &c,
+            "aliases.html",
+            context! { aliases => sv(Vec::<AliasView>::new()), form => sv(AliasView::default()), ..err_flash(&e) },
+        ),
+    }
+}
+
+/// 新增或替换。校验失败时保留填写的内容（别名里没有密钥）。
+async fn alias_save(
+    State(st): State<St>,
+    h: HeaderMap,
+    conn: Option<Extension<ConnInfo>>,
+    Form(f): Form<HashMap<String, String>>,
+) -> Response {
+    let c = match require_post(&st, &h, &conn, &f) {
+        Ok(c) => c,
+        Err(r) => return r,
+    };
+    let get = |k: &str| f.get(k).cloned().unwrap_or_default();
+    let (name, url, note) = (get("name"), get("url"), get("note"));
+    match call::<serde_json::Value>(&st, Req::PutAlias { name: name.clone(), url: url.clone(), note: note.clone() }).await {
+        Ok(_) => done("/aliases", "saved"),
+        Err(e) => {
+            let list: Vec<AliasView> = call(&st, Req::Aliases).await.unwrap_or_default();
+            let form = AliasView { name, url, note };
+            let mut r = page(&st, &c, "aliases.html", context! { aliases => sv(&list), form => sv(&form), ..err_flash(&e) });
+            *r.status_mut() = StatusCode::BAD_REQUEST;
+            r
+        }
+    }
+}
+
+async fn alias_delete(
+    State(st): State<St>,
+    h: HeaderMap,
+    conn: Option<Extension<ConnInfo>>,
+    Path(name): Path<String>,
+    Form(f): Form<HashMap<String, String>>,
+) -> Response {
+    let c = match require_post(&st, &h, &conn, &f) {
+        Ok(c) => c,
+        Err(r) => return r,
+    };
+    match call::<serde_json::Value>(&st, Req::DeleteAlias { name }).await {
+        Ok(_) => done("/aliases", "deleted"),
         Err(e) => message(&st, Some(&c), StatusCode::BAD_REQUEST, "删除失败", &err_text(&e)),
     }
 }

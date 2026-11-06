@@ -21,6 +21,8 @@ pub struct InitOpts {
     pub tpm_socket: Option<String>,
     /// 本机 tangd 的回环地址（`/tang/`）。Some(空) 表示取消；None 表示不改。
     pub tang: Option<String>,
+    /// 只有这些来源能打开管理界面。`any` 表示取消限制；None 表示不改。
+    pub admin_allow: Option<Vec<String>>,
     pub cf_token_stdin: bool,
     pub skip_acme: bool,
     pub no_start: bool,
@@ -81,6 +83,11 @@ pub fn merge_config(prev: Option<ServerConfig>, o: &InitOpts) -> ServerConfig {
         // 空字符串表示取消（不再提供 /tang/）。
         c.tang = Some(t.trim().to_string()).filter(|t| !t.is_empty());
     }
+    if let Some(a) = &o.admin_allow {
+        // 只有明确写 any 才取消；空值留成空列表，由配置校验拒绝（空不等于全部放行）。
+        let list = split_allow(a);
+        c.admin_allow = if list == ["any"] { None } else { Some(list) };
+    }
     c
 }
 
@@ -137,6 +144,26 @@ mod tests {
         assert!(t.validate().is_ok());
         assert_eq!(merge_config(Some(t.clone()), &InitOpts::default()).tang, t.tang, "不给 --tang 时保留");
         assert!(merge_config(Some(t), &InitOpts { tang: Some(String::new()), ..Default::default() }).tang.is_none(), "空值取消");
+    }
+
+    #[test]
+    fn admin_allow_merge() {
+        let base = merge_config(
+            None,
+            &InitOpts { domain: Some("pm.example.com".into()), lan: vec!["198.51.100.0/24".into()], ..Default::default() },
+        );
+        assert_eq!(base.admin_allow, None, "默认不限制");
+        let a = merge_config(Some(base), &InitOpts { admin_allow: Some(vec!["198.51.100.10 198.51.100.12".into()]), ..Default::default() });
+        assert_eq!(a.admin_allow.as_deref(), Some(&["198.51.100.10".to_string(), "198.51.100.12".to_string()][..]));
+        assert!(a.validate().is_ok());
+        assert_eq!(merge_config(Some(a.clone()), &InitOpts::default()).admin_allow, a.admin_allow, "不给时保留");
+        assert_eq!(
+            merge_config(Some(a.clone()), &InitOpts { admin_allow: Some(vec!["any".into()]), ..Default::default() }).admin_allow,
+            None
+        );
+        // 空值不是放行，是配置错误；无效条目同样拒绝。
+        assert!(merge_config(Some(a.clone()), &InitOpts { admin_allow: Some(vec!["".into()]), ..Default::default() }).validate().is_err());
+        assert!(merge_config(Some(a), &InitOpts { admin_allow: Some(vec!["*".into()]), ..Default::default() }).validate().is_err());
     }
 
     #[test]

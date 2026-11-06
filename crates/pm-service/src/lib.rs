@@ -316,6 +316,7 @@ impl Shared {
             agent_port: on.map(|o| o.cfg.agent_port).unwrap_or(0),
             lan: on.map(|o| o.cfg.lan.clone()).unwrap_or_default(),
             allow: on.map(|o| o.cfg.allow.clone()).unwrap_or_default(),
+            admin_allow: on.and_then(|o| o.cfg.admin_allow.clone()),
             locked,
             initialized: self.vault_exists(),
             vault_mode: if on.is_some() { "无口令（设备密钥）".into() } else { "口令".into() },
@@ -404,10 +405,18 @@ impl Shared {
     }
 
     fn rebuild_redactor(inner: &mut Inner) {
+        // 每次打开库之后都会走到这里：把显式化了的 `ops` 保存下来（只有条目数进日志）。
+        if let Some(v) = inner.vault.as_mut().filter(|v| v.migrated_ops > 0) {
+            log(&format!("entries with empty ops now list every use explicitly: {}", v.migrated_ops));
+            match v.save() {
+                Ok(()) => v.migrated_ops = 0,
+                Err(e) => log(&format!("WARNING: could not save migrated entries: {e}")),
+            }
+        }
         inner.redactor = Arc::new(match &inner.vault {
             Some(v) => {
                 let values: Vec<(String, &str)> = v.payload.entries.iter().flat_map(|e| e.secret_values()).collect();
-                Redactor::build(values.iter().map(|(l, s)| (l.as_str(), *s)))
+                Redactor::build(values.iter().map(|(l, s)| (l.as_str(), *s))).with_aliases(&v.payload.aliases)
             }
             None => Redactor::empty(),
         });
@@ -552,7 +561,7 @@ impl Shared {
                 Err(err("NOT_READY", "安全检查未通过，库保持锁定。请在\"诊断\"页处理问题后重新打开 PassManager。"))
             }
             // 一次性登录链接只能由服务器上的 root 生成。
-            Session::Admin { .. } | Session::Web | Session::Agent if matches!(req, Request::LoginLink) => {
+            Session::Admin { .. } | Session::Web | Session::Agent if matches!(req, Request::LoginLink | Request::AutoLoginLink) => {
                 Err(err("FORBIDDEN", "login links can only be created by root on the server"))
             }
             // 服务器模式：密钥只写不读；没有口令；令牌只能通过注册码经双层加密通道发放。
@@ -570,6 +579,7 @@ impl Shared {
                         | Request::Enrollments
                         | Request::EnrollCancel { .. }
                         | Request::LoginLink
+                        | Request::AutoLoginLink
                         | Request::Unlock
                 ) =>
             {
@@ -583,6 +593,7 @@ impl Shared {
                         | Request::ServerStatus
                         | Request::Lock
                         | Request::LoginLink
+                        | Request::AutoLoginLink
                         | Request::Tokens
                         | Request::RevokeToken { .. }
                         | Request::Enrollments
@@ -593,10 +604,23 @@ impl Shared {
             }
             _ => self.handle(req).await,
         };
-        match r {
+        let mut resp = match r {
             Ok(v) => Response { ok: true, data: Some(v), code: None, message: None },
             Err(e) => Response::err(&e.code, e.message),
+        };
+        // 给 Agent 的一切（结果与错误，包括上游错误里的 URL）都再过一遍别名脱敏：这是别名不泄露的最后一道关。
+        if matches!(session, Session::Agent) {
+            let redactor = self.inner.lock().await.redactor.clone();
+            if redactor.has_aliases() {
+                if let Some(d) = resp.data.as_mut() {
+                    scrub_aliases(&redactor, d);
+                }
+                if let Some(m) = resp.message.as_mut() {
+                    *m = redactor.redact_str(m);
+                }
+            }
         }
+        resp
     }
 
     fn locked_err(&self) -> ApiErr {
@@ -669,6 +693,14 @@ impl Shared {
                     mode: format!("{:?}", self.layout.mode).to_lowercase(),
                     report,
                     runtime_issues,
+                    warnings: self
+                        .inner
+                        .lock()
+                        .await
+                        .vault
+                        .as_ref()
+                        .map(|v| v.payload.entries.iter().flat_map(pm_vault::entry_risks).collect())
+                        .unwrap_or_default(),
                 })
             }
             // 0.3.8 及更早客户端的 list：不再返回任何条目信息。新客户端在本地处理 list，从不发送这个请求，
@@ -699,6 +731,7 @@ impl Shared {
                     .iter()
                     .filter(|e| e.ops.iter().any(|o| o == pm_vault::OP_GIT))
                     .flat_map(|e| e.domains.iter().cloned())
+                    .filter(|d| v.payload.aliased_host(&domain::pattern_parts(d).0).is_none())
                     .collect();
                 hosts.sort();
                 hosts.dedup();
@@ -721,6 +754,15 @@ impl Shared {
             Request::GitProxy { .. } => Err(err("BAD_REQUEST", "git proxy requests must be the streaming form")),
             Request::Ssh { target, command } => {
                 let (_, dest) = ssh::parse_route(&target)?;
+                // 命令里不能提到设了别名的主机（否则可以在别的主机上直接访问原地址）。文字检查挡不住有意的拼接，
+                // 所以结果仍然全部脱敏；见 docs/DEPLOY-LAN.md 的说明。
+                {
+                    let inner = self.inner.lock().await;
+                    let v = inner.vault.as_ref().ok_or_else(|| self.locked_err())?;
+                    if http::mentions_aliased_host(&v.payload, &command) {
+                        return Err(err("ALIAS_ONLY", "this target is not available to agents directly"));
+                    }
+                }
                 // 命令中的占位符（{{name.field}} 等）按目标主机代入，例如把口令经管道交给远端程序。
                 let command = {
                     let inner = self.inner.lock().await;
@@ -755,6 +797,48 @@ impl Shared {
                 let data = r?;
                 let (red, n) = redactor.redact(&data);
                 ok(DownloadResult { size: red.len(), data_base64: STANDARD.encode(&red), redactions: n })
+            }
+            Request::Aliases => {
+                let inner = self.inner.lock().await;
+                let v = inner.vault.as_ref().ok_or_else(|| self.locked_err())?;
+                let mut list: Vec<AliasView> = v
+                    .payload
+                    .aliases
+                    .iter()
+                    .map(|a| AliasView { name: a.name.clone(), url: a.url.clone(), note: a.note.clone() })
+                    .collect();
+                list.sort_by(|a, b| a.name.cmp(&b.name));
+                ok(list)
+            }
+            Request::PutAlias { name, url, note } => {
+                let mut a = pm_vault::Alias { name, url, note };
+                pm_vault::validate_alias(&mut a).map_err(|m| err("BAD_REQUEST", m))?;
+                let view = AliasView { name: a.name.clone(), url: a.url.clone(), note: a.note.clone() };
+                self.mutate(|v| {
+                    let host = pm_vault::alias_parts(&a.url).map(|p| p.0).unwrap_or_default();
+                    if let Some(other) = v.payload.aliased_host(&host).filter(|o| o.name != a.name) {
+                        return Err(err("BAD_REQUEST", format!("这台主机已经有别名 {}", other.name)));
+                    }
+                    v.payload.aliases.retain(|x| x.name != a.name);
+                    v.payload.aliases.push(a);
+                    Ok(())
+                })
+                .await?;
+                log(&format!("alias saved: {}", view.name));
+                ok(view)
+            }
+            Request::DeleteAlias { name } => {
+                self.mutate(|v| {
+                    let before = v.payload.aliases.len();
+                    v.payload.aliases.retain(|x| x.name != name);
+                    if v.payload.aliases.len() == before {
+                        return Err(err("UNKNOWN_ALIAS", format!("没有别名 {name}")));
+                    }
+                    Ok(())
+                })
+                .await?;
+                log(&format!("alias deleted: {name}"));
+                ok("deleted")
             }
             Request::Entries => {
                 let inner = self.inner.lock().await;
@@ -961,6 +1045,12 @@ impl Shared {
                 log("web login link created");
                 ok(format!("{}/l/{t}", on.web_origin()))
             }
+            Request::AutoLoginLink => {
+                let on = self.online.as_ref().ok_or_else(|| err("BAD_REQUEST", "only available in server mode"))?;
+                let t = on.links.create_auto();
+                log("web one-click login link created");
+                ok(format!("{}/l/{t}", on.web_origin()))
+            }
             Request::ServerStatus => {
                 let locked = self.inner.lock().await.vault.is_none();
                 ok(self.server_status(locked))
@@ -1046,7 +1136,18 @@ impl Shared {
                         && agent::public_blob(&e.secret).ok().as_deref() == Some(key_blob.as_slice())
                 })
                 .ok_or_else(|| err("UNKNOWN_CREDENTIAL", "no stored key matches"))?;
-            (e.name.clone(), e.secret.clone(), agent_allowed_host_keys(e, &v.payload.pins))
+            // 绑定到设了别名的主机的密钥不代签：Agent 不能用 ssh-agent 桥直接登录那台主机。
+            if e.domains.iter().any(|d| v.payload.aliased_host(&domain::pattern_parts(d).0).is_some()) {
+                return Err(err("ALIAS_ONLY", "this target is not available to agents directly"));
+            }
+            let pins: Vec<pm_vault::Pin> = v
+                .payload
+                .pins
+                .iter()
+                .filter(|p| v.payload.aliased_host(p.host_port.rsplit_once(':').map_or(p.host_port.as_str(), |(h, _)| h)).is_none())
+                .cloned()
+                .collect();
+            (e.name.clone(), e.secret.clone(), agent_allowed_host_keys(e, &pins))
         };
         if !allowed.contains(&host_fp) {
             log(&format!("ssh-agent sign refused: entry={name} host={host_fp} (host key not bound to this entry)"));
@@ -1178,6 +1279,7 @@ impl Shared {
             let inner = self.inner.lock().await;
             let v = inner.vault.as_ref().ok_or_else(|| self.locked_err())?;
             let hop = |d: &ssh::Dest| -> Result<(ssh::Target, Option<String>), ApiErr> {
+                http::alias_guard(&v.payload, &d.host)?;
                 let (key, pw) = http::ssh_credentials(&v.payload, d.name.as_deref(), &d.host, d.port)?;
                 let t = ssh::Target::from_entries(key.as_ref(), pw.as_ref(), &d.host, d.port, &d.user);
                 let expected = v.payload.pin(PinKind::Ssh, &t.host_port()).map(|p| p.fingerprint.clone());
@@ -1341,6 +1443,22 @@ fn pin_view(p: &Pin) -> PinView {
         algo: p.algo.clone(),
         fingerprint: p.fingerprint.clone(),
         first_seen: p.first_seen,
+    }
+}
+
+/// 把 JSON 里的每个字符串（包括键）过一遍别名脱敏。
+fn scrub_aliases(r: &Redactor, v: &mut Value) {
+    match v {
+        Value::String(s) => *s = r.redact_str(s),
+        Value::Array(a) => a.iter_mut().for_each(|x| scrub_aliases(r, x)),
+        Value::Object(m) => {
+            let old = std::mem::take(m);
+            for (k, mut x) in old {
+                scrub_aliases(r, &mut x);
+                m.insert(r.redact_str(&k), x);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -1565,7 +1683,7 @@ mod tests {
             updated: 0,
             fields: vec![],
             host_keys: vec!["SHA256:explicit".into()],
-            ops: vec![],
+            ops: pm_vault::OPS.iter().map(|o| o.to_string()).collect(),
         };
         let got = agent_allowed_host_keys(&e, &all);
         assert_eq!(got, vec!["SHA256:explicit", "FP-db1", "FP-lan", "FP-v6"]);

@@ -69,10 +69,19 @@ pub fn parse_target(t: &str) -> Result<Dest, ApiErr> {
         (hostport.to_string(), 22)
     };
     let host = pm_vault::domain::normalize_host(&host);
-    if host.is_empty() || host.contains(['/', ' ', '@', '>']) || user.contains([' ', '/', '>']) {
+    if !pm_vault::domain::valid_target_host(&host) || !valid_user(&user) {
         return Err(bad());
     }
     Ok(Dest { name, user, host, port })
+}
+
+/// 用户名只是数据：只接受常见字符，不能以 `-` 开头（OpenSSH 10.3、10.6 也开始校验 -J 与命令行上的用户名，
+/// 防止 `$`、`\`、换行之类进入 shell 或配置展开；这里经 `passmanager run` 会交给真实的 ssh）。
+fn valid_user(user: &str) -> bool {
+    !user.is_empty()
+        && user.len() <= 64
+        && !user.starts_with('-')
+        && user.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-' | b'+' | b'@'))
 }
 
 /// 解析 `[跳板>]目标`：返回（跳板, 目标）。只支持一级跳板。
@@ -365,6 +374,34 @@ pub async fn disconnect(handle: Handle<Checker>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn targets_are_data_not_patterns() {
+        for ok in [
+            "root@db1.example.com",
+            "deploy.bot@198.51.100.7:2222",
+            "a-b_c+d@db1.example.com",
+            "x/root@[2001:db8::1]:22",
+            "db1.example.com",
+        ] {
+            assert!(parse_target(ok).is_ok(), "{ok}");
+        }
+        for bad in [
+            "root@*.example.com",
+            "root@a,b.example.com",
+            "root@$(id).example.com",
+            "root@-oProxyCommand=x",
+            "-oProxyCommand=x@db1.example.com",
+            "$USER@db1.example.com",
+            "a\\b@db1.example.com",
+            "a\nb@db1.example.com",
+            "`id`@db1.example.com",
+            "a;b@db1.example.com",
+        ] {
+            assert!(parse_target(bad).is_err(), "{bad}");
+        }
+        assert!(valid_user("git") && valid_user("a@b") && !valid_user("") && !valid_user("-x") && !valid_user(&"a".repeat(65)));
+    }
 
     #[test]
     fn targets() {

@@ -255,6 +255,10 @@ pub fn prepare(payload: &Payload, method: &str, url: &str, headers: &[(String, S
     if !ALLOWED_METHODS.contains(&method_up.as_str()) {
         return Err(err("BAD_REQUEST", format!("unsupported HTTP method {method}")));
     }
+    // 别名：不需要占位符（地址本身就是要保护的东西），凭据按真实主机自动选择。
+    if let Some(rest) = url.strip_prefix(ALIAS_SCHEME) {
+        return prepare_alias(payload, &method_up, rest, headers, body);
+    }
     let names = collect_names(url, headers, body);
     if names.is_empty() {
         return Err(err(
@@ -278,6 +282,7 @@ pub fn prepare(payload: &Payload, method: &str, url: &str, headers: &[(String, S
     }
     let host = host_string(&parsed).ok_or_else(|| err("BAD_REQUEST", "URL has no host"))?;
     let port = parsed.port_or_known_default().unwrap_or(443);
+    alias_guard(payload, &host)?;
     if !parsed.username().is_empty() || parsed.password().is_some() {
         return Err(err("BAD_REQUEST", "credentials in the URL authority are not allowed; use a header or query placeholder"));
     }
@@ -391,6 +396,7 @@ fn prepare_with_base(
     }
     let host = host_string(&base_url).ok_or_else(|| bad("has no host"))?;
     let port = base_url.port_or_known_default().unwrap_or(443);
+    alias_guard(payload, &host)?;
     // 开头的值所属条目必须绑定到它自己的主机。
     check_domain(&base_r.entry, &host, port, pm_vault::OP_HTTP).map_err(|e| {
         if e.code == "DOMAIN_MISMATCH" {
@@ -399,6 +405,36 @@ fn prepare_with_base(
             e
         }
     })?;
+    let base = Zeroizing::new(base.to_string());
+    finish_base(
+        payload,
+        method_up,
+        label,
+        &base,
+        &host,
+        port,
+        rest,
+        headers,
+        body,
+        Some((base_r.entry.name.clone(), base_r.entry.self_signed)),
+    )
+}
+
+/// 在基础地址后接上 Agent 写的部分，代入其他占位符，得到最终的请求。
+#[allow(clippy::too_many_arguments)]
+fn finish_base(
+    payload: &Payload,
+    method_up: &str,
+    label: String,
+    base: &str,
+    host: &str,
+    port: u16,
+    rest: &str,
+    headers: &[(String, String)],
+    body: Option<&str>,
+    first: Option<(String, bool)>,
+) -> Result<Prepared, ApiErr> {
+    let host = host.to_string();
     // 其他占位符（后缀、请求头、请求体）照常按最终的主机解析与编码。
     let mut names = template::find_names(rest);
     for n in collect_names("", headers, body) {
@@ -415,7 +451,7 @@ fn prepare_with_base(
         template::substitute(rest, |n| lookup(n).map(|s| percent_encoding::utf8_percent_encode(&s, URL_ENCODE).to_string()))
             .map_err(|n| err("UNKNOWN_CREDENTIAL", format!("no credential \"{n}\"")))?,
     );
-    let full = Zeroizing::new(format!("{}{}", base.as_str(), suffix.as_str()));
+    let full = Zeroizing::new(format!("{base}{}", suffix.as_str()));
     let real = Url::parse(&full).map_err(|_| err("BAD_URL", format!("{label} followed by the rest of the URL is not a valid URL")))?;
     if real.scheme() != "https"
         || host_string(&real).as_deref() != Some(host.as_str())
@@ -438,7 +474,7 @@ fn prepare_with_base(
         Some(b) => Some(Zeroizing::new(template::substitute(b, lookup).map_err(|n| err("UNKNOWN_CREDENTIAL", n))?)),
         None => None,
     };
-    let mut entries = vec![base_r.entry.name.clone()];
+    let mut entries: Vec<String> = first.iter().map(|(n, _)| n.clone()).collect();
     entries.extend(resolved.iter().map(|(_, r)| r.entry.name.clone()));
     Ok(Prepared {
         method: reqwest::Method::from_bytes(method_up.as_bytes()).map_err(|_| err("BAD_REQUEST", "bad method"))?,
@@ -447,10 +483,74 @@ fn prepare_with_base(
         body,
         host,
         port,
-        self_signed: base_r.entry.self_signed || resolved.iter().any(|(_, r)| r.entry.self_signed),
+        self_signed: first.is_some_and(|(_, s)| s) || resolved.iter().any(|(_, r)| r.entry.self_signed),
         names: entries,
         label: Some(label),
     })
+}
+
+/// `Content-Encoding` 的值表示内容经过压缩（空值与 `identity` 不算）。
+pub fn is_compressed(encoding: &str) -> bool {
+    let e = encoding.trim();
+    !e.is_empty() && !e.eq_ignore_ascii_case("identity")
+}
+
+/// 别名 URL 的写法（`alias://名称/路径?查询`）。
+pub const ALIAS_SCHEME: &str = "alias://";
+
+/// 设了别名的主机不能被直接访问。错误信息不提别名，也不重复主机：Agent 不需要知道这两者的关系。
+pub fn alias_guard(payload: &Payload, host: &str) -> Result<(), ApiErr> {
+    match payload.aliased_host(host) {
+        Some(_) => Err(err("ALIAS_ONLY", "this target is not available to agents directly")),
+        None => Ok(()),
+    }
+}
+
+/// 文本里是否提到了设了别名的主机（ssh 命令：防止在别的主机上直接访问原地址）。
+pub fn mentions_aliased_host(payload: &Payload, text: &str) -> bool {
+    let t = text.to_ascii_lowercase();
+    payload.aliases.iter().filter_map(|a| pm_vault::alias_parts(&a.url)).any(|(h, _, _)| t.contains(&h))
+}
+
+/// 拆开 `名称/路径?查询`，检查 Agent 写的部分不能离开别名的基础路径。
+pub fn split_alias(rest: &str) -> Result<(&str, &str), ApiErr> {
+    let (name, suffix) = rest.split_at(rest.find(['/', '?']).unwrap_or(rest.len()));
+    let bad = || err("BAD_URL", "write alias://<name>/<path>?<query>; no fragment, backslash, or path traversal");
+    if name.is_empty() || suffix.chars().any(|c| c.is_control() || c.is_whitespace() || matches!(c, '\\' | '#')) {
+        return Err(bad());
+    }
+    let path = suffix.split('?').next().unwrap_or_default();
+    let low = path.to_ascii_lowercase();
+    if low.contains("%2e") || low.contains("%2f") || low.contains("%5c") || path.split('/').any(|s| s == ".." || s == ".") {
+        return Err(bad());
+    }
+    Ok((name, suffix))
+}
+
+/// `alias://名称/路径`：真实地址只在服务器上代入；消息与日志只提别名。
+fn prepare_alias(
+    payload: &Payload,
+    method_up: &str,
+    rest: &str,
+    headers: &[(String, String)],
+    body: Option<&str>,
+) -> Result<Prepared, ApiErr> {
+    let (name, suffix) = split_alias(rest)?;
+    // 分段请求可以把地址切开，绕过结果里的匹配。
+    if headers.iter().any(|(k, _)| k.eq_ignore_ascii_case("range") || k.eq_ignore_ascii_case("if-range")) {
+        return Err(err("BAD_REQUEST", "Range requests are not allowed through an alias"));
+    }
+    let a = payload.alias(name).ok_or_else(|| err("UNKNOWN_ALIAS", format!("no alias \"{name}\"")))?;
+    let (host, port, base_path) = pm_vault::alias_parts(&a.url).ok_or_else(|| err("INTERNAL", "stored alias is not valid"))?;
+    // 这台主机的条目决定是否按自签证书校验，即使这次请求没有用到它的密钥。
+    let first = select_by_host(payload, &host, port, pm_vault::OP_HTTP).ok().map(|e| (e.name.clone(), e.self_signed));
+    let p = finish_base(payload, method_up, format!("{ALIAS_SCHEME}{name}"), &a.url, &host, port, suffix, headers, body, first)?;
+    // 最后再确认一次：规范化之后仍在基础路径之内。
+    let inside = base_path.is_empty() || p.url.path() == base_path || p.url.path().starts_with(&format!("{base_path}/"));
+    if !inside {
+        return Err(err("BAD_URL", "the path leaves the alias"));
+    }
+    Ok(p)
 }
 
 // ---- 证书指纹固定 ----
@@ -615,9 +715,11 @@ pub async fn execute(p: Prepared, expected_pin: Option<String>, redactor: &Redac
     }
     let client = builder.build().map_err(|e| err("INTERNAL", format!("http client: {e}")))?;
     let mut rb = client.request(p.method.clone(), p.url.clone());
-    for (k, v) in &p.headers {
+    for (k, v) in p.headers.iter().filter(|(k, _)| !k.eq_ignore_ascii_case("accept-encoding")) {
         rb = rb.header(k.as_str(), v.as_str());
     }
+    // 只收未压缩的内容：压缩后的字节里找不到要脱敏的文本（Agent 自己解压就绕过了脱敏）。
+    rb = rb.header("accept-encoding", "identity");
     if let Some(b) = &p.body {
         rb = rb.body(b.to_string());
     }
@@ -635,6 +737,14 @@ pub async fn execute(p: Prepared, expected_pin: Option<String>, redactor: &Redac
         }
     };
     let status = resp.status().as_u16();
+    if let Some(enc) = resp.headers().get("content-encoding").and_then(|v| v.to_str().ok())
+        && is_compressed(enc)
+    {
+        return Err(err(
+            "UPSTREAM_ERROR",
+            "the server sent a compressed response, which cannot be checked for secrets; it was not returned",
+        ));
+    }
     let mut headers = Vec::new();
     for (k, v) in resp.headers() {
         let name = k.as_str().to_ascii_lowercase();
@@ -691,7 +801,7 @@ mod tests {
             updated: 0,
             fields: vec![],
             host_keys: vec![],
-            ops: vec![],
+            ops: pm_vault::OPS.iter().map(|o| o.to_string()).collect(),
         });
         p
     }
@@ -710,7 +820,7 @@ mod tests {
             updated: 0,
             fields: vec![fld("username", "me@example.com"), fld("password", "p&ss w0rd")],
             host_keys: vec![],
-            ops: vec![],
+            ops: pm_vault::OPS.iter().map(|o| o.to_string()).collect(),
         });
         p.entries.push(Entry {
             name: "db.example.com".into(),
@@ -723,7 +833,7 @@ mod tests {
             updated: 0,
             fields: vec![],
             host_keys: vec![],
-            ops: vec![],
+            ops: pm_vault::OPS.iter().map(|o| o.to_string()).collect(),
         });
         p.entries.push(Entry {
             name: "unbound".into(),
@@ -736,9 +846,111 @@ mod tests {
             updated: 0,
             fields: vec![],
             host_keys: vec![],
-            ops: vec![],
+            ops: pm_vault::OPS.iter().map(|o| o.to_string()).collect(),
         });
         p
+    }
+
+    fn alias_payload() -> Payload {
+        let mut e = fields_payload().entries.remove(0);
+        e.name = "api.example.com".into();
+        e.fields.clear();
+        e.secret = Zeroizing::new("tok-secret-value".into());
+        e.domains = vec!["api.example.com".into()];
+        e.ops = vec!["http".into()];
+        Payload {
+            entries: vec![e],
+            aliases: vec![pm_vault::Alias { name: "billing".into(), url: "https://api.example.com:8443/v1".into(), note: String::new() }],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn alias_requests_fill_in_the_real_address() {
+        let p = alias_payload();
+        let r = prepare(&p, "GET", "alias://billing/items?q=1", &[("Authorization".into(), "Bearer {{secret}}".into())], None).unwrap();
+        assert_eq!(r.url.as_str(), "https://api.example.com:8443/v1/items?q=1");
+        assert_eq!(r.headers[0].1.as_str(), "Bearer tok-secret-value", "凭据按真实主机选择");
+        assert_eq!(r.label.as_deref(), Some("alias://billing"), "消息只提别名");
+        // 没有占位符也可以：别名本身就是要保护的东西。
+        assert_eq!(prepare(&p, "GET", "alias://billing", &[], None).unwrap().url.as_str(), "https://api.example.com:8443/v1");
+        assert_eq!(prepare(&p, "GET", "alias://nope/x", &[], None).err().unwrap().code, "UNKNOWN_ALIAS");
+    }
+
+    #[test]
+    fn alias_paths_cannot_leave_the_base() {
+        let p = alias_payload();
+        for u in [
+            "alias://billing/../admin",
+            "alias://billing/a/../../admin",
+            "alias://billing/%2e%2e/admin",
+            "alias://billing/%2E%2E/admin",
+            "alias://billing/a%2fb",
+            "alias://billing/a%5cb",
+            "alias://billing/./x",
+            "alias://billing/x#frag",
+            "alias://billing/a\\b",
+            "alias://billing/a b",
+            "alias:///x",
+        ] {
+            assert_eq!(prepare(&p, "GET", u, &[], None).err().unwrap().code, "BAD_URL", "{u}");
+        }
+        // 名称里塞别的东西：只是一个不存在的别名，不会被解析成主机。
+        for u in ["alias://billing@evil.example.net/x", "alias://evil.example.net/x", "alias://billing:443/x"] {
+            assert_eq!(prepare(&p, "GET", u, &[], None).err().unwrap().code, "UNKNOWN_ALIAS", "{u}");
+        }
+    }
+
+    #[test]
+    fn aliased_host_cannot_be_reached_directly() {
+        let mut p = alias_payload();
+        let h = [("Authorization".to_string(), "Bearer {{secret}}".to_string())];
+        for u in ["https://api.example.com/x", "https://API.EXAMPLE.COM:8443/v1", "https://api.example.com:1/"] {
+            let e = prepare(&p, "GET", u, &h, None).err().unwrap();
+            assert_eq!(e.code, "ALIAS_ONLY", "{u}");
+            assert!(!e.message.contains("billing") && !e.message.contains("example.com"), "{}", e.message);
+        }
+        assert_eq!(alias_guard(&p, "other.example.com").map_err(|e| e.code), Ok(()));
+        assert_eq!(alias_guard(&p, "API.example.com.").map_err(|e| e.code), Err("ALIAS_ONLY".to_string()));
+        // 基础地址放在条目里也绕不过去。
+        let mut b = p.entries[0].clone();
+        b.name = "gw".into();
+        b.secret = Zeroizing::new("https://api.example.com/v2".into());
+        p.entries.push(b);
+        assert_eq!(prepare(&p, "GET", "{{gw}}/x", &[], None).err().unwrap().code, "ALIAS_ONLY");
+    }
+
+    #[test]
+    fn compressed_responses_are_not_returned() {
+        for e in ["gzip", "GZIP", "br", "deflate", "zstd", " gzip ", "gzip, br"] {
+            assert!(is_compressed(e), "{e}");
+        }
+        for e in ["", " ", "identity", "IDENTITY"] {
+            assert!(!is_compressed(e), "{e}");
+        }
+    }
+
+    #[test]
+    fn alias_requests_refuse_ranges() {
+        let p = alias_payload();
+        for h in ["Range", "range", "If-Range"] {
+            let e = prepare(&p, "GET", "alias://billing/x", &[(h.into(), "bytes=0-3".into())], None).err().unwrap();
+            assert_eq!(e.code, "BAD_REQUEST", "{h}");
+        }
+    }
+
+    #[test]
+    fn mentions_and_split_alias() {
+        let p = alias_payload();
+        assert!(mentions_aliased_host(&p, "curl -s https://API.example.com/x"));
+        assert!(!mentions_aliased_host(&p, "uptime"));
+        assert!(!mentions_aliased_host(&Payload::default(), "anything"), "没有别名时什么都不算");
+        assert_eq!(split_alias("b/x?y=1").unwrap(), ("b", "/x?y=1"));
+        assert_eq!(split_alias("b?y=1").unwrap(), ("b", "?y=1"));
+        assert_eq!(split_alias("b").unwrap(), ("b", ""));
+        // 查询串里的 .. 不是路径；空名称不行。
+        assert_eq!(split_alias("b/x?p=../y").unwrap(), ("b", "/x?p=../y"));
+        assert!(split_alias("/x").is_err());
     }
 
     /// 多字段占位符：{{name.field}}、只有一个条目匹配时的 {{field}}、{{secret}} 对多字段条目报错、
@@ -822,7 +1034,12 @@ mod tests {
             updated: 0,
             fields: vec![],
             host_keys: vec![],
-            ops: ops.iter().map(|o| o.to_string()).collect(),
+            // 测试里 &[] 表示全部用途（条目的 ops 不再允许为空）。
+            ops: if ops.is_empty() {
+                pm_vault::OPS.iter().map(|o| o.to_string()).collect()
+            } else {
+                ops.iter().map(|o| o.to_string()).collect()
+            },
         }
     }
 

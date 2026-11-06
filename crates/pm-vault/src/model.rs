@@ -42,7 +42,7 @@ pub struct Entry {
     pub fields: Vec<Field>,
     /// SSH 私钥条目：允许 ssh-agent 桥代为签名的主机密钥指纹（`SHA256:…`）。v2 新增。
     pub host_keys: Vec<String>,
-    /// 允许的用途（[`OPS`]：`http`、`ssh`、`git`）；为空表示不限。v2 新增。
+    /// 允许的用途（[`OPS`]：`http`、`ssh`、`git`）；为空表示什么都不允许。v2 新增。
     /// 例如只用于 SSH 登录的初始口令设为 `ssh`，就不会被代入 HTTP 请求。`ssh` 包括 scp / sftp 与 ssh-agent 桥。
     pub ops: Vec<String>,
 }
@@ -120,9 +120,10 @@ pub fn validate_field_name(name: &str) -> Result<(), String> {
 }
 
 impl Entry {
-    /// 条目是否允许用于该用途（`ops` 为空表示不限）。
+    /// 条目是否允许用于该用途。`ops` 为空表示**什么都不允许**：空集合从不等于"全部"
+    /// （OpenSSH 10.3 改掉的同类语义：空 principals 曾匹配任何用户）。旧库的空 `ops` 由 [`Payload::migrate_ops`] 显式化。
     pub fn allows(&self, op: &str) -> bool {
-        self.ops.is_empty() || self.ops.iter().any(|o| o == op)
+        self.ops.iter().any(|o| o == op)
     }
 
     /// 密钥内容看起来是 SSH/PEM 私钥。
@@ -222,6 +223,9 @@ pub fn validate_entry(e: &mut Entry) -> Result<(), String> {
             ops.push(o);
         }
     }
+    if ops.is_empty() {
+        return Err(format!("至少选择一种用途（{}）", OPS.join("、")));
+    }
     ops.sort_by_key(|o| OPS.iter().position(|x| x == o));
     e.ops = ops;
     let mut out = Vec::new();
@@ -276,6 +280,94 @@ impl Default for Settings {
     }
 }
 
+/// URL 别名：Agent 只用 `alias://名称/路径`，服务器代入真实地址；这台主机不能再被直接访问，真实地址也不会出现在给 Agent 的结果里。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Alias {
+    pub name: String,
+    /// 规范形式：`https://主机[:端口][/路径]`（没有末尾的 `/`、查询串、片段与用户信息）。
+    pub url: String,
+    pub note: String,
+}
+
+/// 别名的主机、端口与路径（`url` 已由 [`validate_alias`] 规范化；不合法时 None）。
+pub fn alias_parts(url: &str) -> Option<(String, u16, String)> {
+    let rest = url.strip_prefix("https://")?;
+    let (authority, path) = rest.find('/').map_or((rest, ""), |i| rest.split_at(i));
+    let (host, port) = domain::pattern_parts(authority);
+    Some((domain::normalize_host(&host), port.unwrap_or(443), path.to_string()))
+}
+
+/// 校验并规范化别名：名称只能是小写字母、数字与 `-`；地址必须是具体的 https URL，不能有通配符、占位符、
+/// 用户信息、查询串或片段（别名绑定一个确定的地址，不是模式）。
+pub fn validate_alias(a: &mut Alias) -> Result<(), String> {
+    a.name = a.name.trim().to_string();
+    let n = a.name.as_bytes();
+    if n.is_empty() || n.len() > 63 || !n.iter().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'-') || n[0] == b'-' {
+        return Err("别名只能包含小写字母、数字和 -，以字母或数字开头，长度 1~63".into());
+    }
+    let raw = a.url.trim();
+    let bad = || format!("地址必须是具体的 https URL，例如 https://api.example.com/v1：{raw}");
+    let lower = raw.get(..8).map(str::to_ascii_lowercase).ok_or_else(bad)?;
+    if lower != "https://" {
+        return Err(bad());
+    }
+    let rest = &raw[8..];
+    if rest.chars().any(|c| c.is_control() || c.is_whitespace() || matches!(c, '*' | '{' | '}' | '@' | '\\' | '?' | '#' | ',')) {
+        return Err(bad());
+    }
+    let (authority, path) = rest.find('/').map_or((rest, ""), |i| rest.split_at(i));
+    let explicit = authority.contains("]:") || (!authority.starts_with('[') && authority.contains(':'));
+    let (host, port) = domain::pattern_parts(authority);
+    if explicit && port.is_none_or(|p| p == 0) {
+        return Err(bad());
+    }
+    // 太短的主机名无法可靠地从结果里脱敏（短串会命中无关内容，脱敏也有最短长度）。
+    if !domain::valid_target_host(&host) || host.len() < 4 {
+        return Err(bad());
+    }
+    if path.split('/').any(|s| s == ".." || s == "." || s.to_ascii_lowercase().contains("%2e") || s.to_ascii_lowercase().contains("%2f")) {
+        return Err(bad());
+    }
+    let h = domain::normalize_host(&host);
+    let h = if h.contains(':') { format!("[{h}]") } else { h };
+    let port = port.filter(|p| *p != 443).map(|p| format!(":{p}")).unwrap_or_default();
+    a.url = format!("https://{h}{port}{}", path.trim_end_matches('/'));
+    a.note = a.note.trim().to_string();
+    Ok(())
+}
+
+/// 这个条目值得管理员复查的宽绑定（只提示，不阻止：写在状态与安全页，不含任何秘密）。
+pub fn entry_risks(e: &Entry) -> Vec<String> {
+    let mut out = Vec::new();
+    let all_ops = OPS.iter().all(|o| e.ops.iter().any(|x| x == o));
+    for d in &e.domains {
+        let (h, _) = domain::pattern_parts(d);
+        if h.starts_with("*.") && all_ops {
+            out.push(format!("{}：通配符绑定 {d} 同时允许全部用途，建议只保留需要的用途", e.name));
+        }
+        if let Some((_, len)) = h.rsplit_once('/')
+            && len.parse::<u32>().is_ok_and(|l| l < if h.contains(':') { 48 } else { 16 })
+        {
+            out.push(format!("{}：网段绑定 {d} 很宽，建议缩小", e.name));
+        }
+    }
+    out
+}
+
+/// v2 载荷（0.2 到 0.3.11-rc.6），只用于读取旧库。
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct PayloadV2 {
+    pub entries: Vec<Entry>,
+    pub pins: Vec<Pin>,
+    pub settings: Settings,
+}
+
+impl From<PayloadV2> for Payload {
+    fn from(p: PayloadV2) -> Self {
+        Self { entries: p.entries, pins: p.pins, settings: p.settings, aliases: Vec::new() }
+    }
+}
+
 /// 0.1.0 的载荷结构（v1），只用于读取旧库。
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct PayloadV1 {
@@ -292,7 +384,7 @@ impl std::fmt::Debug for EntryV1 {
 
 impl From<PayloadV1> for Payload {
     fn from(p: PayloadV1) -> Self {
-        Self { entries: p.entries.into_iter().map(Entry::from).collect(), pins: p.pins, settings: p.settings }
+        Self { entries: p.entries.into_iter().map(Entry::from).collect(), pins: p.pins, settings: p.settings, aliases: Vec::new() }
     }
 }
 
@@ -302,11 +394,32 @@ pub struct Payload {
     pub entries: Vec<Entry>,
     pub pins: Vec<Pin>,
     pub settings: Settings,
+    pub aliases: Vec<Alias>,
 }
 
 impl Payload {
     pub fn entry(&self, name: &str) -> Option<&Entry> {
         self.entries.iter().find(|e| e.name == name)
+    }
+
+    pub fn alias(&self, name: &str) -> Option<&Alias> {
+        self.aliases.iter().find(|a| a.name == name)
+    }
+
+    /// 这台主机所属的别名（不看端口：设了别名的主机整台都不能被直接访问）。
+    pub fn aliased_host(&self, host: &str) -> Option<&Alias> {
+        let h = domain::normalize_host(host);
+        self.aliases.iter().find(|a| alias_parts(&a.url).is_some_and(|(ah, _, _)| ah == h))
+    }
+
+    /// 旧库的 `ops` 为空表示不限：显式写成全部用途，权限不变，但在界面上可见，也不再依赖"空等于全部"。返回改动的条目数。
+    pub fn migrate_ops(&mut self) -> usize {
+        let mut n = 0;
+        for e in self.entries.iter_mut().filter(|e| e.ops.is_empty()) {
+            e.ops = OPS.iter().map(|o| o.to_string()).collect();
+            n += 1;
+        }
+        n
     }
 
     pub fn pin(&self, kind: PinKind, host_port: &str) -> Option<&Pin> {

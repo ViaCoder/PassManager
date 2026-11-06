@@ -261,6 +261,10 @@ pub struct ServerConfig {
     /// 访问限制与网页相同（局域网网段与允许列表）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tang: Option<String>,
+    /// 可选：只有这些地址或网段能打开管理界面（`/tang/` 与一次性接入 `/a/` 不受影响，它们和管理界面共用端口）。
+    /// None 表示不额外限制（仍受局域网网段与允许列表约束）。空列表是配置错误，绝不表示"全部放行"。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admin_allow: Option<Vec<String>>,
 }
 
 pub const LETS_ENCRYPT: &str = "https://acme-v02.api.letsencrypt.org/directory";
@@ -297,6 +301,7 @@ impl Default for ServerConfig {
             renew_days: default_renew_days(),
             tpm_socket: None,
             tang: None,
+            admin_allow: None,
         }
     }
 }
@@ -338,6 +343,14 @@ impl ServerConfig {
         }
         if let Some(t) = &self.tang {
             parse_tang(t)?;
+        }
+        if let Some(a) = &self.admin_allow {
+            if a.is_empty() {
+                return Err("管理界面的来源列表不能为空（不限制时写 --admin-allow any）".into());
+            }
+            for e in a {
+                parse_net(e).map_err(|m| format!("管理界面的来源列表：{m}"))?;
+            }
         }
         if !(self.dns == "cloudflare" || self.dns.starts_with("challtest:")) {
             return Err(format!("未知的 DNS 方式：{}", self.dns));

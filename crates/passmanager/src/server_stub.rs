@@ -12,7 +12,7 @@ fn linux_only() -> ExitCode {
 pub fn init(_: InitOpts) -> ExitCode {
     linux_only()
 }
-pub fn login() -> ExitCode {
+pub fn login(_: bool) -> ExitCode {
     linux_only()
 }
 pub fn is_admin() -> bool {
@@ -31,6 +31,15 @@ pub fn import(_: crate::import::ImportOpts) -> ExitCode {
     linux_only()
 }
 pub fn update(_: crate::import::UpdateOpts) -> ExitCode {
+    linux_only()
+}
+pub fn alias_list() -> ExitCode {
+    linux_only()
+}
+pub fn alias_add(_: String, _: String, _: String) -> ExitCode {
+    linux_only()
+}
+pub fn alias_remove(_: String) -> ExitCode {
     linux_only()
 }
 pub fn token_list() -> ExitCode {

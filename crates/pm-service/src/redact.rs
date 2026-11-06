@@ -13,6 +13,9 @@ const MIN_LEN: usize = 4;
 pub struct Redactor {
     ac: Option<AhoCorasick>,
     replacements: Vec<String>,
+    /// 别名的真实地址与主机（不区分大小写：主机名大小写不敏感，服务器常把它原样或改写后回显）。
+    alias_ac: Option<AhoCorasick>,
+    alias_replacements: Vec<String>,
 }
 
 fn push(out: &mut Vec<Vec<u8>>, v: Vec<u8>) {
@@ -123,7 +126,7 @@ fn lower_hex_escapes(s: &str) -> String {
 
 impl Redactor {
     pub fn empty() -> Self {
-        Self { ac: None, replacements: vec![] }
+        Self { ac: None, replacements: vec![], alias_ac: None, alias_replacements: vec![] }
     }
 
     pub fn build<'a>(secrets: impl IntoIterator<Item = (&'a str, &'a str)>) -> Self {
@@ -147,18 +150,56 @@ impl Redactor {
             b.kind(Some(aho_corasick::AhoCorasickKind::ContiguousNFA));
         }
         let ac = b.build(&patterns).ok();
-        Self { ac, replacements }
+        Self { ac, replacements, ..Self::empty() }
+    }
+
+    /// 加上别名：结果里的真实地址（URL、`主机:端口`、`主机/路径`、主机，以及它们的编码形式）都换成 `alias://名称`。
+    pub fn with_aliases(mut self, aliases: &[pm_vault::Alias]) -> Self {
+        let mut patterns = Vec::new();
+        let mut replacements = Vec::new();
+        for a in aliases {
+            let Some((host, port, path)) = pm_vault::alias_parts(&a.url) else { continue };
+            let authority = a.url.trim_start_matches("https://").split('/').next().unwrap_or_default().to_string();
+            let scheme_less = format!("{authority}{path}");
+            let mut forms = vec![a.url.clone(), scheme_less, authority, format!("{host}:{port}"), host];
+            forms.sort();
+            forms.dedup();
+            for f in forms {
+                for v in variants(&f) {
+                    patterns.push(v);
+                    replacements.push(format!("alias://{}", a.name));
+                }
+            }
+        }
+        if !patterns.is_empty() {
+            let mut b = AhoCorasickBuilder::new();
+            b.match_kind(MatchKind::LeftmostLongest).ascii_case_insensitive(true);
+            self.alias_ac = b.build(&patterns).ok();
+            self.alias_replacements = replacements;
+        }
+        self
+    }
+
+    /// 是否有别名要脱敏。
+    pub fn has_aliases(&self) -> bool {
+        self.alias_ac.is_some()
     }
 
     /// 返回 (脱敏后的数据, 命中次数)。
     pub fn redact(&self, data: &[u8]) -> (Vec<u8>, usize) {
-        let Some(ac) = &self.ac else { return (data.to_vec(), 0) };
-        let count = ac.find_iter(data).count();
+        let (out, n) = Self::pass(&self.ac, &self.replacements, data.to_vec());
+        let (out, m) = Self::pass(&self.alias_ac, &self.alias_replacements, out);
+        (out, n + m)
+    }
+
+    fn pass(ac: &Option<AhoCorasick>, replacements: &[String], data: Vec<u8>) -> (Vec<u8>, usize) {
+        let Some(ac) = ac else { return (data, 0) };
+        let count = ac.find_iter(&data).count();
         if count == 0 {
-            return (data.to_vec(), 0);
+            return (data, 0);
         }
-        let reps: Vec<&[u8]> = self.replacements.iter().map(|s| s.as_bytes()).collect();
-        (ac.replace_all_bytes(data, &reps), count)
+        let reps: Vec<&[u8]> = replacements.iter().map(|s| s.as_bytes()).collect();
+        (ac.replace_all_bytes(&data, &reps), count)
     }
 
     pub fn redact_str(&self, s: &str) -> String {
@@ -169,6 +210,32 @@ impl Redactor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn aliases_hide_every_form_of_the_address() {
+        let a = pm_vault::Alias { name: "billing".into(), url: "https://api.example.com:8443/v1".into(), note: String::new() };
+        let r = Redactor::build([("k", "s3cret-value")]).with_aliases(std::slice::from_ref(&a));
+        assert!(r.has_aliases() && !Redactor::build([("k", "s3cret-value")]).has_aliases());
+        for (text, want) in [
+            ("see https://api.example.com:8443/v1/x", "see alias://billing/x"),
+            ("HTTPS://API.EXAMPLE.COM:8443/V1/x", "alias://billing/x"),
+            ("Location: https://Api.Example.Com:8443/v1", "Location: alias://billing"),
+            ("host api.example.com only", "host alias://billing only"),
+            ("api.example.com:8443 down", "alias://billing down"),
+            ("api.example.com:8443/v1/y", "alias://billing/y"),
+            ("key s3cret-value", "key [REDACTED:k]"),
+        ] {
+            assert_eq!(r.redact_str(text), want, "{text}");
+        }
+        // 编码形式：百分号、base64、hex。
+        let enc = percent_encoding::utf8_percent_encode("https://api.example.com:8443/v1", percent_encoding::NON_ALPHANUMERIC).to_string();
+        assert_eq!(r.redact_str(&enc), "alias://billing");
+        use base64::Engine;
+        let b64 = base64::engine::general_purpose::STANDARD.encode("api.example.com");
+        assert!(!r.redact_str(&b64).contains(b64.trim_end_matches('=')), "{b64}");
+        assert!(!r.redact_str(&hex::encode("api.example.com")).contains(&hex::encode("api.example.com")));
+        assert_eq!(r.redact(b"nothing here").1, 0);
+    }
 
     /// 很长的密钥（导入上限 64 KiB）：构建与扫描都必须很快（曾因自动选择 DFA 而卡住）。
     #[test]

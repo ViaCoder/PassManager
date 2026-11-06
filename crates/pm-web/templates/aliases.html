@@ -1,0 +1,57 @@
+{% extends "base.html" %}
+{% block title %}URL 别名 · PassManager{% endblock %}
+{% block body %}
+<div class="page-head">
+  <div>
+    <h1>{{ icon("link") }}URL 别名</h1>
+    <p class="lede">给一个地址起别名后，Agent 只能写 <code>alias://名称/路径</code>：这台主机不能再被直接访问，真实地址也会从返回给 Agent 的所有内容里去掉。</p>
+  </div>
+</div>
+<form method="post" action="/aliases" class="form" autocomplete="off">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <section class="card">
+    <h2 class="card-title">{{ icon("plus") }}新增或替换</h2>
+    <div class="field">
+      <label for="a-name">别名</label>
+      <input id="a-name" name="name" maxlength="63" required pattern="[a-z0-9][a-z0-9\-]*" value="{{ form.name }}" spellcheck="false" aria-describedby="h-a-name">
+      <p class="hint" id="h-a-name">小写字母、数字和 -。名称已存在时替换它的地址。</p>
+    </div>
+    <div class="field">
+      <label for="a-url">真实地址</label>
+      <input id="a-url" name="url" required value="{{ form.url }}" spellcheck="false" aria-describedby="h-a-url">
+      <p class="hint" id="h-a-url">只接受具体的 https 地址（可以带路径），不能用通配符。限制针对整台主机（所有端口）。</p>
+    </div>
+    <div class="field">
+      <label for="a-note">说明 <span class="opt">可选，Agent 看不到</span></label>
+      <input id="a-note" name="note" value="{{ form.note }}">
+    </div>
+    <div class="row"><button>{{ icon("plus") }}保存</button></div>
+  </section>
+</form>
+{% if aliases %}
+<div class="table-wrap"><table class="list stack">
+  <thead><tr><th scope="col">别名</th><th scope="col">真实地址</th><th scope="col">说明</th><th scope="col"><span class="sr-only">操作</span></th></tr></thead>
+  <tbody>
+  {% for a in aliases %}
+  <tr>
+    <td data-label="别名"><code class="strong">alias://{{ a.name }}</code></td>
+    <td data-label="真实地址"><code>{{ a.url }}</code></td>
+    <td data-label="说明">{% if a.note %}{{ a.note }}{% else %}<span class="muted">—</span>{% endif %}</td>
+    <td class="actions-cell">
+      <details class="confirm">
+        <summary class="btn danger-outline small">{{ icon("trash") }}删除</summary>
+        <form method="post" action="/aliases/{{ a.name | urlencode }}/delete" class="confirm-box"><input type="hidden" name="csrf" value="{{ csrf }}"><span>删除 <code>{{ a.name }}</code>？之后这台主机恢复直接访问。</span><button class="danger small">{{ icon("trash") }}确认删除</button></form>
+      </details>
+    </td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table></div>
+{% else %}
+<div class="empty">
+  {{ icon("link") }}
+  <p class="empty-title">还没有别名</p>
+  <p class="muted">不想让 Agent 看到或直接访问的地址，可以在上面给它起一个别名。</p>
+</div>
+{% endif %}
+{% endblock %}

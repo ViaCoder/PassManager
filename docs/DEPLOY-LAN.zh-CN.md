@@ -72,7 +72,31 @@ systemd-analyze security passmanager; journalctl -u passmanager -n 30 --no-pager
 - 已注册的 Agent：端口变更后，把 `~/.config/passmanager/remote.toml` 里的 `port` 改成新端口（固定的服务端指纹不变），
   或者用新的 `passmanager show --label` 文字重新注册。
 
+### 1.2 只允许部分地址打开网页管理
+
+网页端口上还有 `/tang/` 和一次性 Agent 接入（`/a/`），防火墙规则分不开它们和管理页面。`--admin-allow` 只限制管理页面：
+
+```sh
+passmanager init --admin-allow "198.51.100.10 198.51.100.12"   # 会重启服务
+passmanager init --admin-allow any                             # 取消限制
+```
+
+其他来源（包括服务器本机）只会得到 404：请从列表里的地址打开登录链接。Agent、`/tang/` 和 `/a/` 不受影响。重新运行安装脚本不会改变这项设置。
+空列表是配置错误，绝不表示“所有人”。
+
 ## 2. 网页管理
+
+在你自己已注册的电脑上，一条命令就能打开（没有密码，也不用复制链接）：
+
+```sh
+passmanager web --ssh root@192.0.2.5      # 第一次写服务器的 SSH 目标，之后记住
+passmanager web --install                 # 启用登录页的一键登录按钮
+```
+
+`passmanager web` 经 PassManager 登录服务器，运行 `passmanager login --auto`，然后打开浏览器直接进入管理页面。链接不会出现在命令行或输出里，
+只在一个私有文件里保留几秒。`--install` 注册 `passmanager-web://` 协议（Linux 桌面入口、macOS 的 `~/Applications` 应用、Windows 当前用户的注册表项）。
+处理程序收不到链接里的任何内容，所以网页只能触发这一条固定的命令。`login --auto` 的链接打开即登录，不要发给别人。
+
 
 ```sh
 ssh root@pm.example.com passmanager login     # 输出 https://pm.example.com/l/…（2 分钟内有效，只能用一次）
@@ -133,12 +157,12 @@ agent-bin 目录里的 `SHA256SUMS` 同时打开接入说明的第 2 步：curl 
 ### 3.1 导入密钥（服务器，root）
 
 ```sh
-passmanager import --name github --domain api.github.com < token.txt                 # 单值（例如 PAT）
-passmanager import --name mail --fields username,password --domain mail.example.com < creds.txt   # 每行一个字段值
-passmanager import --name deploy-key --kind ssh-key --domain db1.example.com:22 \
+passmanager import --name github --ops http --domain api.github.com < token.txt                 # 单值（例如 PAT）
+passmanager import --name mail --ops http --fields username,password --domain mail.example.com < creds.txt   # 每行一个字段值
+passmanager import --name deploy-key --ops ssh --kind ssh-key --domain db1.example.com:22 \
     --host-key "$(ssh-keyscan -t ecdsa db1.example.com 2>/dev/null)" < id_ecdsa       # 未加密的私钥
 passmanager import --name github --replace --domain api.github.com < new-token.txt    # 替换已有条目
-passmanager import --name pin --interactive                                           # 在终端里不回显地输入
+passmanager import --name pin --ops http --interactive                                           # 在终端里不回显地输入
 ```
 
 内容原样保存（只去掉末尾一个换行，上限 64 KiB），从不回显或写入日志，只打印 `已导入 <名称>（<n> 字节，<k> 个域名）`。
@@ -152,6 +176,34 @@ passmanager import --name pin --interactive                                     
 ```sh
 passmanager import --name init-pw --domain '*.example.com' --domain 198.51.100.0/24 --ops ssh < initial-password.txt
 ```
+
+新条目必须写 `--ops`（`http`、`ssh`、`git`）：没有用途的条目什么都不能做，绝不表示“全部用途”。`--replace` 不写 `--ops` 时
+保留原来的用途。旧版本保存的没有用途的条目，会在解锁时改写一次，明确列出全部用途（权限不变）；`passmanager status` 与安全页会
+提示允许全部用途的通配符绑定和很宽的网段。
+
+### 3.1.1 URL 别名
+
+别名向 Agent 隐藏一个地址。在网页（URL 别名）里设置，或在服务器上以 root 运行：
+
+```sh
+passmanager alias add billing https://api.example.com:8443/v1 --note '账单接口'
+passmanager alias list
+passmanager alias remove billing
+```
+
+Agent 在 `http` 里写 `alias://billing/items?q=1`（`lookup alias://billing` 给出确切写法）。服务器代入真实地址和绑定到那台主机的凭据；
+`{{secret}}` 照常使用，不带占位符的请求也可以。Agent 不能列出别名。
+
+- **整台主机对 Agent 关闭**，所有端口、所有用途：`http`、`ssh`、`scp`、git、`lookup` 和 ssh-agent 桥都返回 `ALIAS_ONLY`，
+  提到这台主机的 `ssh` 命令也会被拒绝。
+- **真实地址从发给 Agent 的一切内容里去掉**：响应体、响应头、重定向与错误信息，包括明文、百分号、base64、hex 形式，不区分大小写，
+  替换为 `alias://<名称>`。
+- **路径不能离开别名**：`..`、`%2e`、`%2f`、`%5c` 都被拒绝，`Range` 请求也是。
+- 别名是一个具体的 `https` URL：不能有通配符、占位符、用户信息、查询串或片段；每台主机一个别名。
+
+限制，如实说明：检查针对名称，同一台服务器的其他主机名或 IP 是另一个目标，除非也给它设别名。Agent 如果在某台能访问这台服务器的主机上
+有 shell，可以把地址一段段拼出来，文字过滤也看不穿 `rev` 这类有意的变换；必须隐藏的主机，不要给这类 Agent 留路径。
+有别名的库用新格式保存，旧版本打不开，这是有意的：旧程序会忽略别名。回滚到没有别名功能的版本之前，先删除别名。
 
 ### 3.2 ssh-agent 桥（Agent 机器，Linux / macOS）
 

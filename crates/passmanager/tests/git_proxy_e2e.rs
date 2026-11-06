@@ -55,7 +55,10 @@ fn git_proxy_push_and_clone() {
     let upstream = format!("127.0.0.1:{port}");
 
     // 服务器上的条目：PAT（自签证书主机）。
-    let o = env.run_stdin(&["import", "--name", "gitpat", "--domain", &upstream, "--self-signed"], format!("{PAT}\n").as_bytes());
+    let o = env.run_stdin(
+        &["import", "--ops", "http,ssh,git", "--name", "gitpat", "--domain", &upstream, "--self-signed"],
+        format!("{PAT}\n").as_bytes(),
+    );
     assert!(o.status.success(), "{}", stderr(&o));
 
     // Agent 机器上的代理。

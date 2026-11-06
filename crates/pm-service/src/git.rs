@@ -166,6 +166,7 @@ pub struct Plan {
 
 /// 在库中选择条目（按主机与端口）。
 pub fn plan(payload: &pm_vault::Payload, host: &str, port: u16, redactor: Arc<Redactor>) -> Result<Plan, ApiErr> {
+    http::alias_guard(payload, host)?;
     let e = http::select_by_host(payload, host, port, pm_vault::OP_GIT)?;
     let (user, token) = credentials(e)?;
     let expected_pin =
@@ -447,7 +448,7 @@ mod tests {
             updated: 0,
             fields: fields.iter().map(|(n, v)| pm_vault::Field { name: n.to_string(), value: Zeroizing::new(v.to_string()) }).collect(),
             host_keys: vec![],
-            ops: vec![],
+            ops: pm_vault::OPS.iter().map(|o| o.to_string()).collect(),
         };
         let (u, t) = credentials(&mk("ghp_x", &[])).unwrap();
         assert_eq!((u.as_str(), t.as_str()), ("x-access-token", "ghp_x"));

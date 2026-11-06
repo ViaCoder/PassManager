@@ -45,6 +45,8 @@ pub struct Vault {
     pub payload: Payload,
     /// 是否从 `.bak` 恢复（主文件缺失或损坏）。为真时下一次保存不把主文件复制为 `.bak`。
     recovered: std::sync::atomic::AtomicBool,
+    /// 打开时显式化了多少个 `ops` 为空的旧条目（见 [`Payload::migrate_ops`]）。不为 0 时调用方应保存一次。
+    pub migrated_ops: usize,
 }
 
 /// 依次尝试主文件与 `.bak`。只有主文件缺失或损坏（截断、半写、校验失败）时才回退到 `.bak`；
@@ -100,6 +102,7 @@ impl Vault {
             keys,
             payload: Payload::default(),
             recovered: std::sync::atomic::AtomicBool::new(false),
+            migrated_ops: 0,
         };
         v.save()?;
         Ok(v)
@@ -131,7 +134,8 @@ impl Vault {
         };
         // 新库没有设置过：默认不自动锁定（没有口令，锁定后只能由管理员在网页或 root 命令解锁）。
         let payload = Payload { settings: Settings { auto_lock_hours: 0 }, ..Default::default() };
-        let v = Self { path: path.to_path_buf(), header, keys, payload, recovered: std::sync::atomic::AtomicBool::new(false) };
+        let v =
+            Self { path: path.to_path_buf(), header, keys, payload, recovered: std::sync::atomic::AtomicBool::new(false), migrated_ops: 0 };
         v.save()?;
         Ok(v)
     }
@@ -166,8 +170,9 @@ impl Vault {
             CryptoError::AuthFailed => VaultError::Corrupt("payload authentication failed (tampered?)"),
             other => other.into(),
         })?;
-        let payload = format::decode_payload(&plain)?;
-        Ok(Self { path: path.to_path_buf(), header, keys, payload, recovered: std::sync::atomic::AtomicBool::new(false) })
+        let mut payload = format::decode_payload(&plain)?;
+        let migrated_ops = payload.migrate_ops();
+        Ok(Self { path: path.to_path_buf(), header, keys, payload, recovered: std::sync::atomic::AtomicBool::new(false), migrated_ops })
     }
 
     /// 只读取文件头（不需要口令）。
@@ -311,6 +316,116 @@ mod tests {
     use pm_crypto::kdf::TEST_PARAMS;
     use zeroize::Zeroizing;
 
+    #[test]
+    fn empty_ops_never_mean_everything() {
+        let mut e = entry("x");
+        e.ops.clear();
+        assert!(e.ops.is_empty() && !e.allows(OP_HTTP) && !e.allows(OP_SSH), "空用途什么都不允许");
+        assert!(validate_entry(&mut e).unwrap_err().contains("至少选择一种用途"));
+        e.ops = vec!["ssh".into()];
+        validate_entry(&mut e).unwrap();
+        assert!(e.allows(OP_SSH) && !e.allows(OP_HTTP));
+        // 旧库：显式化成全部用途（权限不变），已有用途的条目不动，第二次没有改动。
+        let mut old = entry("old");
+        old.ops.clear();
+        let mut p = Payload { entries: vec![old, e], ..Default::default() };
+        assert_eq!(p.migrate_ops(), 1);
+        assert_eq!(p.entries[0].ops, vec!["http", "ssh", "git"]);
+        assert_eq!(p.entries[1].ops, vec!["ssh"]);
+        assert_eq!(p.migrate_ops(), 0);
+    }
+
+    fn alias(name: &str, url: &str) -> Result<Alias, String> {
+        let mut a = Alias { name: name.into(), url: url.into(), note: " n ".into() };
+        validate_alias(&mut a).map(|_| a)
+    }
+
+    #[test]
+    fn alias_validation() {
+        let a = alias("billing-1", " HTTPS://API.Example.com:443/v1/ ").unwrap();
+        assert_eq!((a.url.as_str(), a.note.as_str()), ("https://api.example.com/v1", "n"));
+        assert_eq!(alias("a", "https://api.example.com:8443").unwrap().url, "https://api.example.com:8443");
+        assert_eq!(alias("a", "https://[2001:db8::1]:8443/x").unwrap().url, "https://[2001:db8::1]:8443/x");
+        assert_eq!(alias("a", "https://198.51.100.7").unwrap().url, "https://198.51.100.7");
+        for bad in ["", "-a", "A", "a_b", "a/b", "a.b"] {
+            assert!(alias(bad, "https://api.example.com").is_err(), "{bad}");
+        }
+        assert!(alias(&"a".repeat(64), "https://api.example.com").is_err());
+        // 不是模式：通配符、占位符、逗号都不接受；也不接受用户信息、查询串、片段、路径穿越和明文 http。
+        for bad in [
+            "http://api.example.com",
+            "ftp://x.example.com",
+            "https://",
+            "https",
+            "https://*.example.com",
+            "https://*",
+            "https://{{x}}.example.com",
+            "https://a,b.example.com",
+            "https://u@api.example.com",
+            "https://api.example.com/?k=v",
+            "https://api.example.com/#f",
+            "https://api.example.com/a/../b",
+            "https://api.example.com/%2e%2e/b",
+            "https://api.example.com/a%2Fb",
+            "https://api.example.com:0",
+            "https://api.example.com:x",
+            "https://::1",
+            "https://a b.example.com",
+            "https://api.example.com\\x",
+        ] {
+            assert!(alias("a", bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn alias_parts_and_lookup() {
+        assert_eq!(alias_parts("https://api.example.com/v1"), Some(("api.example.com".into(), 443, "/v1".into())));
+        assert_eq!(alias_parts("https://api.example.com:8443"), Some(("api.example.com".into(), 8443, "".into())));
+        assert_eq!(alias_parts("https://[2001:db8::1]:8443/x"), Some(("2001:db8::1".into(), 8443, "/x".into())));
+        assert_eq!(alias_parts("http://api.example.com"), None);
+        let p = Payload { aliases: vec![alias("b", "https://api.example.com:8443/v1").unwrap()], ..Default::default() };
+        assert_eq!(p.alias("b").unwrap().name, "b");
+        assert!(p.alias("c").is_none());
+        // 整台主机：大小写、末尾的点、其他端口都算；子域名不算。
+        for h in ["api.example.com", "API.Example.COM."] {
+            assert!(p.aliased_host(h).is_some(), "{h}");
+        }
+        assert!(p.aliased_host("x.api.example.com").is_none());
+        assert!(Payload::default().aliased_host("api.example.com").is_none(), "没有别名时不匹配任何主机");
+    }
+
+    #[test]
+    fn entry_risks_flag_broad_bindings() {
+        let mut e = entry("x");
+        e.domains = vec!["*.example.com".into(), "198.51.100.0/24".into()];
+        e.ops = vec!["ssh".into()];
+        assert!(entry_risks(&e).is_empty(), "具体的用途和不算宽的网段不提示");
+        e.ops = OPS.iter().map(|o| o.to_string()).collect();
+        assert!(entry_risks(&e)[0].contains("*.example.com"));
+        e.domains = vec!["198.0.0.0/8".into()];
+        e.ops = vec!["ssh".into()];
+        assert!(entry_risks(&e)[0].contains("网段"));
+        assert!(!entry_risks(&e)[0].contains("s\u{0}"));
+    }
+
+    #[test]
+    fn payload_versions_round_trip() {
+        let mut p = Payload { entries: vec![entry("x")], ..Default::default() };
+        // 没有别名：写 v2，回滚到旧程序仍能读。
+        let v2 = format::encode_payload(&p).unwrap();
+        assert_eq!(&v2[4..9], format::PAYLOAD_V2_MAGIC);
+        assert_eq!(format::decode_payload(&v2).unwrap().entries[0].name, "x");
+        // 有别名：写 v3，读回别名。
+        p.aliases.push(alias("b", "https://api.example.com").unwrap());
+        let v3 = format::encode_payload(&p).unwrap();
+        assert_eq!(&v3[4..9], format::PAYLOAD_V3_MAGIC);
+        let back = format::decode_payload(&v3).unwrap();
+        assert_eq!((back.entries[0].name.as_str(), back.aliases), ("x", p.aliases.clone()));
+        // 别名全部删除后回到 v2。
+        p.aliases.clear();
+        assert_eq!(&format::encode_payload(&p).unwrap()[4..9], format::PAYLOAD_V2_MAGIC);
+    }
+
     fn test_mode() {
         // SAFETY: 测试中设置环境变量。
         unsafe { std::env::set_var("PASSMANAGER_INSECURE_TEST_KDF", "1") };
@@ -328,7 +443,7 @@ mod tests {
             updated: now(),
             fields: vec![],
             host_keys: vec![],
-            ops: vec![],
+            ops: OPS.iter().map(|o| o.to_string()).collect(),
         }
     }
 

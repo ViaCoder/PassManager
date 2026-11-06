@@ -29,6 +29,9 @@
 {% if st.vault_recovered_from_backup %}
 <div class="callout warn" role="alert">{{ icon("warning") }}<div><p class="callout-title">已从备份恢复</p><p>主库文件损坏，已从 .bak 恢复（下次保存时修复）。</p></div></div>
 {% endif %}
+{% if sec.warnings %}
+<div class="callout" role="status">{{ icon("info") }}<div><p class="callout-title">建议复查的宽绑定</p><ul>{% for w in sec.warnings %}<li>{{ w }}</li>{% endfor %}</ul></div></div>
+{% endif %}
 {% if sec.runtime_issues %}
 <div class="callout bad" role="alert">{{ icon("warning") }}<div><p class="callout-title">运行时问题</p><ul>{% for i in sec.runtime_issues %}<li>{{ i }}</li>{% endfor %}</ul></div></div>
 {% endif %}

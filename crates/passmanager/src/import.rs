@@ -83,19 +83,12 @@ pub fn apply_update(o: &UpdateOpts, cur: &pm_proto::EntryView) -> Result<(EntryI
     let mut ops = cur.ops.clone();
     let add: Vec<String> = o.add_ops.iter().map(|x| norm_op(x)).collect::<Result<_, _>>()?;
     let remove: Vec<String> = o.remove_ops.iter().map(|x| norm_op(x)).collect::<Result<_, _>>()?;
-    if !add.is_empty() && ops.is_empty() {
-        msgs.push("该条目的用途不限，--add-op 无需修改".into());
-    } else {
-        for a in add {
-            if !ops.contains(&a) {
-                ops.push(a);
-            }
+    for a in add {
+        if !ops.contains(&a) {
+            ops.push(a);
         }
     }
     if !remove.is_empty() {
-        if ops.is_empty() {
-            ops = pm_vault::OPS.iter().map(|x| x.to_string()).collect();
-        }
         ops.retain(|x| !remove.contains(x));
         if ops.is_empty() {
             return Err("不能移除全部用途（不再使用的条目请在网页里删除）".into());
@@ -153,8 +146,8 @@ pub fn build_entry(o: &ImportOpts, data: &[u8]) -> Result<(EntryInput, usize), S
         note: o.note.clone(),
         self_signed: o.self_signed,
         kind: o.kind.clone(),
-        // --replace 时整体替换（与域名一样）：没有 --ops 表示不限。
-        ops: Some(o.ops.iter().map(|x| x.trim().to_ascii_lowercase()).collect()),
+        // 没有 --ops：新条目被校验拒绝（空用途什么都不允许）；--replace 时保留原来的用途。
+        ops: (!o.ops.is_empty()).then(|| o.ops.iter().map(|x| x.trim().to_ascii_lowercase()).collect()),
         ..Default::default()
     };
     if let Some(bad) = o.ops.iter().map(|x| x.trim().to_ascii_lowercase()).find(|x| !pm_vault::OPS.contains(&x.as_str())) {
@@ -243,7 +236,7 @@ mod tests {
 
     #[test]
     fn ops_option() {
-        assert_eq!(build_entry(&opts(), b"x").unwrap().0.ops, Some(vec![]), "默认不限；--replace 时也整体替换");
+        assert_eq!(build_entry(&opts(), b"x").unwrap().0.ops, None, "没写 --ops：新条目被校验拒绝，--replace 保留原来的用途");
         let mut o = opts();
         o.ops = vec!["SSH".into(), " git".into()];
         assert_eq!(build_entry(&o, b"x").unwrap().0.ops, Some(vec!["ssh".to_string(), "git".to_string()]));
@@ -324,12 +317,13 @@ mod tests {
         assert_eq!(i.note, "old");
         assert!(i.self_signed);
         assert_eq!(msgs.len(), 1);
-        // 不限用途的条目：--add-op 不收紧；--remove-op 变成其余用途。
+        // 空用途什么都不允许：--add-op 打开一种用途；--remove-op 不能把它变成"其余全部"。
         let o = UpdateOpts { add_ops: vec!["http".into()], ..Default::default() };
-        assert_eq!(apply_update(&o, &view(&["a"], &[])).unwrap().0.ops, Some(vec![]));
+        assert_eq!(apply_update(&o, &view(&["a"], &[])).unwrap().0.ops, Some(vec!["http".to_string()]));
         let o = UpdateOpts { remove_ops: vec!["ssh".into()], note: Some("new".into()), ..Default::default() };
-        let (i, _) = apply_update(&o, &view(&["a"], &[])).unwrap();
-        assert_eq!((i.ops, i.note.as_str()), (Some(vec!["git".to_string(), "http".to_string()]), "new"));
+        assert!(apply_update(&o, &view(&["a"], &[])).is_err());
+        let (i, _) = apply_update(&o, &view(&["a"], &["http", "ssh"])).unwrap();
+        assert_eq!((i.ops, i.note.as_str()), (Some(vec!["http".to_string()]), "new"));
         assert!(apply_update(&UpdateOpts { remove_ops: vec!["http".into()], ..Default::default() }, &view(&["a"], &["http"])).is_err());
         assert!(apply_update(&UpdateOpts { add_ops: vec!["ftp".into()], ..Default::default() }, &view(&["a"], &["http"])).is_err());
     }

@@ -8,7 +8,7 @@ use pm_proto::LookupView;
 use pm_vault::{Entry, OP_GIT, OP_HTTP, Payload, domain};
 use url::Url;
 
-use crate::http::{host_string, ssh_credentials};
+use crate::http::{ALIAS_SCHEME, alias_guard, host_string, split_alias, ssh_credentials};
 use crate::ssh::{parse_route, parse_target};
 use crate::{ApiErr, err};
 
@@ -94,6 +94,7 @@ fn by_host_guess(
     name: Option<&str>,
     user: Option<&str>,
 ) -> Result<LookupView, ApiErr> {
+    alias_guard(payload, host)?;
     let r = by_host(payload, host, port, use_, name, user);
     if r.is_ok() || explicit {
         return r;
@@ -154,6 +155,31 @@ fn git_how(hp: &str) -> String {
     )
 }
 
+/// `alias://名称`：只说明怎样用别名。不返回条目名（自动生成的条目名就是主机名）、备注或真实地址。
+fn by_alias(payload: &Payload, rest: &str) -> Result<LookupView, ApiErr> {
+    let (name, _) = split_alias(rest)?;
+    let a = payload.alias(name).ok_or_else(|| err("UNKNOWN_ALIAS", format!("no alias \"{name}\"")))?;
+    let (host, port, _) = pm_vault::alias_parts(&a.url).ok_or_else(|| err("INTERNAL", "stored alias is not valid"))?;
+    let prefix = format!("{ALIAS_SCHEME}{name}");
+    let e = crate::http::select_by_host(payload, &host, port, OP_HTTP).ok();
+    let fields = e.map(field_names).unwrap_or_default();
+    let header = match e {
+        Some(e) if e.fields.is_empty() => ",\"headers\":{\"Authorization\":\"Bearer {{secret}}\"}".to_string(),
+        Some(e) => token_field(e).map(|f| format!(",\"headers\":{{\"Authorization\":\"Bearer {{{{{f}}}}}\"}}")).unwrap_or_default(),
+        None => String::new(),
+    };
+    Ok(LookupView {
+        target: prefix.clone(),
+        use_: "http".into(),
+        credentials: vec![],
+        fields,
+        how: format!(
+            "http {{\"method\":\"GET\",\"url\":\"{prefix}/<path>\"{header}}} - the server fills in the real address; it never appears \
+             in results and that host cannot be used directly"
+        ),
+    })
+}
+
 /// `{{名称}}` 或 `{{名称.字段}}` 形式的目标：只在没有主机可查时使用（例如基础地址本身是秘密）。
 fn by_name(payload: &Payload, token: &str, use_: Use) -> Result<LookupView, ApiErr> {
     let token = token.trim();
@@ -171,6 +197,10 @@ fn by_name(payload: &Payload, token: &str, use_: Use) -> Result<LookupView, ApiE
             (*e, Some(f.to_string()))
         }
     };
+    // 按名字也不能绕过别名：这个条目绑定了设了别名的主机时，只能经别名使用。
+    for d in &entry.domains {
+        alias_guard(payload, &domain::pattern_parts(d).0)?;
+    }
     let op = match use_ {
         Use::Http => OP_HTTP,
         Use::Git => OP_GIT,
@@ -238,6 +268,11 @@ pub fn lookup(payload: &Payload, target: &str, use_: Option<&str>) -> Result<Loo
     }
     let given = use_.filter(|u| !u.trim().is_empty()).map(Use::parse).transpose()?;
 
+    // alias://名称
+    if let Some(rest) = t.strip_prefix(ALIAS_SCHEME) {
+        return by_alias(payload, rest);
+    }
+
     // {{名称}} / {{名称.字段}}
     if let Some(inner) = t.strip_prefix("{{").and_then(|r| r.strip_suffix("}}")) {
         return by_name(payload, inner, given.unwrap_or(Use::Http));
@@ -269,6 +304,9 @@ pub fn lookup(payload: &Payload, target: &str, use_: Option<&str>) -> Result<Loo
         }
         let (jump, dest) = parse_route(t)?;
         let jump = jump.ok_or_else(|| err("BAD_REQUEST", format!("invalid target \"{t}\"")))?;
+        // 两跳都先检查，再查任何凭据：错误不会因为另一跳没有凭据而变成别的样子。
+        alias_guard(payload, &jump.host)?;
+        alias_guard(payload, &dest.host)?;
         let hop = |d: &crate::ssh::Dest| -> Result<(String, Vec<String>, bool), ApiErr> {
             let (key, pw) = ssh_credentials(payload, d.name.as_deref(), &d.host, d.port)?;
             let prefix = d.name.as_ref().map(|n| format!("{n}/")).unwrap_or_default();
@@ -356,6 +394,53 @@ pub fn tang_view(origin: &str, thps: &[String]) -> LookupView {
 mod tests {
     use super::*;
 
+    /// 一个设了别名的主机：条目名就是主机名（auto_name 的结果），另有一个基础地址条目指向它。
+    fn aliased() -> Payload {
+        Payload {
+            entries: vec![
+                entry("api.example.com", "tok-secret-value", &["api.example.com"], &["http", "ssh"]),
+                entry("plain", "tok-secret-other", &["other.example.com"], &["http"]),
+            ],
+            aliases: vec![pm_vault::Alias { name: "billing".into(), url: "https://api.example.com:8443/v1".into(), note: "n".into() }],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn alias_lookup_reveals_nothing() {
+        let p = aliased();
+        let v = lookup(&p, "alias://billing", None).unwrap();
+        assert_eq!((v.target.as_str(), v.use_.as_str()), ("alias://billing", "http"));
+        assert!(v.credentials.is_empty(), "条目名可能就是主机名");
+        assert!(v.how.contains("alias://billing/<path>") && v.how.contains("{{secret}}"), "{}", v.how);
+        let all = serde_json::to_string(&v).unwrap();
+        assert!(!all.contains("api.example.com") && !all.contains("8443") && !all.contains("/v1"), "{all}");
+        assert_eq!(lookup(&p, "alias://nope", None).unwrap_err().code, "UNKNOWN_ALIAS");
+        assert_eq!(lookup(&p, "alias://", None).unwrap_err().code, "BAD_URL");
+    }
+
+    #[test]
+    fn aliased_host_is_refused_by_every_lookup_form() {
+        let p = aliased();
+        for t in [
+            "https://api.example.com/x",
+            "https://API.example.com:8443/v1",
+            "https://api.example.com:9999/",
+            "root@api.example.com",
+            "root@api.example.com:2222",
+            "api.example.com",
+            "api.example.com:8443",
+            "{{api.example.com}}",
+            "root@other.example.com>root@api.example.com",
+            "root@api.example.com>root@other.example.com",
+        ] {
+            let e = lookup(&p, t, None).unwrap_err();
+            assert_eq!(e.code, "ALIAS_ONLY", "{t}");
+            assert!(!e.message.contains("billing") && !e.message.contains("example.com"), "错误不泄露关系：{}", e.message);
+        }
+        assert!(lookup(&p, "https://other.example.com/x", None).is_ok(), "其他主机不受影响");
+    }
+
     #[test]
     fn tang_targets() {
         let o = Some("https://pm.example.com:8120");
@@ -399,7 +484,12 @@ mod tests {
             updated: 0,
             fields: vec![],
             host_keys: vec![],
-            ops: ops.iter().map(|o| o.to_string()).collect(),
+            // 测试里 &[] 表示全部用途（条目的 ops 不再允许为空）。
+            ops: if ops.is_empty() {
+                pm_vault::OPS.iter().map(|o| o.to_string()).collect()
+            } else {
+                ops.iter().map(|o| o.to_string()).collect()
+            },
         }
     }
 

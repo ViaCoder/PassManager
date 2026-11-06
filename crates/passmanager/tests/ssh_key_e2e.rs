@@ -289,14 +289,21 @@ fn ssh_key_auth_end_to_end() {
 
     // ---- 导入：只打印公钥指纹 ----
     let (da, db, dc) = (format!("localhost:{}", a.port), format!("localhost:{}", b.port), format!("localhost:{}", c.port));
-    let o = env.run_stdin(&["import", "--name", "adminkey", "--kind", "ssh-key", "--domain", &da, "--domain", &db], good_pem.as_bytes());
+    let o = env.run_stdin(
+        &["import", "--ops", "http,ssh,git", "--name", "adminkey", "--kind", "ssh-key", "--domain", &da, "--domain", &db],
+        good_pem.as_bytes(),
+    );
     assert!(o.status.success(), "{}", stderr(&o));
     assert!(stdout(&o).contains(&format!("公钥指纹：ecdsa-sha2-nistp384 {good_fp}")), "{}", stdout(&o));
     outputs += &(stdout(&o) + &stderr(&o));
     // 加密的私钥、不是私钥的内容：拒绝。
-    let o = env.run_stdin(&["import", "--name", "enc", "--kind", "ssh-key", "--domain", &da], &std::fs::read(&enc).unwrap());
+    let o = env.run_stdin(
+        &["import", "--ops", "http,ssh,git", "--name", "enc", "--kind", "ssh-key", "--domain", &da],
+        &std::fs::read(&enc).unwrap(),
+    );
     assert!(!o.status.success() && stderr(&o).contains("加密"), "{}", stderr(&o));
-    let o = env.run_stdin(&["import", "--name", "notkey", "--kind", "ssh-key", "--domain", &da], b"just-a-password\n");
+    let o =
+        env.run_stdin(&["import", "--ops", "http,ssh,git", "--name", "notkey", "--kind", "ssh-key", "--domain", &da], b"just-a-password\n");
     assert!(!o.status.success(), "{}", stdout(&o));
 
     // ---- 公钥认证：mlkem768x25519 与 nistp384 两种主机 ----
@@ -326,7 +333,7 @@ fn ssh_key_auth_end_to_end() {
     assert!(content.contains("key=[REDACTED:adminkey]") && !content.contains(&key_line), "{content}");
 
     // ---- 口令条目：仍然可用，sudo 注入口令 ----
-    let o = env.run_stdin(&["import", "--name", "pwentry", "--domain", &dc], b"PwEntry-123!\n");
+    let o = env.run_stdin(&["import", "--ops", "http,ssh,git", "--name", "pwentry", "--domain", &dc], b"PwEntry-123!\n");
     assert!(o.status.success(), "{}", stderr(&o));
     let (ok, v, out) = ssh(&env, &format!("deploy@localhost:{}", c.port), "sudo id");
     assert!(ok && v["stdout"].as_str().unwrap().contains("ran: sudo -k -S -p '' -- sh -c 'id'"), "{out}");
@@ -335,7 +342,7 @@ fn ssh_key_auth_end_to_end() {
 
     // ---- 多字段条目：登录用 password 字段，命令里的 {{条目.字段}} / {{字段}} 代入，输出中每个字段都脱敏 ----
     let o = env.run_stdin(
-        &["import", "--name", "fentry", "--fields", "username,password", "--domain", &dc, "--replace"],
+        &["import", "--ops", "http,ssh,git", "--name", "fentry", "--fields", "username,password", "--domain", &dc, "--replace"],
         b"field-user-77\r\nPwEntry-123!\r\n",
     );
     assert!(o.status.success(), "{}", stderr(&o));
@@ -353,14 +360,14 @@ fn ssh_key_auth_end_to_end() {
 
     // ---- 错误的密钥：拒绝 ----
     let o = env.run_stdin(
-        &["import", "--name", "adminkey", "--kind", "ssh-key", "--domain", &da, "--domain", &db, "--replace"],
+        &["import", "--ops", "http,ssh,git", "--name", "adminkey", "--kind", "ssh-key", "--domain", &da, "--domain", &db, "--replace"],
         &std::fs::read(&bad).unwrap(),
     );
     assert!(o.status.success());
     let (ok, _, out) = ssh(&env, &format!("deploy@localhost:{}", a.port), "uptime");
     assert!(!ok && out.contains("AUTH_REJECTED"), "{out}");
     let o = env.run_stdin(
-        &["import", "--name", "adminkey", "--kind", "ssh-key", "--domain", &da, "--domain", &db, "--replace"],
+        &["import", "--ops", "http,ssh,git", "--name", "adminkey", "--kind", "ssh-key", "--domain", &da, "--domain", &db, "--replace"],
         good_pem.as_bytes(),
     );
     assert!(o.status.success());
@@ -417,7 +424,10 @@ fn key_first_then_password_fallback() {
     let c = serve_with(&rt, 0, &host1, kex(), &[russh::MethodKind::PublicKey], mk(other_pub.clone(), att_c.clone()));
 
     // 私钥绑定到具体主机；初始口令绑定到网段（与通配符）并只允许 ssh。
-    let o = env.run_stdin(&["import", "--name", "deploy-key", "--kind", "ssh-key", "--domain", "127.0.0.1"], client_pem.as_bytes());
+    let o = env.run_stdin(
+        &["import", "--ops", "ssh", "--name", "deploy-key", "--kind", "ssh-key", "--domain", "127.0.0.1"],
+        client_pem.as_bytes(),
+    );
     assert!(o.status.success(), "{}", stderr(&o));
     let o = env.run_stdin(
         &["import", "--name", "init-pw", "--domain", "127.0.0.0/8", "--domain", "*.example.com", "--ops", "ssh"],
@@ -511,7 +521,7 @@ fn hardened_openssh_server() {
     }
     let user = String::from_utf8_lossy(&Command::new("id").arg("-un").output().unwrap().stdout).trim().to_string();
     let o = env.run_stdin(
-        &["import", "--name", "matrix", "--kind", "ssh-key", "--domain", &format!("localhost:{port}")],
+        &["import", "--ops", "http,ssh,git", "--name", "matrix", "--kind", "ssh-key", "--domain", &format!("localhost:{port}")],
         &std::fs::read(&client).unwrap(),
     );
     assert!(o.status.success(), "{}", stderr(&o));

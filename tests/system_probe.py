@@ -109,7 +109,7 @@ if not status["initialized"]:
 
 if args.agent_flow and status["ready"]:
     tok = admin.call({"op": "create_token", "label": "ci-probe"})["data"]["token"]
-    r = admin.call({"op": "add_entry", "entry": {"name": "ci", "secret": "ci-secret-value-123", "domains": ["httpbin.org"], "note": "ci"}})
+    r = admin.call({"op": "add_entry", "entry": {"name": "ci", "secret": "ci-secret-value-123", "domains": ["httpbin.org"], "ops": ["http"], "note": "ci"}})
     if not r["ok"] and "已存在" not in (r.get("message") or ""):
         failures.append(f"新增条目失败：{r}")
     env = dict(os.environ, PASSMANAGER_TOKEN=tok)

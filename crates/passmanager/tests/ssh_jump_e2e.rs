@@ -182,10 +182,12 @@ fn ssh_through_jump_host() {
     let mut outputs = String::new();
 
     // 跳板：口令条目；目标：私钥条目（另绑一个跳板不会转发的地址，用于测试拒绝转发）。
-    let o = env.run_stdin(&["import", "--name", "jumppw", "--domain", &dj], format!("{JUMP_PW}\n").as_bytes());
+    let o = env.run_stdin(&["import", "--ops", "http,ssh,git", "--name", "jumppw", "--domain", &dj], format!("{JUMP_PW}\n").as_bytes());
     assert!(o.status.success(), "{}", stderr(&o));
-    let o = env
-        .run_stdin(&["import", "--name", "tkey", "--kind", "ssh-key", "--domain", &dt, "--domain", "198.51.100.7"], client_pem.as_bytes());
+    let o = env.run_stdin(
+        &["import", "--ops", "http,ssh,git", "--name", "tkey", "--kind", "ssh-key", "--domain", &dt, "--domain", "198.51.100.7"],
+        client_pem.as_bytes(),
+    );
     assert!(o.status.success(), "{}", stderr(&o));
     let route = format!("deploy@{dj}>deploy@{dt}");
 

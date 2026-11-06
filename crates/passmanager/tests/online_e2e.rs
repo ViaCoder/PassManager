@@ -338,7 +338,7 @@ fn lan_server_end_to_end() {
     let page = https(&env, "GET", "/entries/new", Some(&cookie), None);
     let i = page.body.find("name=\"csrf\" value=\"").unwrap() + 19;
     let csrf = page.body[i..].split('"').next().unwrap().to_string();
-    let form = format!("csrf={csrf}&name=echo&domains=127.0.0.1&secret={}&self_signed=1", enc(SECRET));
+    let form = format!("csrf={csrf}&name=echo&domains=127.0.0.1&op_http=1&secret={}&self_signed=1", enc(SECRET));
     assert_eq!(https(&env, "POST", "/entries", Some(&cookie), Some(&form)).status, 303);
     for p in ["/", "/entries", "/entries/echo/edit", "/tokens", "/security", "/pins", "/settings"] {
         let r = https(&env, "GET", p, Some(&cookie), None);

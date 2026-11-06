@@ -70,7 +70,7 @@ the domain and the allowed client CIDRs must be given at install time.
 ```sh
 # server (root; Debian 13 or another systemd ≥ 250 distribution)
 ./install-server.sh --domain pm.example.com --lan-cidr 198.51.100.0/24 < cloudflare-token
-passmanager import --name github --domain api.github.com < token.txt     # secrets come from stdin, never echoed
+passmanager import --name github --ops http --domain api.github.com < token.txt     # secrets come from stdin, never echoed
 passmanager import --name forge --ops git --domain github.com < pat.txt  # git entries: git over HTTPS just works
 passmanager update --name forge --domain api.github.com --add-op http    # bindings, uses, note only; the secret is untouched
 passmanager show --label laptop --lang en                                  # prints one block of text for an AI agent
@@ -94,7 +94,7 @@ pending codes; `passmanager unenroll` removes everything again (including the gi
 
 What else 0.2.0 adds on top of `http` / `ssh` / `scp`:
 
-- **Multi-field entries**: `passmanager import --name mail --fields username,password` (one value per line). Use `{{mail.username}}`,
+- **Multi-field entries**: `passmanager import --name mail --ops http --fields username,password` (one value per line). Use `{{mail.username}}`,
   `{{mail.password}}`, or `{{password}}` when only one entry matches the host; `{{secret}}` keeps meaning the single value of a
   single-value entry. `sudo` uses the `password` field. Agents only ever see field *names*.
 - **SSH keys**: `--kind ssh-key` stores an unencrypted OpenSSH/PEM private key (ECDSA P-384, Ed25519, RSA). Only the public

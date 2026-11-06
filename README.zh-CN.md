@@ -67,7 +67,7 @@ Agent 与服务器之间是 TLS 1.3 混合后量子密钥交换，内层再叠�
 ```sh
 # 服务器（root；Debian 13 或其他 systemd ≥ 250 的发行版）
 ./install-server.sh --domain pm.example.com --lan-cidr 198.51.100.0/24 < cloudflare-token
-passmanager import --name github --domain api.github.com < token.txt     # 密钥从标准输入读入，不回显
+passmanager import --name github --ops http --domain api.github.com < token.txt     # 密钥从标准输入读入，不回显
 passmanager import --name forge --ops git --domain github.com < pat.txt  # git 用途的条目：HTTPS 的 git 直接可用
 passmanager update --name forge --domain api.github.com --add-op http    # 只改绑定、用途、备注，不动密钥
 passmanager show --label laptop                                            # 打印一段给 AI Agent 的文字
@@ -89,7 +89,7 @@ passmanager show --label laptop                                            # 打
 
 0.2.0 在 `http` / `ssh` / `scp` 之外新增：
 
-- **多字段条目**：`passmanager import --name mail --fields username,password`（每行一个值）。用 `{{mail.username}}`、
+- **多字段条目**：`passmanager import --name mail --ops http --fields username,password`（每行一个值）。用 `{{mail.username}}`、
   `{{mail.password}}`，或在只有一个条目匹配该主机时用 `{{password}}`；`{{secret}}` 仍然表示单值条目的值。
   `sudo` 使用 `password` 字段。Agent 只能看到字段**名称**。
 - **SSH 私钥**：`--kind ssh-key` 保存未加密的 OpenSSH/PEM 私钥（ECDSA P-384、Ed25519、RSA），只显示公钥指纹。私钥条目用公钥登录，

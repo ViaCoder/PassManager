@@ -30,6 +30,7 @@ mod server;
 mod server_opts;
 #[cfg(unix)]
 mod ssh_agent;
+mod web;
 
 use std::process::ExitCode;
 
@@ -232,13 +233,32 @@ enum Cmd {
         /// 可选：本机 tangd 的回环地址（如 127.0.0.1:7500）；网页端口上提供 /tang/ 给 Clevis（网络绑定加密），来源限制与网页相同；空字符串取消
         #[arg(long)]
         tang: Option<String>,
+        /// 可选：只有这些地址或网段能打开管理界面（可重复；any 表示取消限制）；/tang/ 与一次性接入不受影响
+        #[arg(long)]
+        admin_allow: Option<Vec<String>>,
         /// 只写配置，不启动服务
         #[arg(long)]
         no_start: bool,
     },
     /// [服务器，root] 输出网页管理的一次性登录链接（2 分钟有效，只能使用一次）
     #[command(after_help = "示例：\n  ssh root@server passmanager login\n  # 在浏览器打开输出的 https://pm.example.com/l/… 并点击\"登录\"")]
-    Login,
+    Login {
+        /// 打开即登录（给 passmanager web 用，不要把这种链接发给别人）
+        #[arg(long)]
+        auto: bool,
+    },
+    /// 在自己的电脑上打开网页管理：经 PassManager 登录服务器取一次性链接，自动在浏览器里进入
+    #[command(
+        after_help = "示例：\n  passmanager web --ssh root@198.51.100.5   # 第一次写目标，之后记住\n  passmanager web --install                 # 注册协议，启用登录页的一键登录"
+    )]
+    Web {
+        /// 服务器的 SSH 目标（成功后记住；默认 root@注册的服务器）
+        #[arg(long)]
+        ssh: Option<String>,
+        /// 注册 passmanager-web:// 协议（登录页的一键登录按钮用它）
+        #[arg(long)]
+        install: bool,
+    },
     /// [服务器，root] 从标准输入导入密钥（不回显、不记录；只打印名称、字节数与域名数）
     #[command(after_help = "\
 内容原样保存（可以多行，例如 PEM 私钥），只去掉末尾的一个换行；上限 64 KiB。
@@ -313,6 +333,9 @@ enum Cmd {
         #[arg(long)]
         note: Option<String>,
     },
+    /// [服务器 root] URL 别名：Agent 只能写 alias://名称，这台主机不能再被直接访问，真实地址不会出现在结果里
+    #[command(subcommand)]
+    Alias(AliasCmd),
     /// 显示 Agent 接入说明；服务器上的 root 加 --label 时附带一次性注册码（10 分钟有效，只能使用一次）
     #[command(after_help = "\
 服务器上的 root 加 --label：生成一次性注册码，打印给 AI Agent 的完整接入说明——一行安装命令（安装客户端、注册、
@@ -498,6 +521,22 @@ enroll 已把它装成开机 / 登录时自动启动的用户服务（Linux：sy
 }
 
 #[derive(Subcommand)]
+enum AliasCmd {
+    /// 列出别名与真实地址
+    List,
+    /// 新增或替换：alias add billing https://api.example.com/v1
+    Add {
+        name: String,
+        url: String,
+        /// 备注（Agent 看不到）
+        #[arg(long, default_value = "")]
+        note: String,
+    },
+    /// 删除（这台主机恢复直接访问）
+    Remove { name: String },
+}
+
+#[derive(Subcommand)]
 enum TokenCmd {
     /// 列出令牌与未使用的注册码
     List,
@@ -505,7 +544,21 @@ enum TokenCmd {
     Revoke { id: String },
 }
 
+/// 实际的入口放在栈更大的线程里：Windows 主线程只有 1 MiB，clap 派生的解析代码在 debug 构建里会把它用完
+/// （子命令一多，任何命令都会在启动时栈溢出）。
+const MAIN_STACK: usize = 8 << 20;
+
 fn main() -> ExitCode {
+    match std::thread::Builder::new().stack_size(MAIN_STACK).spawn(run_cli) {
+        Ok(t) => t.join().unwrap_or(ExitCode::from(101)),
+        Err(e) => {
+            eprintln!("错误：无法启动主线程：{e}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+fn run_cli() -> ExitCode {
     let cli = Cli::parse();
     match cli.cmd {
         None => pm_tui::run(pm_tui::Mode::Full),
@@ -549,6 +602,7 @@ fn main() -> ExitCode {
             dns,
             tpm_socket,
             tang,
+            admin_allow,
             no_start,
         }) => server::init(server::InitOpts {
             domain,
@@ -563,17 +617,23 @@ fn main() -> ExitCode {
             dns,
             tpm_socket,
             tang,
+            admin_allow,
             cf_token_stdin,
             skip_acme,
             no_start,
         }),
-        Some(Cmd::Login) => server::login(),
+        Some(Cmd::Login { auto }) => server::login(auto),
+        Some(Cmd::Web { install: true, .. }) => web::install(),
+        Some(Cmd::Web { ssh, .. }) => web::run(ssh),
         Some(Cmd::Import { name, domains, ops, note, self_signed, replace, kind, fields, interactive, host_keys }) => {
             server::import(import::ImportOpts { name, domains, ops, note, self_signed, replace, kind, fields, interactive, host_keys })
         }
         Some(Cmd::Update { name, add_domains, remove_domains, add_ops, remove_ops, note }) => {
             server::update(import::UpdateOpts { name, add_domains, remove_domains, add_ops, remove_ops, note })
         }
+        Some(Cmd::Alias(AliasCmd::List)) => server::alias_list(),
+        Some(Cmd::Alias(AliasCmd::Add { name, url, note })) => server::alias_add(name, url, note),
+        Some(Cmd::Alias(AliasCmd::Remove { name })) => server::alias_remove(name),
         Some(Cmd::Token(TokenCmd::List)) => server::token_list(),
         Some(Cmd::Token(TokenCmd::Revoke { id })) => server::token_revoke(&id),
         Some(Cmd::Status) => server::status(),

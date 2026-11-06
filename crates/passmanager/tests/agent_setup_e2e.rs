@@ -341,7 +341,10 @@ fn run_agent_setup(single: bool) {
     // 经服务器代为发出 HTTP 请求（本地回显服务），密钥只在服务器上代入，结果脱敏。
     let echo = echo_server();
     let dom = format!("127.0.0.1:{echo}");
-    let o = env.run_stdin(&["import", "--name", "echo-key", "--domain", &dom, "--self-signed"], b"EchoSecret-0123456789\n");
+    let o = env.run_stdin(
+        &["import", "--ops", "http,ssh,git", "--name", "echo-key", "--domain", &dom, "--self-signed"],
+        b"EchoSecret-0123456789\n",
+    );
     assert!(o.status.success(), "{}", stderr(&o));
     let o = Command::new(BIN)
         .args(["http", &format!("https://{dom}/x"), "-H", "Authorization: Bearer {{secret}}"])
@@ -356,7 +359,7 @@ fn run_agent_setup(single: bool) {
     // URL 以 {{条目.base_url}} 开头：基础地址（路径里有账号标识）只在服务器上代入；响应（回显的请求行）与错误里都不出现。
     let base = format!("https://127.0.0.1:{echo}/v1/acct-7f3e/gw-secret");
     let o = env.run_stdin(
-        &["import", "--name", "ai", "--fields", "base_url,api_key", "--domain", &dom, "--self-signed"],
+        &["import", "--ops", "http,ssh,git", "--name", "ai", "--fields", "base_url,api_key", "--domain", &dom, "--self-signed"],
         format!("{base}\nsk-gw-0123456789\n").as_bytes(),
     );
     assert!(o.status.success(), "{}", stderr(&o));
@@ -373,7 +376,7 @@ fn run_agent_setup(single: bool) {
     let closed = free_port();
     let bad_dom = format!("127.0.0.1:{closed}");
     let o = env.run_stdin(
-        &["import", "--name", "ai-down", "--fields", "base_url,api_key", "--domain", &bad_dom, "--self-signed"],
+        &["import", "--ops", "http,ssh,git", "--name", "ai-down", "--fields", "base_url,api_key", "--domain", &bad_dom, "--self-signed"],
         format!("https://127.0.0.1:{closed}/v1/acct-7f3e/down\nsk-down-0123456789\n").as_bytes(),
     );
     assert!(o.status.success(), "{}", stderr(&o));
@@ -382,7 +385,7 @@ fn run_agent_setup(single: bool) {
     assert!(!o.status.success() && out.contains("{{ai-down.base_url}}") && !out.contains("acct-7f3e") && !out.contains(&bad_dom), "{out}");
     // 主机不在条目的绑定内：拒绝，不发送，错误里没有值。
     let o = env.run_stdin(
-        &["import", "--name", "ai-evil", "--fields", "base_url,api_key", "--domain", &dom, "--self-signed"],
+        &["import", "--ops", "http,ssh,git", "--name", "ai-evil", "--fields", "base_url,api_key", "--domain", &dom, "--self-signed"],
         b"https://evil.example/v1/acct-7f3e/x\nsk-evil-0123456789\n",
     );
     assert!(o.status.success());

@@ -74,7 +74,10 @@ fn ssh_agent_bridge() {
     let user = String::from_utf8_lossy(&std::process::Command::new("id").arg("-un").output().unwrap().stdout).trim().to_string();
 
     // 导入私钥，只绑定第一台 sshd 的主机密钥。
-    let o = env.run_stdin(&["import", "--name", "matrix", "--kind", "ssh-key", "--host-key", host_pub.trim()], pem.as_bytes());
+    let o = env.run_stdin(
+        &["import", "--ops", "http,ssh,git", "--name", "matrix", "--kind", "ssh-key", "--host-key", host_pub.trim()],
+        pem.as_bytes(),
+    );
     assert!(o.status.success(), "{}", stderr(&o));
     assert!(stdout(&o).contains(&client_fp));
 

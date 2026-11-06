@@ -4,6 +4,31 @@
 
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.3.11-rc.7] - 2026-11-06
+
+### 安全
+
+- **升级有新公告的依赖：** rustls-webpki 0.103.16（RUSTSEC-2026-0382，已不受信任的 emSign 中间证书）、webpki-root-certs 1.0.11（RUSTSEC-2026-0383）、crypto-bigint 0.7.10（RUSTSEC-2026-0387）、ctutils 0.4.8（RUSTSEC-2026-0385）、tokio 1.53.3（RUSTSEC-2026-0386）。
+- **压缩响应可以绕过脱敏。** Agent 可以要求 `Accept-Encoding: gzip`，压缩后的字节不会被脱敏发现，Agent 解压后就能读到密钥。现在请求一律要求 `identity`，服务器仍返回压缩内容时拒绝返回。
+- **吸取 OpenSSH 通配符与 principals 修复的教训（10.3、10.4、CVE-2026-35414）：**
+  - **空集合不再等于全部。** 没有用途的条目过去允许所有用途，现在什么都不允许，新条目至少要有一种用途。旧条目在解锁时改写一次，明确列出全部用途，原有功能不受影响。
+  - **目标是数据，不是模式。** 目标里的 `*`、逗号、控制字符和过长的名称不再进入匹配，目标 `*.example.com` 不能匹配绑定 `*.example.com`。SSH 的用户名和主机按严格字符集检查，不能以 `-` 开头。
+  - **检测：** `passmanager status` 和安全页提示允许全部用途的通配符绑定和很宽的网段。
+
+### 新增
+
+- **URL 别名。** 在网页或用 `passmanager alias add` 设置。Agent 使用 `alias://<名称>/<路径>`；整台主机不能被直接访问（`ALIAS_ONLY`，http、ssh、scp、git、lookup 和 ssh-agent 桥都一样），真实地址从发给 Agent 的所有内容里去掉，包括编码形式。限制见 `docs/DEPLOY-LAN.zh-CN.md` 3.1.1。
+- **网页一键登录。** `passmanager web` 在你自己的电脑上打开管理页面：经 PassManager 登录服务器，取一次性链接后直接进入。`passmanager web --install` 注册 `passmanager-web://`，登录页的新按钮由它接管；处理程序收不到链接里的任何内容。
+- **未登录时的页面更好用：** 登录页优先提供一键登录，会话过期时给出提示，已登录时直接回到首页。
+- **`passmanager init --admin-allow`**：把网页管理页面限制到指定地址，不影响 `/tang/`、Agent 接入和 Agent 通道。空列表是配置错误。
+- **Advisories 工作流自己提出修复。** 出现新公告时，`scripts/advisory_fix.py` 按漏洞库选出最小的兼容修复版本，测试后开 PR。不会合并，也不会发布。
+
+### 变更
+
+- **`passmanager import` 新条目必须写 `--ops`。** `--replace` 不写时保留原来的用途。
+- **Agent 使用规则 v7：** 加一行说明 `alias://`。升级后运行 `passmanager show --rules --write`。
+- 还在 Node 20 上的 GitHub Actions 升到 Node 24 版本；`mlugg/setup-zig` 还没有新版，暂时不动。
+
 ## [0.3.11-rc.6] - 2026-10-18
 
 ### 新增

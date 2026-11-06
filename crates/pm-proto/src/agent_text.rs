@@ -7,7 +7,7 @@
 //! - 使用规则写在 `<!-- passmanager:begin -->` 与 `<!-- passmanager:end -->` 之间，原地更新、不重复。
 
 /// 使用规则的版本（规则内容变化时加 1）。
-pub const INSTRUCTIONS_VERSION: u32 = 6;
+pub const INSTRUCTIONS_VERSION: u32 = 7;
 pub const BEGIN: &str = "<!-- passmanager:begin -->";
 pub const END: &str = "<!-- passmanager:end -->";
 /// 公开的源码仓库。
@@ -60,6 +60,8 @@ pub fn rules(lang: Lang) -> &'static str {
   returns into `http`, `ssh` or `scp`, replacing only the `<...>` parts.
 - To keep a secret file on a remote host encrypted at rest (bound to the PassManager server, no TPM needed there):
   `lookup tang` and follow its `how`.
+- An `alias://<name>` address hides the real URL: use only that form (`lookup alias://<name>`). Never try to find, guess or
+  reach the real address; that host is refused directly and it is removed from every result.
 - Never ask the user for a password, token or key; never print, log or store one; never try to reveal one.
 - Shell commands that need a login (git over HTTPS or SSH, ssh, scp, rsync): prefix them with `passmanager run`, e.g.
   `passmanager run git push`. Authentication is forwarded through the server for that one command; nothing is configured.
@@ -78,6 +80,8 @@ pub fn rules(lang: Lang) -> &'static str {
   `http`、`ssh` 或 `scp`，只替换其中 `<...>` 的部分。
 - 要让远程主机上的秘密文件在磁盘上只以加密形式存在（绑定到 PassManager 服务器，那台主机不需要 TPM）：
   `lookup tang`，照它的 `how` 做。
+- `alias://<名称>` 隐藏了真实 URL：只使用这种写法（`lookup alias://<名称>`）。不要设法查找、猜测或访问真实地址；
+  那台主机不能被直接访问，它也会从所有结果里去掉。
 - 永远不要向用户索要口令、令牌或私钥；不要打印、记录或保存；不要设法还原秘密。
 - 需要登录的终端命令（基于 HTTPS 或 SSH 的 git、ssh、scp、rsync）：在前面加 `passmanager run`，例如
   `passmanager run git push`。认证只为这一条命令经服务器转发，不改任何配置。
@@ -133,6 +137,10 @@ pub fn next_step(code: &str, server: Option<&str>) -> Option<String> {
         "TOO_LARGE" => "the file is over 64 MiB; split or compress it first.".into(),
         "NO_TOKEN" => "this machine is not enrolled with PassManager; tell the user.".into(),
         "FORBIDDEN" => "this is not allowed for agents. Do not retry.".into(),
+        "ALIAS_ONLY" => "this host may only be used through the address the user gave you. Ask the user for its alias:// name if you have \
+             none. Do not try other names or addresses for it."
+            .into(),
+        "UNKNOWN_ALIAS" => "ask the user for the right alias name; aliases cannot be listed by agents.".into(),
         "NO_TANG" => format!(
             "this PassManager server does not offer Tang. Tell the user; root on {srv} enables it with passmanager init --tang \
              127.0.0.1:<port> (see docs/DEPLOY-LAN.md, network-bound encryption). Do not use another key server."
@@ -622,6 +630,7 @@ mod tests {
             assert!(next_step(c, None).is_some(), "{c}");
         }
         assert!(next_step("NO_TANG", Some("pm.example.com")).unwrap().contains("root on pm.example.com"));
+        assert!(next_step("ALIAS_ONLY", None).unwrap().contains("alias://") && next_step("UNKNOWN_ALIAS", None).is_some());
         assert!(next_step("INTERNAL", None).is_none());
     }
 
@@ -637,7 +646,7 @@ mod tests {
             }
         }
         // 规则块保持简短（详细用法在工具描述、lookup 结果与 Next: 里）。
-        assert!(rules(Lang::En).lines().count() <= 16, "{}", rules(Lang::En));
+        assert!(rules(Lang::En).lines().count() <= 18, "{}", rules(Lang::En));
         assert_eq!(Lang::parse("ZH").unwrap(), Lang::Zh);
         assert!(Lang::parse("fr").is_err());
     }
