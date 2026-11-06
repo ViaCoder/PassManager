@@ -4,6 +4,14 @@ English | [简体中文](CHANGELOG.zh-CN.md)
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.3.11-rc.9] - 2026-11-06
+
+### Fixed
+
+- **Pasting an `https://` URL into an entry's domain box was refused** with `invalid port`, as if a port were required. A URL now works: only its host and port are kept. Other schemes get a clear error, and URLs with a user name are refused. The same fix applies to `--domain`.
+- **An agent that only knows an entry's name could not reach it once the entry had an alias:** `lookup {{name}}` answered `ALIAS_ONLY` and stopped. It now returns the `alias://` form. The real address is still never returned, and the host is still refused directly.
+- **The ssh-agent socket no longer changes the process umask.** It is created in a private directory and moved into place at mode 0600, so it is never reachable with wider permissions, and files created by other threads are no longer affected (this made tests fail at random).
+
 ## [0.3.11-rc.8] - 2026-11-06
 
 ### Changed

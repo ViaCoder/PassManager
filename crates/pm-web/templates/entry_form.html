@@ -22,6 +22,7 @@
       <label for="f-domains">域名 <span class="opt">每行一个</span></label>
       <textarea id="f-domains" name="domains" spellcheck="false" aria-describedby="h-domains">{{ form.domains }}</textarea>
       <ul class="hint" id="h-domains">
+        <li>可以写主机名，也可以直接粘贴 https 网址（只取主机和端口）；端口不用写，除非要限定；</li>
         <li><code>*.example.com</code> 匹配所有子域名，但不含 <code>example.com</code> 本身；</li>
         <li>网段如 <code>198.51.100.0/24</code> 只匹配直接用 IP 访问的目标；可写 <code>host:端口</code>；</li>
         <li>多个条目都匹配时用最具体的；留空则保存为"未绑定域名"，Agent 暂时不能使用。</li>

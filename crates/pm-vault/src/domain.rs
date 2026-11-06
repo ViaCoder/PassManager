@@ -9,6 +9,8 @@
 //!   主机位必须为 0；IPv4 前缀至少 /8，IPv6 至少 /32（防止过宽）。IPv4 网段不匹配 IPv6 地址（包括 IPv4 映射地址），反之亦然。
 //! - 以上任一形式都可以加 `:端口`（例如 `db1.example.com:2222`、`[::1]:22`、`[2001:db8::/48]:22`），只匹配该端口；不写端口时匹配任意端口。
 //!
+//! - 粘贴的 `https://` 网址只取主机与端口（路径、查询串都不参与绑定）；其他协议被拒绝。
+//!
 //! 比较前统一规范化：小写、去掉末尾的点、国际化域名转为 punycode（IDNA）。
 //! 多个条目都匹配同一目标时，按"具体程度"选择（见 [`Spec`]）：精确主机 > 更长的通配符 > 前缀更长的网段；同级时带端口的更具体。
 
@@ -24,6 +26,10 @@ pub enum DomainError {
     TooBroad(String),
     #[error("invalid port in `{0}`")]
     InvalidPort(String),
+    #[error("only https addresses are supported: `{0}`")]
+    NotHttps(String),
+    #[error("this address has no usable host (write it without a user name)")]
+    BadUrl,
     #[error("invalid network `{0}` (host bits must be zero, e.g. 198.51.100.0/24)")]
     InvalidNetwork(String),
 }
@@ -117,8 +123,25 @@ fn cidr_contains(net: IpAddr, len: u8, ip: IpAddr) -> bool {
     a & m == n & m
 }
 
-/// 校验并规范化一个域名模式（可带 `:端口`）。
+/// 粘贴的网址只取主机与端口：绑定不看路径。不是网址时原样返回。
+fn strip_url(pattern: &str) -> Result<&str, DomainError> {
+    let t = pattern.trim();
+    let Some(i) = t.find("://") else { return Ok(t) };
+    if !t[..i].eq_ignore_ascii_case("https") {
+        return Err(DomainError::NotHttps(t.to_string()));
+    }
+    let rest = &t[i + 3..];
+    let authority = &rest[..rest.find(['/', '?', '#']).unwrap_or(rest.len())];
+    // 错误信息不重复网址：用户信息里可能有口令。
+    if authority.is_empty() || authority.contains(['@', '\\']) {
+        return Err(DomainError::BadUrl);
+    }
+    Ok(authority)
+}
+
+/// 校验并规范化一个域名模式（可带 `:端口`；也接受粘贴的 https 网址）。
 pub fn validate_pattern(pattern: &str) -> Result<String, DomainError> {
+    let pattern = strip_url(pattern)?;
     let raw = pattern.trim().to_lowercase();
     let (host, port) = split_port(&raw);
     let Some(port) = port else { return validate_host_pattern(pattern) };
@@ -247,6 +270,35 @@ pub fn matches_any_port(patterns: &[String], host: &str, port: u16) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pasted_urls_keep_only_host_and_port() {
+        for (url, want) in [
+            ("https://api.example.com", "api.example.com"),
+            ("  HTTPS://API.Example.com/  ", "api.example.com"),
+            ("https://api.example.com/v1/x?q=1#f", "api.example.com"),
+            ("https://api.example.com?q=1", "api.example.com"),
+            ("https://api.example.com:8443/v1", "api.example.com:8443"),
+            ("https://*.example.com/", "*.example.com"),
+            ("https://198.51.100.7:8443/", "198.51.100.7:8443"),
+            ("https://[2001:db8::1]:8443/x", "[2001:db8::1]:8443"),
+        ] {
+            assert_eq!(validate_pattern(url).as_deref(), Ok(want), "{url}");
+        }
+        // 不写协议的写法不变，网段里的 / 不是路径。
+        assert_eq!(validate_pattern("api.example.com:8443").as_deref(), Ok("api.example.com:8443"));
+        assert_eq!(validate_pattern("198.51.100.0/24").as_deref(), Ok("198.51.100.0/24"));
+        // 其他协议给出明确的原因，不再说端口有问题。
+        for bad in ["http://api.example.com", "ftp://api.example.com", "ssh://git@example.com"] {
+            let e = validate_pattern(bad).unwrap_err();
+            assert_eq!(e, DomainError::NotHttps(bad.to_string()), "{bad}");
+        }
+        // 用户信息、空主机、过宽的通配符：拒绝。
+        for bad in ["https://", "https:///x", "https://u:p@api.example.com", "https://*.com", "https://a\\b.example.com"] {
+            assert!(validate_pattern(bad).is_err(), "{bad}");
+        }
+        assert!(!validate_pattern("https://u:p@api.example.com").unwrap_err().to_string().contains("u:p"), "错误里不重复网址里的口令");
+    }
 
     #[test]
     fn target_hosts_are_data_not_patterns() {

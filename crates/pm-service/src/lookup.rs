@@ -190,6 +190,9 @@ fn by_name(payload: &Payload, token: &str, use_: Use) -> Result<LookupView, ApiE
                 payload.entries.iter().filter(|e| token.len() > e.name.len() + 1 && token.starts_with(&format!("{}.", e.name))).collect();
             by_prefix.sort_by_key(|e| std::cmp::Reverse(e.name.len()));
             let e = by_prefix.first().ok_or_else(|| err("UNKNOWN_CREDENTIAL", format!("no credential \"{token}\"")))?;
+            if let Some(a) = payload.alias_of(e) {
+                return by_alias(payload, &a.name);
+            }
             let f = &token[e.name.len() + 1..];
             if e.field(f).is_none() {
                 return Err(err("UNKNOWN_FIELD", format!("\"{}\" has no field \"{f}\"", e.name)));
@@ -197,9 +200,9 @@ fn by_name(payload: &Payload, token: &str, use_: Use) -> Result<LookupView, ApiE
             (*e, Some(f.to_string()))
         }
     };
-    // 按名字也不能绕过别名：这个条目绑定了设了别名的主机时，只能经别名使用。
-    for d in &entry.domains {
-        alias_guard(payload, &domain::pattern_parts(d).0)?;
+    // 条目有别名时给出别名的写法：Agent 已经知道条目名，别名不是秘密，真实地址仍然不返回。
+    if let Some(a) = payload.alias_of(entry) {
+        return by_alias(payload, &a.name);
     }
     let op = match use_ {
         Use::Http => OP_HTTP,
@@ -419,6 +422,20 @@ mod tests {
         assert_eq!(lookup(&p, "alias://", None).unwrap_err().code, "BAD_URL");
     }
 
+    /// Agent 只知道条目名时也能走下去：拿到别名的写法，而不是死路。
+    #[test]
+    fn entry_name_leads_to_the_alias() {
+        let mut p = aliased();
+        p.entries.push(entry("search", "tok-search-value", &["api.example.com"], &["http"]));
+        for t in ["{{search}}", "{{search.base_url}}", "{{api.example.com}}", "search"] {
+            let v = lookup(&p, t, None).unwrap_or_else(|e| panic!("{t}: {}", e.message));
+            assert_eq!(v.target, "alias://billing", "{t}");
+            assert!(v.credentials.is_empty() && v.how.contains("alias://billing/<path>"), "{t}");
+            let all = serde_json::to_string(&v).unwrap();
+            assert!(!all.contains("example.com") && !all.contains("8443"), "真实地址不返回：{all}");
+        }
+    }
+
     #[test]
     fn aliased_host_is_refused_by_every_lookup_form() {
         let p = aliased();
@@ -430,7 +447,6 @@ mod tests {
             "root@api.example.com:2222",
             "api.example.com",
             "api.example.com:8443",
-            "{{api.example.com}}",
             "root@other.example.com>root@api.example.com",
             "root@api.example.com>root@other.example.com",
         ] {

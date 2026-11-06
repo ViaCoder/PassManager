@@ -200,7 +200,7 @@ pub fn default_socket() -> PathBuf {
 
 /// 绑定 0600 的 Unix 套接字（目录 0700）；已存在的旧套接字文件被替换。
 pub fn bind(path: &Path) -> Result<UnixListener, String> {
-    use std::os::unix::fs::{FileTypeExt, PermissionsExt};
+    use std::os::unix::fs::{DirBuilderExt, FileTypeExt, PermissionsExt};
     if let Some(d) = path.parent() {
         std::fs::create_dir_all(d).map_err(|e| e.to_string())?;
         let _ = std::fs::set_permissions(d, std::fs::Permissions::from_mode(0o700));
@@ -212,14 +212,21 @@ pub fn bind(path: &Path) -> Result<UnixListener, String> {
             return Err(format!("{} 已存在且不是套接字", path.display()));
         }
     }
-    // SAFETY: umask 只影响本进程；绑定之后立即恢复。
-    let old = unsafe { libc::umask(0o177) };
-    let l = UnixListener::bind(path);
-    // SAFETY: 同上。
-    unsafe { libc::umask(old) };
-    let l = l.map_err(|e| format!("监听 {} 失败：{e}", path.display()))?;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).map_err(|e| e.to_string())?;
-    Ok(l)
+    // 在新建的 0700 目录里绑定、设好权限再改名到位：套接字一出现在目标路径就是 0600。
+    // 不用 umask：它是进程级的，窗口内其他线程新建的目录也会变成 0600。
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = path.parent().unwrap_or(Path::new("")).join(format!(".pm-{}-{n}", std::process::id()));
+    let inner = tmp.join("s");
+    let bound = (|| {
+        std::fs::DirBuilder::new().mode(0o700).create(&tmp)?;
+        let l = UnixListener::bind(&inner)?;
+        std::fs::set_permissions(&inner, std::fs::Permissions::from_mode(0o600))?;
+        std::fs::rename(&inner, path)?;
+        Ok::<_, std::io::Error>(l)
+    })();
+    let _ = std::fs::remove_dir_all(&tmp);
+    bound.map_err(|e| format!("监听 {} 失败：{e}", path.display()))
 }
 
 pub fn run(socket: Option<PathBuf>) -> ExitCode {
@@ -244,6 +251,26 @@ pub fn run(socket: Option<PathBuf>) -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bind_is_private_from_the_start() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("agent/s.sock");
+        let l = bind(&p).unwrap();
+        assert_eq!(std::fs::metadata(&p).unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(std::fs::metadata(p.parent().unwrap()).unwrap().permissions().mode() & 0o777, 0o700);
+        // 改名之后仍然能连接；临时目录没有留下。
+        assert!(std::os::unix::net::UnixStream::connect(&p).is_ok());
+        assert_eq!(std::fs::read_dir(p.parent().unwrap()).unwrap().count(), 1);
+        drop(l);
+        // 旧的套接字被替换；普通文件不会被覆盖。
+        let _l2 = bind(&p).unwrap();
+        let f = d.path().join("agent/plain");
+        std::fs::write(&f, "x").unwrap();
+        assert!(bind(&f).unwrap_err().contains("不是套接字"));
+        assert_eq!(std::fs::read_to_string(&f).unwrap(), "x");
+    }
     use std::sync::Mutex;
 
     #[derive(Default)]

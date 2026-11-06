@@ -63,7 +63,6 @@ fn alias_hides_the_real_address_from_agents() {
         vec!["lookup".to_string(), real.clone()],
         vec!["lookup".to_string(), "127.0.0.1".into()],
         vec!["lookup".to_string(), "root@127.0.0.1".into()],
-        vec!["lookup".to_string(), "{{echo}}".into()],
         vec!["ssh".to_string(), "root@127.0.0.1".into(), "uptime".into()],
         vec!["ssh".to_string(), "root@198.51.100.7".into(), "curl https://127.0.0.1/".into()],
     ] {
@@ -73,6 +72,11 @@ fn alias_hides_the_real_address_from_agents() {
         assert!(!o.status.success() && out.contains("ALIAS_ONLY"), "{args:?}: {out}");
         assert!(!out.contains("billing"), "{args:?}: {out}");
     }
+
+    // 只知道条目名：拿到别名的写法，真实地址仍然不返回。
+    let o = env.agent_cmd(&["lookup", "{{echo}}"]).output().unwrap();
+    let out = all(&o);
+    assert!(o.status.success() && out.contains("alias://billing/<path>") && !out.contains(&hostport), "{out}");
 
     // 路径穿越、未知别名。
     let o = env.agent_cmd(&["http", "GET", "alias://billing/../x"]).output().unwrap();
