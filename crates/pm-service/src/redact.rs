@@ -201,13 +201,14 @@ impl Redactor {
         // 模式总长度大时（例如 64 KiB 的导入内容及其各种编码）不能让库自动选 DFA：DFA 的状态表随模式长度
         // 成倍增长，构建会耗尽 CPU 与内存。大于 16 KiB 时固定用 contiguous NFA（构建是线性的）。
         let total: usize = patterns.iter().map(|p| p.len()).sum();
+        // 不区分 ASCII 大小写：上游把密钥转成大写或小写回显（例如路径写进 404 页面）时也认得出；多替换只会更保守。
         let mut b = AhoCorasickBuilder::new();
-        b.match_kind(MatchKind::LeftmostLongest);
+        b.match_kind(MatchKind::LeftmostLongest).ascii_case_insensitive(true);
         if total > 16 * 1024 {
             b.kind(Some(aho_corasick::AhoCorasickKind::ContiguousNFA));
         }
         let ac = b.build(&patterns).ok();
-        Self { ac, replacements, prefixes: Prefixes::new(&patterns, false), ..Self::empty() }
+        Self { ac, replacements, prefixes: Prefixes::new(&patterns, true), ..Self::empty() }
     }
 
     /// 加上别名：结果里的真实地址（URL、`主机:端口`、`主机/路径`、主机，以及它们的编码形式）都换成 `alias://名称`。
@@ -424,6 +425,20 @@ mod tests {
         }
         got.extend(s.finish());
         assert_eq!(got, want, "byte by byte");
+    }
+
+    /// 上游改了大小写的密钥（全大写、全小写、混排）也替换；流式结果与一次性结果相同。
+    #[test]
+    fn case_changed_secrets_are_redacted() {
+        let secret = "Secret-Value-Mixed-Case";
+        let r = std::sync::Arc::new(Redactor::build([("or", secret)]));
+        let mixed: String = secret.chars().enumerate().map(|(i, c)| if i % 2 == 0 { c.to_ascii_uppercase() } else { c }).collect();
+        for form in [secret.to_uppercase(), secret.to_lowercase(), mixed] {
+            let data = format!("Cannot GET /{form}/x");
+            let (out, n) = r.redact(data.as_bytes());
+            assert_eq!((String::from_utf8(out).unwrap(), n), ("Cannot GET /[REDACTED:or]/x".to_string(), 1), "{form}");
+            stream_equals_batch(&r, data.as_bytes());
+        }
     }
 
     #[test]

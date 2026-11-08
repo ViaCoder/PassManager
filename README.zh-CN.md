@@ -50,7 +50,7 @@ PassManager trust db1.example.com   # 主机重装或证书更换后信任新指
 | MCP 工具 | CLI | 说明 |
 |---|---|---|
 | `lookup` | `PassManager lookup https://api.github.com/user` | 先调用它：只显示这一个目标可用的凭据与照抄即可的写法（`how`）；不涉及其他条目，也不显示备注 |
-| `http` | `PassManager http https://api.github.com/user -H 'Authorization: Bearer {{secret}}'` | 在需要密钥的位置写 `{{secret}}`，按 URL 主机自动选择密钥；只支持 HTTPS |
+| `http` | `PassManager http https://api.github.com/user -H 'Authorization: Bearer {{secret}}'` | 在凭据的位置写 `{{secret}}`（凭据类请求头，或 key / token 参数与字段的完整值），按 URL 主机自动选择密钥；只支持 HTTPS |
 | `ssh` | `PassManager ssh deploy@db1.example.com 'sudo systemctl restart nginx'` | 用保存的密码或私钥登录；命令以 `sudo` 开头时自动提供 sudo 密码 |
 | `scp` | `PassManager scp ./app.conf deploy@db1.example.com:/etc/app.conf` | 远程一侧写成 `user@host:/path`；下载的内容会脱敏 |
 

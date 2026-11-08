@@ -52,7 +52,7 @@ On the "Agent 接入" (Agents) tab, select your agent and press Enter to connect
 | MCP tool | CLI | Description |
 |---|---|---|
 | `lookup` | `PassManager lookup https://api.github.com/user` | Call first: shows only the credential for this one target and a ready-to-copy call (`how`); nothing about other entries, no notes |
-| `http` | `PassManager http https://api.github.com/user -H 'Authorization: Bearer {{secret}}'` | Write `{{secret}}` where the secret goes; the secret for the URL's host is filled in. HTTPS only |
+| `http` | `PassManager http https://api.github.com/user -H 'Authorization: Bearer {{secret}}'` | Write `{{secret}}` where a credential belongs (a credential header, or the whole value of a key/token parameter or field); the secret for the URL's host is filled in. HTTPS only |
 | `ssh` | `PassManager ssh deploy@db1.example.com 'sudo systemctl restart nginx'` | Logs in with the stored password or private key; commands starting with `sudo` get the sudo password automatically |
 | `scp` | `PassManager scp ./app.conf deploy@db1.example.com:/etc/app.conf` | Write the remote side as `user@host:/path`; downloaded content is redacted |
 

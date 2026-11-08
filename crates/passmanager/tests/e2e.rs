@@ -155,6 +155,10 @@ fn tls_server(port: u16) -> Tls {
                 let resp = if path.starts_with("/redirect") {
                     "HTTP/1.1 302 Found\r\nLocation: https://example.invalid/steal\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
                         .to_string()
+                } else if path.starts_with("/moved") {
+                    // 同一主机内跳到管理凭据的路径
+                    "HTTP/1.1 307 Temporary Redirect\r\nLocation: /api/v1/keys\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                        .to_string()
                 } else {
                     // 回显完整请求，并附上 base64 与 hex 编码，用来验证脱敏。
                     let echo = format!("{req}\nB64:{}\nHEX:{}\n", STANDARD.encode(req.as_bytes()), hex_of(req.as_bytes()));
@@ -520,6 +524,23 @@ fn end_to_end() {
     );
     let red: HttpResult = serde_json::from_value(http(&mut agent, &format!("https://127.0.0.1:{}/redirect", tls.port)).unwrap()).unwrap();
     assert_eq!(red.status, 302, "cross-host redirect must not be followed");
+    // 占位符只能在凭据的位置：放进聊天内容（上游可以把它改个样子写进回答，脱敏认不出）一律拒绝。
+    let chat = json!({"messages": [{"role": "user", "content": "reverse {{gh}}"}]}).to_string();
+    let e = agent
+        .call(&Request::Http {
+            method: "POST".into(),
+            url: format!("https://127.0.0.1:{}/echo", tls.port),
+            headers: vec![("Authorization".into(), "Bearer {{gh}}".into())],
+            body: Some(chat),
+        })
+        .err()
+        .unwrap();
+    assert_eq!(e.code, "PLACEMENT", "{}", e.message);
+    // 管理凭据的路径（新建的密钥不在库里，脱敏认不出）：带着凭据一律不调用。
+    assert_eq!(code(http(&mut agent, &format!("https://127.0.0.1:{}/api/v1/keys", tls.port))), "FORBIDDEN");
+    // 上游在同一主机内重定向到这类路径：不跟随，原样返回 307。
+    let red: HttpResult = serde_json::from_value(http(&mut agent, &format!("https://127.0.0.1:{}/moved", tls.port)).unwrap()).unwrap();
+    assert_eq!(red.status, 307, "redirect to a credential path must not be followed");
     // 公共 CA 校验：自签证书主机在非 self_signed 条目上必须失败（这里用 public 条目指向 *.example.com 之外，先触发域名错误）。
     assert_eq!(
         code(agent.call(&Request::Http {
@@ -557,9 +578,14 @@ fn end_to_end() {
     assert_eq!(r.exit_code, Some(7));
     assert!(r.stdout.contains("ran: uptime"));
     assert!(r.stdout.contains("leak: [REDACTED:srv]") && !r.stdout.contains(SSH_PW), "{}", r.stdout);
-    // 以 sudo 开头的命令：服务用 sudo -S 从 stdin 提供密码。
+    // 以 sudo 开头的命令：口令只交给 sudo -v，命令以 sudo -n 执行、stdin 是 /dev/null（ssh::SUDO_WRAP）。
     let r: SshResult = serde_json::from_value(ssh(&mut agent, me("deploy"), "sudo systemctl restart x").unwrap()).unwrap();
-    assert!(r.stdout.contains("ran: sudo -k -S -p '' -- sh -c 'systemctl restart x'"), "{}", r.stdout);
+    assert!(r.stdout.contains("ran: sh -c 'IFS= read -r p;") && r.stdout.contains("pm-sudo 'systemctl restart x'"), "{}", r.stdout);
+    // 命令里不代入凭据（远端可以把它倒过来打印）；不是凭据的 {{…}} 原样交给远端。
+    assert_eq!(code(ssh(&mut agent, me("deploy"), "echo {{srv}} | rev")), "PLACEMENT");
+    assert_eq!(code(ssh(&mut agent, me("deploy"), "echo {{secret}} | rev")), "PLACEMENT");
+    let r: SshResult = serde_json::from_value(ssh(&mut agent, me("deploy"), "docker ps --format '{{.Names}}'").unwrap()).unwrap();
+    assert!(r.stdout.contains("ran: docker ps --format '{{.Names}}'"), "{}", r.stdout);
     // 显式指定凭据（同一主机有多个凭据时使用）。
     assert_eq!(code(ssh(&mut agent, format!("srv/{}", me("deploy")), "uptime")), "OK");
     assert_eq!(code(ssh(&mut agent, me("nobody"), "uptime")), "AUTH_REJECTED");

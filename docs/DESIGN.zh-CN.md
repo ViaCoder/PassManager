@@ -13,6 +13,7 @@
 | T1 | AI 服务商从对话上下文中提取密钥 | 密钥永不进入 Agent 进程与 LLM 上下文；所有返回结果脱敏；密钥只能在 TUI 中录入；TUI 在非 TTY / Agent 会话中拒绝显示明文 |
 | T2 | 提示注入诱导 Agent 执行非预期操作 | 每个条目必须绑定域名，密钥只会发往匹配的主机；只支持 HTTPS；不跟随跨主机重定向；SSH 主机密钥与自签证书指纹固定 |
 | T3 | Agent 扫描全盘并上传 | 库与设备密钥归专用系统用户所有、放在 $HOME 之外；设备密钥由 TPM / 系统封存；库文件双层抗量子加密 |
+| T4 | Agent 让上游把密钥"换个样子"送回来（请模型把它倒过来写、写进公开的文件名或标题、经 ssh 命令 `rev`），或者调用新建密钥的接口拿到一把新密钥 | 占位符只能放在凭据的位置：凭据类请求头的值、凭据类查询参数或 JSON / 表单字段的完整值、路径的第一段；放在聊天内容、数组、对象键、其他请求头或自由文本里一律 `PLACEMENT`。新建或管理密钥、令牌、凭据的路径（`keys`、`tokens`、`*_tokens`、`oauth` 等，按段解码后比较）带着凭据一律不调用，同一主机内跳到这类路径的重定向也不跟随。ssh 命令里从不代入凭据；sudo 的口令只交给 `sudo -v`，命令以 `sudo -n` 执行，stdin 是 /dev/null。`run --http` 中继与 git 转发本来就由服务器决定凭据放在哪里 |
 | — | 服务被发现或探测 | 不监听 TCP；本地 socket 的第一帧必须是合法握手，否则随机延迟后静默断开，不返回任何特征信息 |
 
 **唯一的安全边界是操作系统用户**：Agent 以普通用户运行，服务以专用用户 `passmanager`（macOS：`_passmanager`；Windows：`NT SERVICE\PassManager`）运行。如果 Agent 拥有 root/管理员权限，任何方案都会失效——这是本设计唯一的前提，`PassManager harden` 负责检查并加固它（§6）。
@@ -20,6 +21,7 @@
 **残余风险**（如实说明）：
 
 - 被注入的 Agent 仍可在**条目自己的域名范围内**滥用权限（例如用 GitHub token 删仓库）。请为每个条目使用最小权限的 token / 账户，不要把通配符用在有用户可控子域名的域上。
+- 口令条目用于 sudo 时，口令会送到目标主机：如果 Agent 在那台主机上已经有 root（例如能用 sudo），它可以替换 sudo 本身来截获口令。这是 sudo 口令认证本身的限制；需要保护的口令不要和别的系统共用，或者改用私钥条目加免口令 sudo。
 - 如果 Agent 能修改用户的 shell 配置，可以伪造 `sudo` 截获管理员口令。请不要在 Agent 的终端里执行 sudo。
 - 首次连接时自动记录指纹（TOFU）：如果第一次连接就被中间人拦截，记录下来的会是攻击者的指纹。
 - 访问令牌只是"门禁"：泄露后持有者只能**使用**凭据（仍看不到明文），在 TUI 中一键吊销即可。
@@ -161,8 +163,8 @@ SealedPayload = { ct_mlkem, ct_mce, nonce_a, nonce_b, c2 }
 | MCP 工具 | CLI | 行为 |
 |---|---|---|
 | `lookup(target, use?)` | `PassManager lookup 目标 [--use http\|ssh\|scp\|git]` | 按需查询：对一个 URL、`user@host` 或主机（基础地址本身是秘密时用 `{{名称}}`），只返回引用名、字段名与照抄即可的写法（`how`），选择规则与真正执行请求时完全相同。不返回其他条目、该条目的其他域名、备注或用途清单 |
-| `http(method, url, headers?, body?)` | `PassManager http [METHOD] URL [-X] [-H 'K: V'] [-d BODY \| -d @file \| --json BODY]` | 在请求头 / 请求体 / URL 查询中写 `{{secret}}`，按 URL 主机自动选择密钥；只支持 HTTPS；不跟随跨主机重定向；删除 `Set-Cookie` 与认证类响应头；正文与响应头脱敏 |
-| `ssh(target, command)` | `PassManager ssh [-p 端口] [-l 用户] user@host[:port] 命令…` | 内置 russh；password 失败时尝试 keyboard-interactive；命令以 `sudo ` 开头时改为 `sudo -k -S -p ''` 并从 stdin 提供密码；输出脱敏 |
+| `http(method, url, headers?, body?)` | `PassManager http [METHOD] URL [-X] [-H 'K: V'] [-d BODY \| -d @file \| --json BODY]` | `{{secret}}` 只能写在凭据的位置（凭据类请求头、key / token / password 参数或字段的完整值、路径第一段），按 URL 主机自动选择密钥；管理密钥与令牌的路径不调用；只支持 HTTPS；不跟随跨主机重定向；删除 `Set-Cookie` 与认证类响应头；正文与响应头脱敏 |
+| `ssh(target, command)` | `PassManager ssh [-p 端口] [-l 用户] user@host[:port] 命令…` | 内置 russh；password 失败时尝试 keyboard-interactive；命令以 `sudo ` 开头时，口令只经 stdin 交给 `sudo -k -S -v`，命令再以 `sudo -n` 执行（stdin 是 /dev/null，读不到口令）；命令里从不代入凭据；输出脱敏 |
 | `scp(source, destination)` | `PassManager scp [-P 端口] 源 目标` | 远程一侧写成 `user@host:/path`；SFTP 上传（创建/截断）或下载（内容脱敏，上限 64 MiB）；本地文件由客户端以当前用户身份读写 |
 
 兼容性：`list`（以及 `list_credentials`）不再列出任何内容，返回 `USE_LOOKUP`。MCP 工具同时接受旧名称（`http_request`、`ssh_exec`、`ssh_upload`/`ssh_download`）和常见参数写法（headers 为对象 / 数组 / `"K: V"` 文本，body 为 JSON 对象，ssh 分开写 `host`/`user`/`port`，scp 用 `from`/`to`），但工具列表只公开上面 4 个；CLI 兼容 curl、OpenSSH、scp 的常用选项，并忽略 `-s`、`-L`、`-t`、`-o …` 等无关选项。客户端定位本地服务不依赖环境变量（Linux 用 `/run/user/<uid>`，Windows 用用户 SID 生成管道名），因此在环境变量很少的 MCP 子进程中同样可用。

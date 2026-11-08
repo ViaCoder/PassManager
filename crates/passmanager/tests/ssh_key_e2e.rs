@@ -336,26 +336,26 @@ fn ssh_key_auth_end_to_end() {
     let o = env.run_stdin(&["import", "--ops", "http,ssh,git", "--name", "pwentry", "--domain", &dc], b"PwEntry-123!\n");
     assert!(o.status.success(), "{}", stderr(&o));
     let (ok, v, out) = ssh(&env, &format!("deploy@localhost:{}", c.port), "sudo id");
-    assert!(ok && v["stdout"].as_str().unwrap().contains("ran: sudo -k -S -p '' -- sh -c 'id'"), "{out}");
+    assert!(ok && v["stdout"].as_str().unwrap().contains("pm-sudo 'id'"), "{out}");
     assert!(v["stdout"].as_str().unwrap().contains("leak: [REDACTED:pwentry]"), "{out}");
     outputs += &out;
 
-    // ---- 多字段条目：登录用 password 字段，命令里的 {{条目.字段}} / {{字段}} 代入，输出中每个字段都脱敏 ----
+    // ---- 多字段条目：登录用 password 字段；命令里不代入任何字段（远端命令能把它改个样子打印出来） ----
     let o = env.run_stdin(
         &["import", "--ops", "http,ssh,git", "--name", "fentry", "--fields", "username,password", "--domain", &dc, "--replace"],
         b"field-user-77\r\nPwEntry-123!\r\n",
     );
     assert!(o.status.success(), "{}", stderr(&o));
     // pwentry 与 fentry 都匹配 C：按引用名指定凭据。
-    let (ok, v, out) = ssh(&env, &format!("fentry/deploy@localhost:{}", c.port), "login {{fentry.username}} {{password}}");
-    assert!(ok, "{out}");
-    let so = v["stdout"].as_str().unwrap();
-    assert!(so.contains("ran: login [REDACTED:fentry.username] [REDACTED:"), "{so}");
-    assert!(!so.contains("field-user-77") && !so.contains("PwEntry-123!"));
+    for cmd in ["login {{fentry.username}} {{password}}", "echo {{password}} | rev", "echo {{secret}}"] {
+        let (ok, _, out) = ssh(&env, &format!("fentry/deploy@localhost:{}", c.port), cmd);
+        assert!(!ok && out.contains("PLACEMENT"), "{cmd}: {out}");
+        assert!(!out.contains("field-user-77") && !out.contains("PwEntry-123!"), "{out}");
+    }
     let (ok, v, out) = ssh(&env, &format!("fentry/deploy@localhost:{}", c.port), "sudo id");
-    assert!(ok && v["stdout"].as_str().unwrap().contains("ran: sudo -k -S -p '' -- sh -c 'id'"), "sudo 用 password 字段：{out}");
+    assert!(ok && v["stdout"].as_str().unwrap().contains("pm-sudo 'id'"), "sudo 用 password 字段：{out}");
     let (ok, _, out) = ssh(&env, &format!("fentry/deploy@localhost:{}", c.port), "echo {{fentry.pin}}");
-    assert!(!ok && out.contains("UNKNOWN_FIELD") && !out.contains("username"), "{out}");
+    assert!(!ok && out.contains("PLACEMENT") && !out.contains("username"), "{out}");
     outputs += &out;
 
     // ---- 错误的密钥：拒绝 ----
@@ -444,7 +444,7 @@ fn key_first_then_password_fallback() {
     let (ok, v, out) = ssh(&env, &format!("deploy@127.0.0.1:{}", b.port), "sudo id");
     assert!(ok, "{out}");
     let so = v["stdout"].as_str().unwrap();
-    assert!(so.contains("ran: sudo -k -S -p '' -- sh -c 'id'"), "sudo 使用口令条目的口令：{so}");
+    assert!(so.contains("pm-sudo 'id'"), "sudo 使用口令条目的口令：{so}");
     assert!(so.contains("leak: [REDACTED:init-pw]"), "{so}");
     assert_eq!(*att_b.lock().unwrap(), vec!["publickey".to_string(), "password".to_string()], "先私钥、后口令");
     outputs += &out;

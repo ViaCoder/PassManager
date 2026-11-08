@@ -222,16 +222,204 @@ pub fn resolve(payload: &Payload, token: &str, host: &str, port: u16, op: &str) 
     }
 }
 
-/// 在一段文本中代入占位符（SSH 命令用；HTTP 有自己的编码规则）。
-pub fn substitute_all(payload: &Payload, text: &str, host: &str, port: u16, op: &str) -> Result<(Zeroizing<String>, Vec<String>), ApiErr> {
-    let mut resolved: Vec<(String, Resolved)> = Vec::new();
+/// SSH 命令里不代入凭据：远端命令可以把值改个样子再打印出来（倒序、拆开、换编码），脱敏认不出来。
+/// 能解析成凭据的占位符一律拒绝；解析不出的 `{{…}}`（例如 docker 的 `{{.Names}}`）原样留给远端。
+/// sudo 的口令不需要占位符：命令以 `sudo ` 开头时由服务器直接交给 sudo（见 `ssh::exec`）。
+pub fn refuse_secrets_in_command(payload: &Payload, text: &str, host: &str, port: u16) -> Result<(), ApiErr> {
     for n in template::find_names(text) {
-        let r = resolve(payload, &n, host, port, op)?;
-        resolved.push((n, r));
+        // 指向凭据的名称都拒绝：{{secret}}、条目名、条目名.字段（字段不存在也算），以及按这台主机能解析成凭据的字段名
+        let names_entry = payload.entries.iter().any(|e| n == e.name || n.starts_with(&format!("{}.", e.name)));
+        if n == AUTO_PLACEHOLDER || names_entry || resolve(payload, &n, host, port, pm_vault::OP_SSH).is_ok() {
+            return Err(err(
+                "PLACEMENT",
+                format!(
+                    "{{{{{n}}}}} is a credential; credentials are never put into ssh commands (a command could print them in another form)"
+                ),
+            ));
+        }
     }
-    let out = template::substitute(text, |n| resolved.iter().find(|(p, _)| p == n).map(|(_, r)| r.value().to_string()))
-        .map_err(|n| err("UNKNOWN_CREDENTIAL", format!("no credential \"{n}\"")))?;
-    Ok((Zeroizing::new(out), resolved.iter().map(|(_, r)| r.entry.name.clone()).collect()))
+    Ok(())
+}
+
+// ---- 占位符只能放在凭据的位置 ----
+//
+// 凭据只能出现在 API 把它当作凭据读取的地方。放在别的位置（聊天内容、文件名、标题、数组……）时，上游可能把它保存、
+// 公开，或改个样子写进回答（例如请模型把它倒过来写），脱敏认不出来，客户端就拿到了密钥。
+
+/// 名称（请求头、查询参数或请求体字段，写成小写、`-` 换成 `_`）是否表示凭据。
+fn is_credential_name(name: &str) -> bool {
+    // 精确匹配的名称
+    const EXACT: &[&str] = &[
+        "authorization",
+        "cookie",
+        "password",
+        "passwd",
+        "pass",
+        "pwd",
+        "pw",
+        "passphrase",
+        "secret",
+        "client_secret",
+        "token",
+        "access_token",
+        "refresh_token",
+        "id_token",
+        "auth",
+        "auth_token",
+        "api_key",
+        "apikey",
+        "key",
+        "private_key",
+        "otp",
+        "totp",
+        "pin",
+        "username",
+        "user",
+        "email",
+        "login",
+        "client_id",
+    ];
+    // 以这些结尾的名称（例如 x-api-key、private-token、ocp-apim-subscription-key、x-auth-token）
+    const SUFFIX: &[&str] = &["_key", "_token", "_secret", "_password", "_passwd", "apikey"];
+    let n = name.trim().to_ascii_lowercase().replace('-', "_");
+    EXACT.contains(&n.as_str()) || SUFFIX.iter().any(|x| n.ends_with(x))
+}
+
+/// 位置不对时的错误（`at` 说明是哪个位置；只含名称，不含任何值）。
+fn misplaced(at: &str) -> ApiErr {
+    err(
+        "PLACEMENT",
+        format!(
+            "a placeholder is not allowed in {at}. Credentials go only where the API reads a credential: a credential header \
+             (Authorization, X-Api-Key, ...), the whole value of a key/token/password query parameter or JSON/form field, or \
+             the first URL path segment"
+        ),
+    )
+}
+
+/// 整个文本正好是一个占位符时返回它的名称。
+fn whole_placeholder(s: &str) -> Option<String> {
+    let inner = s.strip_prefix("{{")?.strip_suffix("}}")?;
+    let names = template::find_names(s);
+    (names.len() == 1 && !inner.contains("{{") && !inner.contains("}}") && names[0] == inner.trim()).then(|| names[0].clone())
+}
+
+/// 路径的第一段：可以是一个占位符，前面可以有一段字母数字（例如 Telegram 的 `bot{{secret}}`）。
+fn first_segment_ok(seg: &str) -> bool {
+    match seg.find("{{") {
+        Some(i) => seg[..i].chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') && whole_placeholder(&seg[i..]).is_some(),
+        None => true,
+    }
+}
+
+/// 检查查询串或表单正文的每一对 `名=值`：名里不能有占位符；值里有占位符时，值必须正好是一个占位符，名必须是凭据名
+/// （或是这个占位符的字段名）。`form` 为真时（正文）每一对都必须是规整的表单写法，不能借表单夹带别的文本。
+fn pairs_ok(text: &str, form: bool, ok: &dyn Fn(&str, &str) -> bool, at: &str) -> Result<(), ApiErr> {
+    // 表单里允许的字符（百分号编码之后的写法）
+    let plain = |t: &str| t.chars().all(|c| c.is_ascii_alphanumeric() || "-._~%+*[]!$'(),;:@/".contains(c));
+    for pair in text.split('&') {
+        let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
+        if !template::find_names(k).is_empty() {
+            return Err(misplaced(&format!("a {at} name")));
+        }
+        let key = percent_encoding::percent_decode_str(k).decode_utf8_lossy().to_string();
+        match (template::find_names(v).is_empty(), whole_placeholder(v)) {
+            // 没有占位符：表单正文仍须是规整的写法
+            (true, _) if form && !(plain(k) && plain(v)) => return Err(misplaced("a request body that is neither JSON nor a form")),
+            (true, _) => {}
+            (false, Some(n)) if (!form || plain(k)) && ok(&n, &key) => {}
+            (false, _) => return Err(misplaced(&format!("the {at} \"{key}\""))),
+        }
+    }
+    Ok(())
+}
+
+/// 检查 URL 里路径、查询串与片段部分（`pq`，从第一个 `/`、`?` 或 `#` 开始的文本）的占位符位置。
+fn url_placement_ok(pq: &str, ok: &dyn Fn(&str, &str) -> bool) -> Result<(), ApiErr> {
+    // 片段不会发给服务器，占位符放在那里没有意义
+    let (pq, frag) = pq.split_once('#').unwrap_or((pq, ""));
+    if !template::find_names(frag).is_empty() {
+        return Err(misplaced("the URL fragment"));
+    }
+    let (path, query) = pq.split_once('?').unwrap_or((pq, ""));
+    for (i, seg) in path.trim_start_matches('/').split('/').enumerate() {
+        if !template::find_names(seg).is_empty() && (i > 0 || !first_segment_ok(seg)) {
+            return Err(misplaced("a URL path segment other than the first"));
+        }
+    }
+    if query.is_empty() { Ok(()) } else { pairs_ok(query, false, ok, "query parameter") }
+}
+
+/// 检查 JSON 正文：占位符只能是对象里某个凭据字段的完整字符串值；不能在键、数组或自由文本里。
+fn json_placement_ok(v: &serde_json::Value, key: Option<&str>, ok: &dyn Fn(&str, &str) -> bool) -> Result<(), ApiErr> {
+    // 这个值（含其中的键）里有没有占位符
+    fn has(v: &serde_json::Value) -> bool {
+        match v {
+            serde_json::Value::String(s) => !template::find_names(s).is_empty(),
+            serde_json::Value::Array(a) => a.iter().any(has),
+            serde_json::Value::Object(m) => m.iter().any(|(k, x)| !template::find_names(k).is_empty() || has(x)),
+            _ => false,
+        }
+    }
+    match v {
+        serde_json::Value::String(s) if !template::find_names(s).is_empty() => match (whole_placeholder(s), key) {
+            (Some(n), Some(k)) if ok(&n, k) => Ok(()),
+            (_, Some(k)) => Err(misplaced(&format!("the JSON field \"{k}\""))),
+            (_, None) => Err(misplaced("a JSON value outside an object field")),
+        },
+        serde_json::Value::Array(a) if a.iter().any(has) => Err(misplaced("a JSON array")),
+        serde_json::Value::Object(m) => {
+            for (k, x) in m {
+                if !template::find_names(k).is_empty() {
+                    return Err(misplaced("a JSON key"));
+                }
+                json_placement_ok(x, Some(k), ok)?;
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
+/// 检查一个请求里所有占位符的位置（`pq` 见 `url_placement_ok`）。`resolved` 用来认出多字段条目的字段名：
+/// `{"username":"{{c.username}}"}` 里字段名本身就是凭据的位置。
+fn placement_ok(pq: &str, headers: &[(String, String)], body: Option<&str>, resolved: &[(String, Resolved)]) -> Result<(), ApiErr> {
+    // 名称 n 的占位符能否放在名为 pos 的位置
+    let norm = |s: &str| s.trim().to_ascii_lowercase().replace('-', "_");
+    let ok = |n: &str, pos: &str| {
+        is_credential_name(pos)
+            || resolved.iter().find(|(p, _)| p == n).and_then(|(_, r)| r.field.as_deref()).is_some_and(|f| norm(f) == norm(pos))
+    };
+    url_placement_ok(pq, &ok)?;
+    for (k, v) in headers {
+        if !template::find_names(k).is_empty() {
+            return Err(misplaced("a header name"));
+        }
+        if template::find_names(v).iter().any(|n| !ok(n, k)) {
+            return Err(misplaced(&format!("the {k} header")));
+        }
+    }
+    match body {
+        Some(b) if !template::find_names(b).is_empty() => match serde_json::from_str::<serde_json::Value>(b) {
+            Ok(v) => json_placement_ok(&v, None, &ok),
+            Err(_) => pairs_ok(b.trim(), true, &ok, "form field"),
+        },
+        _ => Ok(()),
+    }
+}
+
+/// 最终 URL 的路径里不能有管理凭据的段（按段百分号解码后比较；编码出来的 `/` 拆开再看）。
+fn credential_path_ok(url: &Url) -> Result<(), ApiErr> {
+    for raw in url.path().split('/') {
+        let seg = percent_encoding::percent_decode_str(raw).decode_utf8_lossy().to_string();
+        if seg.split(['/', '\\']).any(pm_vault::relay::is_credential_segment) {
+            return Err(err(
+                "FORBIDDEN",
+                "paths that create or manage keys, tokens or credentials are never called with a stored credential",
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn collect_names(url: &str, headers: &[(String, String)], body: Option<&str>) -> Vec<String> {
@@ -291,6 +479,9 @@ pub fn prepare(payload: &Payload, method: &str, url: &str, headers: &[(String, S
     for n in &names {
         resolved.push((n.clone(), resolve(payload, n, &host, port, pm_vault::OP_HTTP)?));
     }
+    // 每个占位符都必须在凭据的位置（从主机之后的第一个 /、? 或 # 开始算路径）
+    let after = url.split_once("://").map(|x| x.1).unwrap_or(url);
+    placement_ok(&after[after.find(['/', '?', '#']).unwrap_or(after.len())..], headers, body, &resolved)?;
     let lookup = |n: &str| resolved.iter().find(|(p, _)| p == n).map(|(_, r)| r.value().to_string());
     let real_url = Zeroizing::new(
         template::substitute(url, |n| lookup(n).map(|s| percent_encoding::utf8_percent_encode(&s, URL_ENCODE).to_string()))
@@ -300,6 +491,7 @@ pub fn prepare(payload: &Payload, method: &str, url: &str, headers: &[(String, S
     if real.scheme() != "https" || host_string(&real).as_deref() != Some(host.as_str()) || real.port_or_known_default() != Some(port) {
         return Err(err("BAD_REQUEST", "placeholders are not allowed in the URL scheme, host or port"));
     }
+    credential_path_ok(&real)?;
     let mut hs = Vec::new();
     for (k, v) in headers {
         let k2 = template::substitute(k, lookup).map_err(|n| err("UNKNOWN_CREDENTIAL", n))?;
@@ -446,6 +638,8 @@ fn finish_base(
     for n in &names {
         resolved.push((n.clone(), resolve(payload, n, &host, port, pm_vault::OP_HTTP)?));
     }
+    // 每个占位符都必须在凭据的位置（基础地址之后的文本按路径算）
+    placement_ok(rest, headers, body, &resolved)?;
     let lookup = |n: &str| resolved.iter().find(|(p, _)| p == n).map(|(_, r)| r.value().to_string());
     let suffix = Zeroizing::new(
         template::substitute(rest, |n| lookup(n).map(|s| percent_encoding::utf8_percent_encode(&s, URL_ENCODE).to_string()))
@@ -461,6 +655,7 @@ fn finish_base(
     {
         return Err(err("BAD_URL", format!("the text after {label} must not change the scheme, host, port or user info")));
     }
+    credential_path_ok(&real)?;
     let mut hs = Vec::new();
     for (k, v) in headers {
         let k2 = template::substitute(k, lookup).map_err(|n| err("UNKNOWN_CREDENTIAL", n))?;
@@ -688,7 +883,12 @@ pub async fn execute(p: Prepared, expected_pin: Option<String>, redactor: &Redac
             return attempt.stop();
         }
         let u = attempt.url();
-        if u.scheme() == "https" && host_string(u).as_deref() == Some(orig_host.as_str()) && u.port_or_known_default() == Some(orig_port) {
+        // 同一主机、同一端口才跟随；跳到管理凭据的路径时停下（返回 3xx 本身，不带着凭据去调用它）
+        if u.scheme() == "https"
+            && host_string(u).as_deref() == Some(orig_host.as_str())
+            && u.port_or_known_default() == Some(orig_port)
+            && credential_path_ok(u).is_ok()
+        {
             attempt.follow()
         } else {
             attempt.stop()
@@ -961,14 +1161,14 @@ mod tests {
         let r = prepare(
             &p,
             "POST",
-            "https://mega.example.com/login?u={{mega.username}}",
-            &[("X-P".into(), "{{password}}".into())],
-            Some("{\"u\":\"{{username}}\"}"),
+            "https://mega.example.com/login?user={{mega.username}}",
+            &[("X-Password".into(), "{{password}}".into())],
+            Some("{\"username\":\"{{username}}\"}"),
         )
         .unwrap();
-        assert_eq!(r.url.query(), Some("u=me%40example.com"));
+        assert_eq!(r.url.query(), Some("user=me%40example.com"));
         assert_eq!(r.headers[0].1.as_str(), "p&ss w0rd");
-        assert_eq!(r.body.as_deref().map(|b| b.as_str()), Some("{\"u\":\"me@example.com\"}"));
+        assert_eq!(r.body.as_deref().map(|b| b.as_str()), Some("{\"username\":\"me@example.com\"}"));
         let e = |r: Result<Prepared, ApiErr>| r.err().unwrap();
         let x = e(prepare(&p, "GET", "https://mega.example.com/{{secret}}", &[], None));
         assert_eq!(x.code, "BAD_REQUEST");
@@ -992,24 +1192,101 @@ mod tests {
         );
         assert_eq!(resolve(&p, "unbound", "x.example.com", 443, pm_vault::OP_HTTP).err().unwrap().code, "DOMAIN_MISMATCH");
         assert!(resolve(&p, "unbound", "x.example.com", 443, pm_vault::OP_HTTP).err().unwrap().message.contains("not bound"));
-        // SSH 命令代入。
-        let (cmd, names) =
-            substitute_all(&p, "printf '%s' '{{password}}' | login {{mega.username}}", "mega.example.com", 22, pm_vault::OP_SSH).unwrap();
-        assert_eq!(cmd.as_str(), "printf '%s' 'p&ss w0rd' | login me@example.com");
-        assert_eq!(names, vec!["mega".to_string(), "mega".to_string()]);
-        assert_eq!(substitute_all(&p, "echo {{nope}}", "mega.example.com", 22, pm_vault::OP_SSH).err().unwrap().code, "UNKNOWN_FIELD");
-        let (plain, _) = substitute_all(&p, "uptime", "mega.example.com", 22, pm_vault::OP_SSH).unwrap();
-        assert_eq!(plain.as_str(), "uptime");
+        // SSH 命令里不代入凭据：能解析成凭据的占位符拒绝，错误里没有值；解析不出的原样留下。
+        let x = refuse_secrets_in_command(&p, "printf '%s' '{{password}}' | rev", "mega.example.com", 22).unwrap_err();
+        assert_eq!(x.code, "PLACEMENT");
+        assert!(x.message.contains("{{password}}") && !x.message.contains("w0rd"), "{}", x.message);
+        assert_eq!(refuse_secrets_in_command(&p, "echo {{mega.username}}", "mega.example.com", 22).unwrap_err().code, "PLACEMENT");
+        assert_eq!(refuse_secrets_in_command(&p, "echo {{mega.pin}}", "mega.example.com", 22).unwrap_err().code, "PLACEMENT");
+        assert_eq!(refuse_secrets_in_command(&p, "echo {{secret}}", "nothing.example.org", 22).unwrap_err().code, "PLACEMENT");
+        assert!(refuse_secrets_in_command(&p, "docker ps --format '{{.Names}}' {{nope}}", "mega.example.com", 22).is_ok());
+        assert!(refuse_secrets_in_command(&p, "uptime", "mega.example.com", 22).is_ok());
+    }
+
+    /// 占位符只能在凭据的位置；管理凭据的路径不放行。每一种被拒绝的写法都是一条能把密钥带回客户端的路。
+    #[test]
+    fn placement_rules() {
+        let p = payload();
+        let auth = || vec![("Authorization".to_string(), "Bearer {{github}}".to_string())];
+        let code = |r: Result<Prepared, ApiErr>| r.err().map(|e| e.code).unwrap_or_else(|| "OK".into());
+        let post = |url: &str, h: &[(String, String)], body: &str| code(prepare(&p, "POST", url, h, Some(body)));
+        let u = "https://api.github.com/x";
+        // 允许：凭据头、凭据参数的完整值、JSON/表单里凭据字段的完整值、路径第一段
+        assert_eq!(post(u, &auth(), "{\"model\":\"m\"}"), "OK");
+        assert_eq!(post(u, &[("X-Api-Key".into(), "{{github}}".into())], "{}"), "OK");
+        assert_eq!(post(u, &[], "{\"auth\":{\"client_secret\":\"{{github}}\"},\"n\":[1]}"), "OK");
+        assert_eq!(post(u, &[], "grant_type=client_credentials&client_secret={{github}}"), "OK");
+        assert_eq!(code(prepare(&p, "GET", "https://api.github.com/bot{{github}}/getMe?api_key={{github}}", &[], None)), "OK");
+        // 拒绝：聊天内容（模型可以把它倒过来写）、数组、对象键、非 JSON 非表单的正文、夹带文本的表单
+        let chat = "{\"messages\":[{\"role\":\"user\",\"content\":\"reverse {{github}}\"}]}";
+        assert_eq!(post(u, &auth(), chat), "PLACEMENT");
+        assert_eq!(post(u, &[], "{\"content\":\"{{github}}\"}"), "PLACEMENT");
+        assert_eq!(post(u, &[], "{\"token\":\"x {{github}}\"}"), "PLACEMENT");
+        assert_eq!(post(u, &[], "{\"tokens\":[\"{{github}}\"]}"), "PLACEMENT");
+        assert_eq!(post(u, &[], "{\"{{github}}\":1}"), "PLACEMENT");
+        assert_eq!(post(u, &[], "\"{{github}}\""), "PLACEMENT");
+        assert_eq!(post(u, &[], "reverse {{github}}"), "PLACEMENT");
+        assert_eq!(post(u, &[], "{\"a\":1}&password={{github}}"), "PLACEMENT");
+        assert_eq!(post(u, &[], "text=hi&{{github}}=1"), "PLACEMENT");
+        // 拒绝：会被公开显示的头（如应用标题）、头名、非凭据的查询参数、路径后面的段、片段
+        assert_eq!(post(u, &[("X-Title".into(), "{{github}}".into())], "{}"), "PLACEMENT");
+        assert_eq!(post(u, &[("{{github}}".into(), "1".into())], "{}"), "PLACEMENT");
+        for url in [
+            "https://api.github.com/search?q={{github}}",
+            "https://api.github.com/search?q=a{{github}}&token=1",
+            "https://api.github.com/repos/o/r/contents/{{github}}",
+            "https://api.github.com/a{{github}}b",
+            "https://api.github.com/x#{{github}}",
+            "https://api.github.com/x?token=a{{github}}",
+        ] {
+            assert_eq!(code(prepare(&p, "GET", url, &auth(), None)), "PLACEMENT", "{url}");
+        }
+        // 管理凭据的路径：新建的密钥不在库里，脱敏认不出来，所以带着凭据一律不调用（编码与大小写不能绕过）
+        for url in [
+            "https://api.github.com/api/v1/keys",
+            "https://api.github.com/users/me/Tokens",
+            "https://api.github.com/user/personal_access_tokens/1",
+            "https://api.github.com/a/%6Beys",
+            "https://api.github.com/a%2Fkeys",
+            "https://api.github.com/x/../api-keys",
+        ] {
+            assert_eq!(code(prepare(&p, "POST", url, &auth(), Some("{}"))), "FORBIDDEN", "{url}");
+        }
+        // 两个辅助函数的边界
+        assert_eq!(whole_placeholder("{{ a.b }}").as_deref(), Some("a.b"));
+        for t in ["{{a}}{{b}}", "x{{a}}", "{{a}} ", "{{a}}}}", "{{}}"] {
+            assert!(whole_placeholder(t).is_none(), "{t}");
+        }
+        assert!(is_credential_name("X-Goog-Api-Key") && is_credential_name("private-token") && is_credential_name("Cookie"));
+        assert!(!is_credential_name("x-title") && !is_credential_name("http-referer") && !is_credential_name("content"));
+    }
+
+    /// 别名与基础地址后面写的部分同样检查位置与路径。
+    #[test]
+    fn placement_rules_after_base_and_alias() {
+        let mut p = Payload::default();
+        p.entries.push(gw_entry("ai", GW, &["gateway.example.com"]));
+        let h = vec![("Authorization".to_string(), "Bearer {{ai.api_key}}".to_string())];
+        assert!(prepare(&p, "GET", "{{ai.base_url}}/models", &h, None).is_ok());
+        let e = |url: &str, body: Option<&str>| prepare(&p, "POST", url, &h, body).err().unwrap().code;
+        assert_eq!(e("{{ai.base_url}}/chat", Some("{\"prompt\":\"{{ai.api_key}}\"}")), "PLACEMENT");
+        assert_eq!(e("{{ai.base_url}}?u={{ai.base_url}}", None), "PLACEMENT");
+        assert_eq!(e("{{ai.base_url}}/keys", Some("{}")), "FORBIDDEN");
     }
 
     #[test]
     fn prepare_rules() {
         let p = payload();
-        let ok =
-            prepare(&p, "get", "https://api.github.com/user?t={{github}}", &[("Authorization".into(), "Bearer {{github}}".into())], None)
-                .unwrap();
+        let ok = prepare(
+            &p,
+            "get",
+            "https://api.github.com/user?access_token={{github}}",
+            &[("Authorization".into(), "Bearer {{github}}".into())],
+            None,
+        )
+        .unwrap();
         assert_eq!(ok.host, "api.github.com");
-        assert_eq!(ok.url.query(), Some("t=tok%2Fen%3F%26%3D1"));
+        assert_eq!(ok.url.query(), Some("access_token=tok%2Fen%3F%26%3D1"));
         assert_eq!(ok.headers[0].1.as_str(), "Bearer tok/en?&=1");
         let e = |r: Result<Prepared, ApiErr>| r.err().unwrap().code;
         assert_eq!(e(prepare(&p, "GET", "http://api.github.com/{{github}}", &[], None)), "USE_HTTPS");
@@ -1094,8 +1371,7 @@ mod tests {
         assert!(x.message.contains("may not be used for http") && !x.message.contains("ssh"), "{}", x.message);
         assert_eq!(select_by_host(&p, "198.51.100.9", 22, pm_vault::OP_SSH).unwrap().name, "init-pw");
         assert_eq!(select_by_host(&p, "198.51.100.9", 22, pm_vault::OP_GIT).unwrap_err().code, "OP_NOT_ALLOWED");
-        let (cmd, _) = substitute_all(&p, "echo {{init-pw}}", "a.example.com", 22, pm_vault::OP_SSH).unwrap();
-        assert_eq!(cmd.as_str(), "echo initial-pass");
+        assert_eq!(refuse_secrets_in_command(&p, "echo {{init-pw}}", "a.example.com", 22).unwrap_err().code, "PLACEMENT");
         // 有一个不限用途的条目时，HTTP 用它。
         p.entries.push(ent("api", "tok", &["*.example.com"], &["http"]));
         assert_eq!(select_by_host(&p, "a.example.com", 443, pm_vault::OP_HTTP).unwrap().name, "api");
@@ -1147,11 +1423,15 @@ mod tests {
         let r = prepare(&p, "GET", "{{ai.base_url}}/models?x=1", &[], None).unwrap();
         assert_eq!(r.url.as_str(), format!("{GW}/models?x=1"), "后缀照原样追加");
         // 后缀里的其他占位符仍然百分号编码。
-        let r = prepare(&p, "GET", "{{ai.base_url}}?k={{ai.api_key}}&u={{ai.base_url}}", &[], None).unwrap();
-        assert!(r.url.as_str().starts_with(&format!("{GW}?k=sk-gw-0123456789&u=https%3A%2F%2Fgateway.example.com%2Fv1")), "{}", r.url);
+        let r = prepare(&p, "GET", "{{ai.base_url}}?api_key={{ai.api_key}}&base_url={{ai.base_url}}", &[], None).unwrap();
+        assert!(
+            r.url.as_str().starts_with(&format!("{GW}?api_key=sk-gw-0123456789&base_url=https%3A%2F%2Fgateway.example.com%2Fv1")),
+            "{}",
+            r.url
+        );
         // 中间位置的占位符：与以前一样百分号编码。
-        let r = prepare(&p, "GET", "https://gateway.example.com/q?u={{ai.base_url}}", &[], None).unwrap();
-        assert!(r.url.query().unwrap().starts_with("u=https%3A%2F%2Fgateway.example.com%2Fv1%2Facct-7f3e"));
+        let r = prepare(&p, "GET", "https://gateway.example.com/q?base_url={{ai.base_url}}", &[], None).unwrap();
+        assert!(r.url.query().unwrap().starts_with("base_url=https%3A%2F%2Fgateway.example.com%2Fv1%2Facct-7f3e"));
         assert_eq!(r.label, None);
         // 大小写与末尾的点：按规范化后的主机比较。
         let mut p2 = Payload::default();

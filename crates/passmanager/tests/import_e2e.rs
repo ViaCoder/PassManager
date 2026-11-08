@@ -20,6 +20,16 @@ fn http_digest(env: &Env, port: u16, body: &str) -> (bool, String) {
     (o.status.success(), stdout(&o) + &stderr(&o))
 }
 
+/// 请求体：值放在 JSON 的 `secret` 字段里（占位符只能在凭据的位置，不能是整个请求体）。
+fn secret_body(v: &str) -> String {
+    format!("{{\"secret\":\"{v}\"}}")
+}
+
+/// 请求体：用户名与口令两个字段。
+fn login_body(u: &str, p: &str) -> String {
+    format!("{{\"username\":\"{u}\",\"password\":\"{p}\"}}")
+}
+
 fn digest_of(s: &str) -> String {
     format!("sha256={}", hex(&pm_crypto::sha256(s.as_bytes())))
 }
@@ -37,8 +47,8 @@ fn import_from_stdin() {
     assert!(o.status.success(), "{}", stderr(&o));
     assert_eq!(stdout(&o).trim(), format!("已导入 blob（{} 字节，1 个域名）", BLOB.len()));
     outputs += &(stdout(&o) + &stderr(&o));
-    let (ok, out) = http_digest(&env, port, "{{blob}}");
-    assert!(ok && out.contains(&digest_of(BLOB)), "{out}");
+    let (ok, out) = http_digest(&env, port, &secret_body("{{blob}}"));
+    assert!(ok && out.contains(&digest_of(&secret_body(BLOB))), "{out}");
     outputs += &out;
 
     // ---- 多字段，CRLF 输入 ----
@@ -49,8 +59,8 @@ fn import_from_stdin() {
     assert!(o.status.success(), "{}", stderr(&o));
     assert_eq!(stdout(&o).trim(), format!("已导入 creds（{} 字节，1 个域名）", USER.len() + PASS.len()));
     outputs += &(stdout(&o) + &stderr(&o));
-    let (ok, out) = http_digest(&env, port, "{{creds.username}}:{{creds.password}}");
-    assert!(ok && out.contains(&digest_of(&format!("{USER}:{PASS}"))), "{out}");
+    let (ok, out) = http_digest(&env, port, &login_body("{{creds.username}}", "{{creds.password}}"));
+    assert!(ok && out.contains(&digest_of(&login_body(USER, PASS))), "{out}");
     outputs += &out;
     // lookup 只给字段名（没有值、没有域名、没有备注）。
     let o = env.agent(&["lookup", "{{creds}}"]);
@@ -74,8 +84,9 @@ fn import_from_stdin() {
             .status
             .success()
     );
-    let url = format!("https://127.0.0.1:{echo}/e?u={{{{ef.username}}}}");
-    let o = env.agent(&["http", "POST", &url, "-H", "X-P: {{ef.password}}", "-d", "{{eb}} | {{ef.username}}"]);
+    let url = format!("https://127.0.0.1:{echo}/e?username={{{{ef.username}}}}");
+    let body = "{\"secret\":\"{{eb}}\",\"username\":\"{{ef.username}}\"}";
+    let o = env.agent(&["http", "POST", &url, "-H", "X-Password: {{ef.password}}", "-d", body]);
     let out = stdout(&o);
     assert!(o.status.success(), "{out}");
     // 相同的值在别的条目里也有，标签取第一个匹配的条目；这里只检查每个值都被替换、没有残留。
@@ -116,8 +127,8 @@ fn import_from_stdin() {
         b"replaced-value-123\n",
     );
     assert!(o.status.success(), "{}", stderr(&o));
-    let (ok, out) = http_digest(&env, port, "{{blob}}");
-    assert!(ok && out.contains(&digest_of("replaced-value-123")), "{out}");
+    let (ok, out) = http_digest(&env, port, &secret_body("{{blob}}"));
+    assert!(ok && out.contains(&digest_of(&secret_body("replaced-value-123"))), "{out}");
     outputs += &out;
 
     // ---- 没有域名：保存，但标为未绑定，Agent 不能使用 ----
@@ -139,7 +150,7 @@ fn import_from_stdin() {
         found.contains("DOMAIN_MISMATCH") && found.contains("not bound to any domain") && found.contains("passmanager update"),
         "{found}"
     );
-    let (ok, out) = http_digest(&env, port, "{{spare}}");
+    let (ok, out) = http_digest(&env, port, &secret_body("{{spare}}"));
     assert!(!ok && out.contains("DOMAIN_MISMATCH") && out.contains("not bound"), "{out}");
     outputs += &out;
 
@@ -149,7 +160,7 @@ fn import_from_stdin() {
     let o = env.run(&["update", "--name", "spare", "--note", "spare key", "--add-op", "http"]);
     assert!(o.status.success() && stderr(&o).is_empty(), "{}{}", stdout(&o), stderr(&o));
     // 绑定生效：不再是 DOMAIN_MISMATCH（spare 不是自签条目，所以到本地自签服务器的 TLS 校验失败——说明请求已经发出）。
-    let (ok, out) = http_digest(&env, port, "{{spare}}");
+    let (ok, out) = http_digest(&env, port, &secret_body("{{spare}}"));
     assert!(!ok && out.contains("UPSTREAM_ERROR") && !out.contains("DOMAIN_MISMATCH"), "{out}");
     outputs += &out;
     assert!(!env.run(&["update", "--name", "nope", "--note", "x"]).status.success());

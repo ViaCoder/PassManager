@@ -41,7 +41,7 @@ fn tools() -> Value {
         {
             "name": "http",
             "title": "HTTPS request",
-            "description": "Send one HTTPS request. Write placeholders exactly as lookup's how shows (e.g. {{secret}}); PassManager fills them in and redacts secrets from the response. Example: {\"method\":\"GET\",\"url\":\"https://api.github.com/user\",\"headers\":{\"Authorization\":\"Bearer {{secret}}\"}}",
+            "description": "Send one HTTPS request. Write placeholders exactly as lookup's how shows (e.g. {{secret}}); PassManager fills them in and redacts secrets from the response. A placeholder goes only where the API reads a credential (a credential header, or the whole value of a key/token query parameter or JSON/form field); anywhere else, and paths that create or manage keys or tokens, are refused. Example: {\"method\":\"GET\",\"url\":\"https://api.github.com/user\",\"headers\":{\"Authorization\":\"Bearer {{secret}}\"}}",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -57,7 +57,7 @@ fn tools() -> Value {
         {
             "name": "ssh",
             "title": "Run SSH command",
-            "description": "Run one shell command on user@host[:port] with the stored password or key; output is redacted. A command starting with \"sudo \" gets the password automatically. To go through a jump host write jumpuser@jumphost>user@host; each hop uses its own stored credential. Example: {\"target\":\"root@192.0.2.10\",\"command\":\"uptime\"}",
+            "description": "Run one shell command on user@host[:port] with the stored password or key; output is redacted. A command starting with \"sudo \" gets the password automatically (only sudo reads it); placeholders for credentials are never put into commands. To go through a jump host write jumpuser@jumphost>user@host; each hop uses its own stored credential. Example: {\"target\":\"root@192.0.2.10\",\"command\":\"uptime\"}",
             "inputSchema": {
                 "type": "object",
                 "properties": {

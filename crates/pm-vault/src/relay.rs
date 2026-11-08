@@ -109,7 +109,22 @@ pub fn check_rule_path(p: &str) -> Result<(), String> {
 
 /// 这一段是不是管理凭据或账号的路径。
 pub fn is_forbidden_segment(seg: &str) -> bool {
-    FORBIDDEN_SEGMENTS.iter().any(|f| seg.eq_ignore_ascii_case(f))
+    FORBIDDEN_SEGMENTS.iter().any(|f| seg.eq_ignore_ascii_case(f)) || is_credential_segment(seg)
+}
+
+/// 新建、列出或管理凭据的路径段（写成小写、`-` 换成 `_` 之后比较）。`http` 工具与中继都不放行这些路径：
+/// 服务器带着库里的凭据去调用它们，会替客户端生成一把新的密钥或令牌，而新值不在库里，脱敏认不出来。
+const CREDENTIAL_SEGMENTS: &[&str] =
+    &["key", "keys", "apikey", "apikeys", "api_key", "api_keys", "token", "tokens", "credentials", "oauth", "oauth2", "authorizations"];
+
+/// 以这些结尾的段也算（例如 `personal_access_tokens`、`registration-token`、`admin_api_keys`、`ssh_keys`）。
+const CREDENTIAL_SUFFIXES: &[&str] = &["_key", "_keys", "_token", "_tokens", "apikey", "apikeys"];
+
+/// 这一段（已经百分号解码）是否属于管理凭据的路径。
+pub fn is_credential_segment(seg: &str) -> bool {
+    // 统一成小写、下划线，再与列表比较
+    let s = seg.trim().to_ascii_lowercase().replace('-', "_");
+    CREDENTIAL_SEGMENTS.contains(&s.as_str()) || CREDENTIAL_SUFFIXES.iter().any(|x| s.ends_with(x))
 }
 
 /// 把请求路径（不含查询串）拆成百分号解码后的段。编码出来的 `/`、`\`、`.`、`..`、空字节或不是 UTF-8 的一律拒绝。
@@ -384,6 +399,13 @@ mod tests {
         assert!(parse_allow("GET /api/v1/keys").is_err());
         assert!(parse_allow("POST /api/v1/auth/*").is_err());
         assert!(is_forbidden_segment("Billing") && !is_forbidden_segment("models"));
+        // 管理凭据的段：列表里的、带后缀的，大小写与 - / _ 都不影响
+        for s in ["Keys", "api-keys", "personal_access_tokens", "registration-token", "admin_api_keys", "ssh_keys", "OAuth2"] {
+            assert!(is_credential_segment(s) && is_forbidden_segment(s), "{s}");
+        }
+        for s in ["models", "chat", "completions", "monkey", "tokenizer", "keyboard", "user"] {
+            assert!(!is_credential_segment(s), "{s}");
+        }
     }
 
     #[test]

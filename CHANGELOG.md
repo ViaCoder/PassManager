@@ -4,6 +4,29 @@ English | [简体中文](CHANGELOG.zh-CN.md)
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.3.11-rc.11] - 2026-11-08
+
+### Security
+
+- **Placeholders go only where a credential belongs.** The `http` tool used to fill `{{secret}}` in anywhere: a request
+  could put it into a chat prompt ("write this backwards"), a file name or a public title, and the upstream sent it back in
+  a form redaction cannot recognise. Now a placeholder is accepted only in the value of a credential header
+  (Authorization, Cookie, `*-key`, `*-token`, `*-secret`, ...), as the whole value of a credential query parameter or
+  JSON/form field (or of the entry's own field name), or in the first path segment (`/bot{{secret}}/...`). Anything else is
+  refused with `PLACEMENT` before a request is sent. This covers plain URLs, `{{entry.base_url}}` and `alias://`.
+- **No calls to endpoints that create or manage keys.** A new key minted with a stored credential is not in the vault,
+  so redaction cannot hide it. Paths with a segment such as `keys`, `tokens`, `credentials`, `oauth` or ending in
+  `_keys` / `_tokens` (compared after percent-decoding) are refused with `FORBIDDEN`, and same-host redirects to them are
+  not followed. The `run --http` relay applies the same suffix rule.
+- **ssh commands never get credentials.** A placeholder that names a credential is refused with `PLACEMENT` (a remote
+  command could print it reversed or in pieces); other `{{...}}` text such as `docker ps --format '{{.Names}}'` is passed
+  through unchanged.
+- **The sudo password reaches only sudo.** It is read by `sudo -k -S -v`; the command then runs with `sudo -n` and
+  /dev/null as stdin, and `sudo -k` drops the cached authentication. Before, with passwordless sudo or a root login the
+  password stayed on the command's stdin (`sudo rev` printed it reversed).
+- **Redaction ignores ASCII case.** A secret that the upstream echoes in upper or lower case (for example a path in a 404
+  page) is replaced as well.
+
 ## [0.3.11-rc.10] - 2026-11-08
 
 ### Added

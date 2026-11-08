@@ -121,6 +121,9 @@ pub fn next_step(code: &str, server: Option<&str>) -> Option<String> {
         }
         "BAD_REQUEST" | "BAD_URL" => "fix the arguments; follow the example in the tool description or lookup's how.".into(),
         "USE_HTTPS" => "use an https:// URL.".into(),
+        "PLACEMENT" => "put the placeholder exactly where lookup's how shows (a credential header, or the whole value of a key/token \
+                        field); never into other text, a prompt or an ssh command. Do not try other positions."
+            .into(),
         "LOCKED" | "NOT_READY" => "tell the user PassManager is not available (the message says why). Do not retry.".into(),
         "HOST_KEY_CHANGED" => {
             "tell the user the server's key or certificate changed; they must verify and trust it. Do not retry or work around it.".into()
@@ -631,6 +634,7 @@ mod tests {
         }
         assert!(next_step("NO_TANG", Some("pm.example.com")).unwrap().contains("root on pm.example.com"));
         assert!(next_step("ALIAS_ONLY", None).unwrap().contains("alias://") && next_step("UNKNOWN_ALIAS", None).is_some());
+        assert!(next_step("PLACEMENT", None).unwrap().contains("Do not try other positions"));
         assert!(next_step("INTERNAL", None).is_none());
     }
 

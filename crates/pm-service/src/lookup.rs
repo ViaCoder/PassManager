@@ -131,13 +131,15 @@ fn http_how(e: &Entry, url_prefix: &str, named: bool) -> String {
         let ph = if named { format!("{{{{{}}}}}", e.name) } else { "{{secret}}".to_string() };
         return format!(
             "http {{\"method\":\"GET\",\"url\":\"{url_prefix}/<path>\",\"headers\":{{\"Authorization\":\"Bearer {ph}\"}}}} \
-             - put {ph} where this API expects its key (header, query or body)"
+             - {ph} goes only where this API reads its key: a credential header (Authorization, X-Api-Key, ...) or the whole value \
+             of a key/token query parameter or JSON field, never inside other text"
         );
     }
     let name = &e.name;
     let header = token_field(e).map(|f| format!(",\"headers\":{{\"Authorization\":\"Bearer {{{{{name}.{f}}}}}\"}}")).unwrap_or_default();
     format!(
-        "http {{\"method\":\"GET\",\"url\":\"{url_prefix}/<path>\"{header}}} - write {{{{{name}.<field>}}}} where the API expects a field"
+        "http {{\"method\":\"GET\",\"url\":\"{url_prefix}/<path>\"{header}}} - write {{{{{name}.<field>}}}} only where the API reads that field: a credential header or the whole value of the matching \
+         query parameter or JSON/form field"
     )
 }
 

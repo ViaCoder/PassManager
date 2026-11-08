@@ -840,11 +840,12 @@ impl Shared {
                         return Err(err("ALIAS_ONLY", "this target is not available to agents directly"));
                     }
                 }
-                // 命令中的占位符（{{name.field}} 等）按目标主机代入，例如把口令经管道交给远端程序。
+                // 命令里不代入凭据（远端命令能把它改个样子打印出来）；能解析成凭据的占位符直接拒绝。
                 let command = {
                     let inner = self.inner.lock().await;
                     let v = inner.vault.as_ref().ok_or_else(|| self.locked_err())?;
-                    http::substitute_all(&v.payload, &command, &dest.host, dest.port, pm_vault::OP_SSH)?.0
+                    http::refuse_secrets_in_command(&v.payload, &command, &dest.host, dest.port)?;
+                    Zeroizing::new(command)
                 };
                 let (session, t, redactor) = self.ssh_session(&target).await?;
                 // 命令以 `sudo ` 开头且有口令条目时，由服务通过 stdin 提供 sudo 密码；只有私钥时原样执行。

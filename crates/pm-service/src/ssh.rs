@@ -4,7 +4,8 @@
 //! - 认证：同一主机同时匹配私钥条目与口令条目时，先用私钥（公钥认证，ecdsa-sha2-nistp384 / ed25519 / rsa 等）；
 //!   失败且服务器仍提供 password / keyboard-interactive 时，才用口令条目（先 password，再 keyboard-interactive）。
 //!   多字段条目使用名为 `password` 的字段。
-//! - `sudo=true`：只在有口令条目时生效，以 `sudo -k -S -p ''` 执行并从 stdin 提供该口令；只有私钥时 `sudo` 命令原样执行。
+//! - `sudo=true`：只在有口令条目时生效。口令只交给 sudo 自己（`sudo -v` 从 stdin 读一行），命令随后以 `sudo -n` 执行，
+//!   它的 stdin 是 /dev/null：免口令的 sudo 或 root 账号不读口令时，口令也不会落进命令的输入。只有私钥时 `sudo` 命令原样执行。
 //! - 算法偏好：密钥交换优先 mlkem768x25519-sha256（后量子混合），其次 ecdh-sha2-nistp384，再兼容 curve25519；
 //!   加密优先 aes256-gcm@openssh.com；主机密钥与公钥认证支持 ecdsa-sha2-nistp384。
 //!   （russh 不支持 sntrup761x25519-sha512，对只提供它与 nistp384 的旧主机会协商 ecdh-sha2-nistp384。）
@@ -281,10 +282,21 @@ fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
 }
 
+/// sudo 的包装脚本（经 `sh -c 脚本 pm-sudo 命令` 执行，`$1` 是命令）：
+/// 1. 读出第一行（口令），经管道交给 `sudo -k -S -p '' -v`：只验证并缓存这次认证，不执行任何命令；
+/// 2. 用 `sudo -n` 执行命令，stdin 是 /dev/null：即使 sudo 不需要口令（NOPASSWD 或本来就是 root），命令也读不到口令；
+/// 3. 结束后 `sudo -k` 作废缓存的认证，退出码与命令相同。printf 是 sh 的内建命令，口令不会出现在进程参数里。
+const SUDO_WRAP: &str = r#"IFS= read -r p; printf '%s\n' "$p" | sudo -k -S -p '' -v; s=$?; unset p; [ "$s" -eq 0 ] || exit "$s"; sudo -n -- sh -c "$1" </dev/null; s=$?; sudo -k; exit "$s""#;
+
+/// 远端要执行的命令行（`sudo` 为真时套上 `SUDO_WRAP`）。
+fn command_line(command: &str, sudo: bool) -> String {
+    if sudo { format!("sh -c {} pm-sudo {}", shell_quote(SUDO_WRAP), shell_quote(command)) } else { command.to_string() }
+}
+
 /// 执行命令。
 pub async fn exec(handle: &Handle<Checker>, t: &Target, command: &str, sudo: bool, redactor: &Redactor) -> Result<SshResult, ApiErr> {
     let mut ch = handle.channel_open_session().await.map_err(|e| err("UPSTREAM_ERROR", format!("open channel: {e}")))?;
-    let cmd = if sudo { format!("sudo -k -S -p '' -- sh -c {}", shell_quote(command)) } else { command.to_string() };
+    let cmd = command_line(command, sudo);
     ch.exec(true, cmd.as_bytes()).await.map_err(|e| err("UPSTREAM_ERROR", format!("exec: {e}")))?;
     if sudo {
         let line = Zeroizing::new(format!("{}\n", t.secret.as_str()));
@@ -374,6 +386,50 @@ pub async fn disconnect(handle: Handle<Checker>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// sudo 的口令只交给 sudo：用一个假的 sudo（-v 时按 MODE 读或不读口令，-n 时执行命令）跑真正的包装脚本。
+    /// 不管 sudo 读不读口令，命令自己读 stdin 都只能读到空；口令错误时命令不执行；退出码原样返回。
+    #[cfg(unix)]
+    #[test]
+    fn sudo_wrap_keeps_password_from_command() {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let fake = dir.path().join("sudo");
+        std::fs::write(
+            &fake,
+            "#!/bin/sh\ncase \"$*\" in\n*-v*) if [ \"$MODE\" = pw ]; then IFS= read -r x; [ \"$x\" = right ] || exit 1; fi; exit 0;;\n\
+             -k) exit 0;;\n-n*) shift 2; exec \"$@\";;\nesac\nexit 9\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = format!("{}:{}", dir.path().display(), std::env::var("PATH").unwrap_or_default());
+        // 像 exec 一样：命令行交给 sh，口令一行写进 stdin，然后关闭
+        let run = |mode: &str, pw: &str, cmd: &str| {
+            let mut c = std::process::Command::new("sh")
+                .args(["-c", &command_line(cmd, true)])
+                .env("PATH", &path)
+                .env("MODE", mode)
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .spawn()
+                .unwrap();
+            c.stdin.take().unwrap().write_all(format!("{pw}\n").as_bytes()).unwrap();
+            let o = c.wait_with_output().unwrap();
+            (o.status.code(), String::from_utf8_lossy(&o.stdout).to_string())
+        };
+        // 免口令（NOPASSWD 或 root）与要口令：命令都读不到口令
+        for mode in ["nopw", "pw"] {
+            assert_eq!(run(mode, "right", "cat; echo end"), (Some(0), "end\n".into()), "{mode}");
+            assert_eq!(run(mode, "right", "rev"), (Some(0), String::new()), "{mode}");
+        }
+        // 口令错误：命令不执行，返回 sudo 的退出码
+        assert_eq!(run("pw", "wrong", "echo ran"), (Some(1), String::new()));
+        // 退出码与命令相同；命令里的引号原样保留
+        assert_eq!(run("nopw", "right", "echo 'a b'; exit 7"), (Some(7), "a b\n".into()));
+        // 不用 sudo 时命令原样
+        assert_eq!(command_line("uptime", false), "uptime");
+    }
 
     #[test]
     fn targets_are_data_not_patterns() {
