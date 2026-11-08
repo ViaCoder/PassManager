@@ -162,9 +162,11 @@ fn tls_server(port: u16) -> Tls {
                 } else {
                     // 回显完整请求，并附上 base64 与 hex 编码，用来验证脱敏。
                     let echo = format!("{req}\nB64:{}\nHEX:{}\n", STANDARD.encode(req.as_bytes()), hex_of(req.as_bytes()));
+                    // Authorization 行；它的长度单独回显（不是密钥内容），用来看出填入的是哪一把 key
+                    let auth = req.lines().find(|l| l.to_ascii_lowercase().starts_with("authorization:")).unwrap_or("").replace("\r", "");
                     format!(
-                        "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nSet-Cookie: session=abc\r\nX-Echo-Auth: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{echo}",
-                        req.lines().find(|l| l.to_ascii_lowercase().starts_with("authorization:")).unwrap_or("").replace("\r", ""),
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nSet-Cookie: session=abc\r\nX-Echo-Auth: {auth}\r\nX-Auth-Len: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{echo}",
+                        auth.len(),
                         echo.len()
                     )
                 };
@@ -493,6 +495,28 @@ fn end_to_end() {
     assert!(hex_line.contains("[REDACTED:gh]") && !hex_line.contains(&hex_of(GH_SECRET.as_bytes())));
     assert!(r.headers.iter().all(|(k, _)| k != "set-cookie"), "Set-Cookie must be stripped");
     assert!(r.headers.iter().any(|(k, v)| k == "x-echo-auth" && v.contains("[REDACTED:gh]")));
+
+    // 多行的密钥（以两行保存的两把可互换的 key）：每个请求只填入其中一行，两行都会用到；回显出来的那一行被脱敏。
+    add(&mut admin, "multi", "multi-key-aaaaaaaa\nmulti-key-bbbbbbbbbbbb", &["127.0.0.1"], true).unwrap();
+    let mut lens = std::collections::BTreeSet::new();
+    for _ in 0..30 {
+        let r: HttpResult = agent
+            .call_as(&Request::Http {
+                method: "GET".into(),
+                url: format!("https://127.0.0.1:{}/echo", tls.port),
+                headers: vec![("Authorization".into(), "Bearer {{multi}}".into())],
+                body: None,
+            })
+            .unwrap();
+        // "authorization: Bearer " 22 个字符 + 一行 key（18 或 22 个字符）；两行一起填入的话请求根本发不出去
+        let len = r.headers.iter().find(|(k, _)| k == "x-auth-len").map(|(_, v)| v.clone()).unwrap_or_default();
+        assert!(len == "40" || len == "44", "auth line length {len}");
+        assert!(!r.body.contains("multi-key-") && r.body.contains("[REDACTED:multi]"), "{}", r.body);
+        lens.insert(len);
+    }
+    // 30 次都落在同一行的概率是 2^-29
+    assert_eq!(lens.len(), 2, "both lines are used");
+    admin.call(&Request::DeleteEntry { name: "multi".into() }).unwrap();
 
     // 首次连接后记录了证书指纹。
     let pins: Vec<PinView> = admin.call_as(&Request::Pins).unwrap();

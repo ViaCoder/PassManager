@@ -4,6 +4,16 @@ English | [简体中文](CHANGELOG.zh-CN.md)
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.3.11-rc.18] - 2026-11-09
+
+### Changed
+
+- **A multi-line key is used one line at a time.** When a password/token entry or a field holds several lines (for example two
+  interchangeable API keys added as two lines), each use picks one line at random (OS CSPRNG) instead of sending all lines
+  joined by newlines. This applies to `{{...}}` placeholders in HTTP requests, the relay, git tokens and SSH passwords (one line
+  per connection, shared by login and sudo). Blank lines are skipped; PEM private keys are always used whole. Every line of
+  four or more characters is redacted on its own (before: eight).
+
 ## [0.3.11-rc.17] - 2026-11-08
 
 ### Changed

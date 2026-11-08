@@ -386,7 +386,12 @@ pub fn prepare(
     policy::path_allowed(pol, &method, &full)
         .map_err(|_| err("FORBIDDEN", format!("{method} {} is not allowed by the relay policy of {label}", last_segment(&full))))?;
     let (auth_name, template, ph) = policy::parse_auth(&pol.auth).map_err(|m| err("INTERNAL", m))?;
-    let value = if e.fields.is_empty() { e.secret.clone() } else { e.field(&ph).map(|f| f.value.clone()).unwrap_or_default() };
+    // 多行的值每次随机取一行
+    let value = if e.fields.is_empty() {
+        pm_vault::pick_value(&e.secret)
+    } else {
+        e.field(&ph).map(|f| pm_vault::pick_value(&f.value)).unwrap_or_default()
+    };
     if value.is_empty() || value.chars().any(|c| c.is_control()) {
         return Err(err("BAD_REQUEST", "the stored credential cannot be sent in a header"));
     }
@@ -972,6 +977,25 @@ mod tests {
             max_bytes_day: 0,
         };
         Payload { entries: vec![e], relay: vec![pol], ..Default::default() }
+    }
+
+    /// 多行的密钥：中继每个请求只填入其中一行（随机），两行都会用到。
+    #[test]
+    fn relay_fills_one_line_of_multi_line_keys() {
+        let mut p = payload();
+        p.entries[0].secret = Zeroizing::new("sk-or-one-111111\nsk-or-two-222222".into());
+        let runs = Arc::new(Mutex::new(Runs::default()));
+        let run = open(&p, "https://api.example.com", 0, 0, &["json:model=m1".into()]).unwrap();
+        let id = runs.lock().unwrap().insert(run).unwrap();
+        let red = Arc::new(Redactor::empty());
+        let mut seen = std::collections::BTreeSet::new();
+        for _ in 0..40 {
+            let plan = prepare(&p, &runs, &id, "GET", "/api/v1/models", &[], red.clone()).unwrap();
+            let v = plan.auth_value.to_string();
+            assert!(v == "Bearer sk-or-one-111111" || v == "Bearer sk-or-two-222222", "{v}");
+            seen.insert(v);
+        }
+        assert_eq!(seen.len(), 2);
     }
 
     #[test]

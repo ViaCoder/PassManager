@@ -73,13 +73,14 @@ pub fn credentials(e: &Entry) -> Result<(String, Zeroizing<String>), ApiErr> {
         return Err(err("BAD_REQUEST", format!("\"{}\" is an SSH key, not an HTTPS token", e.name)));
     }
     if e.fields.is_empty() {
-        return Ok(("x-access-token".into(), e.secret.clone()));
+        // 多行的令牌每次随机取一行
+        return Ok(("x-access-token".into(), pm_vault::pick_value(&e.secret)));
     }
     let user = e.field("username").map(|f| f.value.to_string()).unwrap_or_else(|| "x-access-token".into());
     let tok = e
         .field("token")
         .or_else(|| e.field("password"))
-        .map(|f| f.value.clone())
+        .map(|f| pm_vault::pick_value(&f.value))
         .ok_or_else(|| err("BAD_REQUEST", format!("\"{}\" has no token or password field", e.name)))?;
     Ok((user, tok))
 }
@@ -406,6 +407,44 @@ async fn upstream(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 令牌（单值或 token 字段）有多行时每次取其中一行；私钥条目被拒绝。
+    #[test]
+    fn credentials_pick_one_token_line() {
+        let mut e = pm_vault::Entry {
+            name: "gh".into(),
+            secret: Zeroizing::new("tok-one\ntok-two".into()),
+            domains: vec!["git.example.com".into()],
+            note: String::new(),
+            self_signed: false,
+            auto_accept_host_key: false,
+            created: 0,
+            updated: 0,
+            fields: vec![],
+            host_keys: vec![],
+            ops: vec!["git".into()],
+        };
+        let mut seen = std::collections::BTreeSet::new();
+        for _ in 0..40 {
+            let (u, t) = credentials(&e).unwrap();
+            assert_eq!(u, "x-access-token");
+            assert!(t.as_str() == "tok-one" || t.as_str() == "tok-two");
+            seen.insert(t.to_string());
+        }
+        assert_eq!(seen.len(), 2);
+        // 多字段：username 原样，token 字段只取一行
+        e.secret = Zeroizing::new(String::new());
+        e.fields = vec![
+            pm_vault::Field { name: "username".into(), value: Zeroizing::new("bob".into()) },
+            pm_vault::Field { name: "token".into(), value: Zeroizing::new("only-line\n".into()) },
+        ];
+        let (u, t) = credentials(&e).unwrap();
+        assert_eq!((u.as_str(), t.as_str()), ("bob", "only-line"));
+        // 私钥不能当令牌
+        e.fields.clear();
+        e.secret = Zeroizing::new("-----BEGIN OPENSSH PRIVATE KEY-----\nx\n-----END OPENSSH PRIVATE KEY-----".into());
+        assert_eq!(credentials(&e).err().unwrap().code, "BAD_REQUEST");
+    }
 
     #[test]
     fn only_smart_http_requests() {

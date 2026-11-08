@@ -142,6 +142,7 @@ impl Entry {
     }
 
     /// 所有需要脱敏的值：(标签, 值)。单值条目标签为引用名，字段为 `引用名.字段`。
+    /// 多行的值逐行脱敏由 `redact::variants` 负责。
     pub fn secret_values(&self) -> Vec<(String, &str)> {
         if self.fields.is_empty() {
             vec![(self.name.clone(), self.secret.as_str())]
@@ -149,6 +150,36 @@ impl Entry {
             self.fields.iter().map(|f| (format!("{}.{}", self.name, f.name), f.value.as_str())).collect()
         }
     }
+}
+
+/// 值里可供使用的行：多行口令（例如几把可以互换的 API key，网页里"新增一行"得到）每一非空行是一个候选；
+/// PEM 私钥是一个整体，不拆行。全是空白时没有候选。
+pub fn value_lines(value: &str) -> Vec<&str> {
+    // PEM（私钥、证书）整体使用
+    if value.trim_start().starts_with("-----BEGIN") {
+        return vec![value];
+    }
+    // 其余按行拆开（`lines` 去掉 \n 与 \r\n），跳过空白行；行内的空格原样保留
+    value.lines().filter(|l| !l.trim().is_empty()).collect()
+}
+
+/// 用随机数 `r` 从候选行里取一行：没有候选时原样返回整个值。
+pub fn pick_line(value: &str, r: u64) -> &str {
+    let lines = value_lines(value);
+    match lines.len() {
+        // 空值或全是空白：原样返回（调用方会按空值处理）
+        0 => value,
+        // r 对行数取模；行数很小，取模偏差可以忽略（这里只是在几把 key 之间分摊，不是生成密钥）
+        n => lines[(r % n as u64) as usize],
+    }
+}
+
+/// 每次使用凭据时取的值：只有一行时就是这一行；多行时随机取一行（操作系统 CSPRNG），绝不把几行一起发出去。
+pub fn pick_value(value: &str) -> Zeroizing<String> {
+    // 读 8 个随机字节；万一失败就用第一行（只影响分摊，不影响安全）
+    let mut b = [0u8; 8];
+    let r = if getrandom::fill(&mut b).is_ok() { u64::from_le_bytes(b) } else { 0 };
+    Zeroizing::new(pick_line(value, r).to_string())
 }
 
 /// 自动选择凭据的占位符：`{{secret}}` 表示"与目标主机匹配的那个凭据"。
@@ -491,5 +522,50 @@ impl Payload {
 
     pub fn pin(&self, kind: PinKind, host_port: &str) -> Option<&Pin> {
         self.pins.iter().find(|p| p.kind == kind && p.host_port == host_port)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn value_lines_split_passwords_but_not_pem() {
+        // 多行口令：空白行不算，行内空格保留，\r\n 也认
+        assert_eq!(value_lines("key-one\n\n  \nkey two\r\nkey-3\n"), vec!["key-one", "key two", "key-3"]);
+        // 单行与空值
+        assert_eq!(value_lines("only"), vec!["only"]);
+        assert!(value_lines(" \n ").is_empty());
+        // PEM 整体是一个值
+        let pem = "-----BEGIN OPENSSH PRIVATE KEY-----\nAAAA\nBBBB\n-----END OPENSSH PRIVATE KEY-----\n";
+        assert_eq!(value_lines(pem), vec![pem]);
+    }
+
+    #[test]
+    fn pick_line_takes_exactly_one_line() {
+        let v = "key-one\nkey-two\nkey-three";
+        // 随机数取模选行，结果永远不含换行
+        assert_eq!(pick_line(v, 0), "key-one");
+        assert_eq!(pick_line(v, 1), "key-two");
+        assert_eq!(pick_line(v, 5), "key-three");
+        assert_eq!(pick_line(v, u64::MAX), "key-one");
+        // 单行值去掉结尾换行；空值原样
+        assert_eq!(pick_line("tok\n", 7), "tok");
+        assert_eq!(pick_line("", 3), "");
+    }
+
+    #[test]
+    fn pick_value_reaches_every_line() {
+        let v = "key-one\nkey-two";
+        let mut seen = std::collections::BTreeSet::new();
+        // 两行时 200 次全落在同一行的概率是 2^-199
+        for _ in 0..200 {
+            let p = pick_value(v);
+            assert!(p.as_str() == "key-one" || p.as_str() == "key-two");
+            seen.insert(p.to_string());
+        }
+        assert_eq!(seen.len(), 2);
+        // 单行值总是这一行
+        assert_eq!(pick_value("solo").as_str(), "solo");
     }
 }

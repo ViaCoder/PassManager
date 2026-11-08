@@ -172,10 +172,11 @@ pub struct Resolved {
 }
 
 impl Resolved {
+    /// 这次请求要填入的值：多行时随机取一行（几把可互换的 key 之间分摊），不会把几行一起填进去。
     pub fn value(&self) -> Zeroizing<String> {
         match &self.field {
-            None => self.entry.secret.clone(),
-            Some(f) => self.entry.field(f).map(|x| x.value.clone()).unwrap_or_default(),
+            None => pm_vault::pick_value(&self.entry.secret),
+            Some(f) => self.entry.field(f).map(|x| pm_vault::pick_value(&x.value)).unwrap_or_default(),
         }
     }
 }
@@ -1479,6 +1480,30 @@ mod tests {
         // 其他占位符也按最终的主机检查绑定。
         p.entries.push(ent("other", "o-secret", &["elsewhere.example"], &[]));
         assert_eq!(prepare(&p, "GET", "{{ai.base_url}}?t={{other}}", &[], None).err().unwrap().code, "DOMAIN_MISMATCH");
+    }
+
+    /// 多行的单值密钥（几把可互换的 key）：每次请求随机填入其中一行，从不把几行连同换行一起填入；
+    /// 响应里只回显其中一行时也会被脱敏。
+    #[test]
+    fn multi_line_keys_fill_one_random_line() {
+        let mut p = Payload::default();
+        p.entries.push(ent("ai", "sk-one-1111111111\nsk-two-2222222222", &["api.example.com"], &["http"]));
+        let mut seen = std::collections::BTreeSet::new();
+        for _ in 0..100 {
+            let r =
+                prepare(&p, "POST", "https://api.example.com/v1/chat", &[("Authorization".into(), "Bearer {{ai}}".into())], None).unwrap();
+            let h = r.headers[0].1.as_str();
+            // 恰好一行：两行之一，没有换行
+            assert!(h == "Bearer sk-one-1111111111" || h == "Bearer sk-two-2222222222", "{h}");
+            seen.insert(h.to_string());
+        }
+        // 两行都会用到（100 次都落在同一行的概率是 2^-99）
+        assert_eq!(seen.len(), 2);
+        // 脱敏逐行生效
+        let e = &p.entries[0];
+        let r = crate::redact::Redactor::build(e.secret_values().iter().map(|(l, v)| (l.as_str(), *v)));
+        let out = r.redact_str("invalid key sk-two-2222222222");
+        assert_eq!(out, "invalid key [REDACTED:ai]");
     }
 
     /// 多字段条目的每个字段（包括 base_url）都进入脱敏：响应里出现基础地址时被替换。

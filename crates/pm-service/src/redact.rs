@@ -139,11 +139,12 @@ pub fn variants(secret: &str) -> Vec<Vec<u8>> {
             }
         }
     }
-    // 多行的值（PEM 私钥、多行口令）：每一行（≥ 8 个字符）也按全部编码单独脱敏。
+    // 多行的值（PEM 私钥、多行口令）：每一行也按全部编码单独脱敏。多行口令每次只用其中一行
+    // （`pm_vault::pick_value`），所以每一行都是一个完整的凭据，门槛与单个值相同（MIN_LEN）。
     if secret.contains('\n') {
         for line in secret.lines() {
             let l = line.trim();
-            if l.len() >= 8 && l != secret {
+            if l.len() >= MIN_LEN && l != secret {
                 for v in variants(l) {
                     if !out.contains(&v) {
                         out.push(v);
@@ -478,6 +479,17 @@ mod tests {
         let r = Redactor::build([("srv", pem)]);
         let s = r.redact_str("leak: AAAAMwAAAAtzc2gtZWQyNTUxOQAAACD0aQ end");
         assert!(s.contains("[REDACTED:srv]"));
+    }
+
+    /// 多行口令每次只用一行：每一行（包括短到 4 个字符的行）都单独脱敏，也认得出它的编码形式。
+    #[test]
+    fn every_line_of_multi_line_passwords() {
+        let r = Redactor::build([("ai", "sk-long-0123456789\nab12\nxyz")]);
+        assert_eq!(r.redact_str("key sk-long-0123456789 bad"), "key [REDACTED:ai] bad");
+        assert_eq!(r.redact_str("pw ab12 bad"), "pw [REDACTED:ai] bad", "4 个字符的行");
+        assert_eq!(r.redact_str("hex 61623132"), "hex [REDACTED:ai]", "短行的十六进制形式");
+        // 短于 MIN_LEN 的行不脱敏（与单个值相同），否则常见字母都会被替换
+        assert_eq!(r.redact_str("xyz"), "xyz");
     }
 
     #[test]

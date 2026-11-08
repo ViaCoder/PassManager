@@ -113,7 +113,8 @@ impl Target {
             port,
             user: user.to_string(),
             key: key.map(|k| k.secret.clone()),
-            secret: Zeroizing::new(pw.and_then(|e| e.password()).unwrap_or("").to_string()),
+            // 多行的口令每次随机取一行（同一次连接里登录与 sudo 用同一行）
+            secret: pw.and_then(|e| e.password()).map(pm_vault::pick_value).unwrap_or_default(),
             auto_accept: key.is_some_and(|k| k.auto_accept_host_key),
         }
     }
@@ -386,6 +387,36 @@ pub async fn disconnect(handle: Handle<Checker>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 口令条目有多行时，一次连接取其中一行（登录与 sudo 共用）；私钥整个保留。
+    #[test]
+    fn target_takes_one_password_line() {
+        let ent = |secret: &str| pm_vault::Entry {
+            name: "h".into(),
+            secret: Zeroizing::new(secret.into()),
+            domains: vec!["host.example.com".into()],
+            note: String::new(),
+            self_signed: false,
+            auto_accept_host_key: false,
+            created: 0,
+            updated: 0,
+            fields: vec![],
+            host_keys: vec![],
+            ops: vec!["ssh".into()],
+        };
+        let pw = ent("pw-one\npw-two");
+        let key = ent("-----BEGIN OPENSSH PRIVATE KEY-----\nAAAA\n-----END OPENSSH PRIVATE KEY-----\n");
+        let mut seen = std::collections::BTreeSet::new();
+        for _ in 0..40 {
+            let t = Target::from_entries(Some(&key), Some(&pw), "host.example.com", 22, "root");
+            assert!(t.secret.as_str() == "pw-one" || t.secret.as_str() == "pw-two");
+            assert_eq!(t.key.as_deref().map(|k| k.as_str()), Some(key.secret.as_str()));
+            seen.insert(t.secret.to_string());
+        }
+        assert_eq!(seen.len(), 2);
+        // 没有口令条目：空
+        assert!(Target::from_entries(Some(&key), None, "host.example.com", 22, "root").secret.is_empty());
+    }
 
     /// sudo 的口令只交给 sudo：用一个假的 sudo（-v 时按 MODE 读或不读口令，-n 时执行命令）跑真正的包装脚本。
     /// 不管 sudo 读不读口令，命令自己读 stdin 都只能读到空；口令错误时命令不执行；退出码原样返回。

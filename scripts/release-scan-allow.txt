@@ -45,3 +45,5 @@ entropy	crates/pm-web/src/tests.rs	2fc34706e91a2916	RFC 7638 第 3.1 节公开�
 entropy	crates/passmanager/tests/relay_e2e.rs	82a7fc7cbdccff55	run --http 端到端测试的假凭据
 entropy	crates/passmanager/tests/relay_e2e.rs	d37933396b2488f1	run --http 端到端测试的请求体标记（证明日志里没有请求体）
 entropy	crates/passmanager/tests/relay_e2e.rs	67017656c345198c	run --http 端到端测试的响应体标记（证明日志里没有响应体）
+pem	crates/pm-service/src/ssh.rs	03d104c669e3c7b6	测试：多行口令每次取一行，私钥整个保留（内容是 AAAA）
+pem	crates/pm-vault/src/model.rs	03d104c669e3c7b6	测试：PEM 私钥不按行拆开（内容是 AAAA / BBBB）
