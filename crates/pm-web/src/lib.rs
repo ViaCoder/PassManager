@@ -967,12 +967,8 @@ struct EntryForm {
     auto_accept_host_key: bool,
     /// password / ssh-key / fields
     kind: String,
-    /// 已有字段名（值只显示摘要；"显示"按钮才给出完整的值）。
+    /// 已有字段名（值遮住显示；"全部显示"之后才给出并允许修改）。
     fields: Vec<String>,
-    /// 已有字段的摘要，顺序与 `fields` 相同。
-    field_summaries: Vec<String>,
-    /// 单值条目的摘要。
-    summary: String,
     /// SSH 私钥条目：允许 ssh-agent 桥签名的主机密钥指纹（每行一个）。
     host_keys: String,
     /// 限定的用途（`http` / `ssh` / `git`，至少一种）。
@@ -1053,8 +1049,6 @@ fn form_of(f: &HashMap<String, String>) -> (EntryForm, Option<String>, Option<Ve
         auto_accept_host_key: f.get("auto_accept_host_key").is_some_and(|v| v == "1"),
         kind: kind.clone(),
         fields: names,
-        field_summaries: vec![],
-        summary: String::new(),
         host_keys: g("host_keys"),
         ops: pm_vault_ops().iter().filter(|o| f.get(&format!("op_{o}")).is_some_and(|v| v == "1")).map(|o| o.to_string()).collect(),
         alias: g("alias"),
@@ -1113,7 +1107,7 @@ async fn entry_edit(State(st): State<St>, h: HeaderMap, conn: Option<Extension<C
     edit_page(&st, &c, &name, None).await
 }
 
-/// "显示"按钮：在编辑页上给出这个条目的全部值（POST + CSRF；只有网页会话能取到，服务器记一行日志）。
+/// "全部显示"：编辑页上给出这个条目的全部值，放进可编辑的输入框（POST + CSRF；只有网页会话能取到，服务器记一行日志）。
 async fn entry_show(
     State(st): State<St>,
     h: HeaderMap,
@@ -1131,7 +1125,7 @@ async fn entry_show(
     }
 }
 
-/// 编辑页：`shown` 是"显示"按钮取到的完整值（没有时只显示摘要）。
+/// 编辑页：`shown` 是"全部显示"取到的值（没有时已保存的值全部遮住）。
 async fn edit_page(st: &AppState, c: &Ctx, name: &str, shown: Option<pm_proto::ShownEntry>) -> Response {
     let list = match call::<Vec<EntryView>>(st, Req::Entries).await {
         Ok(l) => l,
@@ -1148,13 +1142,23 @@ async fn edit_page(st: &AppState, c: &Ctx, name: &str, shown: Option<pm_proto::S
         auto_accept_host_key: e.auto_accept_host_key,
         kind: if e.kind.is_empty() { "password".into() } else { e.kind.clone() },
         fields: e.fields.clone(),
-        field_summaries: e.field_summaries.clone(),
-        summary: e.summary.clone(),
         host_keys: e.host_keys.join("\n"),
         ops: e.ops.clone(),
         alias: e.alias.clone(),
     };
-    page(st, c, "entry_form.html", context! { form => sv(form), original => e.name, public_key => e.public_key, shown => sv(shown) })
+    // "全部显示"：单值条目的值，以及按字段名对齐到 form.fields 的各字段的值（模板里放进可编辑的输入框）
+    let shown_secret = shown.as_ref().and_then(|s| s.secret.clone()).unwrap_or_default();
+    let shown_values: Vec<String> = form
+        .fields
+        .iter()
+        .map(|n| shown.as_ref().and_then(|s| s.fields.iter().find(|(k, _)| k == n)).map(|(_, v)| v.clone()).unwrap_or_default())
+        .collect();
+    page(
+        st,
+        c,
+        "entry_form.html",
+        context! { form => sv(form), original => e.name, public_key => e.public_key, shown => shown.is_some(), shown_secret, shown_values },
+    )
 }
 
 /// 校验失败时重新显示表单：保留其他字段，但**不回显密钥**（需要重新输入）。

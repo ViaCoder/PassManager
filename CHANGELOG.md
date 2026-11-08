@@ -4,6 +4,16 @@ English | [简体中文](CHANGELOG.zh-CN.md)
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.3.11-rc.16] - 2026-11-08
+
+### Changed
+
+- **Keys stay hidden until you ask.** The entries list no longer shows anything about stored keys (no summaries, field names or
+  fingerprints, and no "updated" column). On the edit page all keys of the entry sit in one key area: stored keys show as
+  `••••••••` (no prefix, suffix or length) and can be deleted but not edited; new keys are typed into the same area and stay
+  fully visible until saved. "Show all" fills the stored keys into editable fields so they can be changed; "Hide" masks them
+  again. The value summaries added in 0.3.11-rc.12 are gone. Help texts for domains and aliases are folded away.
+
 ## [0.3.11-rc.15] - 2026-11-08
 
 ### Fixed

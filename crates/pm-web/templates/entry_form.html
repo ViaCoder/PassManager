@@ -5,64 +5,39 @@
   <div>
     <p class="crumb"><a href="/entries">{{ icon("key") }}条目</a><span aria-hidden="true">/</span></p>
     <h1>{% if original %}{{ icon("edit") }}编辑条目 <code>{{ original }}</code>{% else %}{{ icon("plus") }}新增条目{% endif %}</h1>
-    <p class="lede">{{ icon("lock") }}保存后页面上只显示摘要，用来认出是哪一把；需要时在编辑页点"显示"查看这个条目的完整值。</p>
   </div>
 </div>
-{% if original %}
-<section class="card">
-  <h2 class="card-title">{{ icon("lock") }}当前保存的值</h2>
-  {% if shown %}
-    {% if shown.secret is not none %}
-    <div class="field"><label for="s-secret">密钥</label><textarea id="s-secret" readonly spellcheck="false">{{ shown.secret }}</textarea></div>
-    {% endif %}
-    {% for f in shown.fields %}
-    <div class="field"><label for="s{{ loop.index0 }}">{{ f[0] }}</label><input id="s{{ loop.index0 }}" readonly spellcheck="false" value="{{ f[1] }}"></div>
-    {% endfor %}
-    <p class="hint">{{ icon("warning") }}完整的值只出现在这一次显示的页面里，离开这个页面就恢复为摘要。服务器为每次显示记一行日志（只有条目名）。</p>
-    <a class="btn secondary" href="/entries/{{ original | urlencode }}/edit">{{ icon("lock") }}隐藏</a>
-  {% else %}
-    {% if form.kind == "fields" %}
-    <ul class="summaries">{% for name in form.fields %}<li><code class="strong">{{ name }}</code> <span class="muted">{{ (form.field_summaries | default([]))[loop.index0] | default("") }}</span></li>{% endfor %}</ul>
-    {% elif form.kind == "ssh-key" %}
-    <p>{% if public_key %}公钥指纹 <code>{{ public_key }}</code> {% endif %}<code>{{ form.summary }}</code></p>
-    {% else %}
-    <p><code>{{ form.summary }}</code></p>
-    {% endif %}
-    <form method="post" action="/entries/{{ original | urlencode }}/show">
-      <input type="hidden" name="csrf" value="{{ csrf }}">
-      <button class="secondary">{{ icon("unlock") }}显示</button>
-    </form>
-  {% endif %}
-</section>
-{% endif %}
 <form method="post" action="{% if original %}/entries/{{ original | urlencode }}{% else %}/entries{% endif %}" class="form" autocomplete="off">
   <input type="hidden" name="csrf" value="{{ csrf }}">
 
   <section class="card">
     <h2 class="card-title">基本信息</h2>
     <div class="field">
-      <label for="f-name">引用名 <span class="opt">可选</span></label>
-      <input id="f-name" name="name" maxlength="64" value="{{ form.name }}" spellcheck="false" aria-describedby="h-name">
-      <p class="hint" id="h-name">留空时按第一个域名自动生成。</p>
+      <label for="f-name">引用名 <span class="opt">可选，留空时按第一个域名生成</span></label>
+      <input id="f-name" name="name" maxlength="64" value="{{ form.name }}" spellcheck="false">
     </div>
     <div class="field">
       <label for="f-domains">域名 <span class="opt">每行一个</span></label>
       <textarea id="f-domains" name="domains" spellcheck="false" aria-describedby="h-domains">{{ form.domains }}</textarea>
-      <ul class="hint" id="h-domains">
-        <li>可以写主机名，也可以直接粘贴 https 网址（只取主机和端口）；端口不用写，除非要限定；</li>
-        <li><code>*.example.com</code> 匹配所有子域名，但不含 <code>example.com</code> 本身；</li>
-        <li>网段如 <code>198.51.100.0/24</code> 只匹配直接用 IP 访问的目标；可写 <code>host:端口</code>；</li>
-        <li>多个条目都匹配时用最具体的；留空则保存为"未绑定域名"，Agent 暂时不能使用。</li>
-      </ul>
+      <details class="help" id="h-domains"><summary>写法</summary>
+        <ul class="hint">
+          <li>可以写主机名，也可以直接粘贴 https 网址（只取主机和端口）；端口不用写，除非要限定；</li>
+          <li><code>*.example.com</code> 匹配所有子域名，但不含 <code>example.com</code> 本身；</li>
+          <li>网段如 <code>198.51.100.0/24</code> 只匹配直接用 IP 访问的目标；可写 <code>host:端口</code>；</li>
+          <li>多个条目都匹配时用最具体的；留空则保存为"未绑定域名"，Agent 暂时不能使用。</li>
+        </ul>
+      </details>
     </div>
     <div class="field">
       <label for="f-alias">别名 <span class="opt">可选，用来隐藏这台主机的地址</span></label>
       <input id="f-alias" name="alias" maxlength="63" pattern="[a-z0-9][a-z0-9\-]*" value="{{ form.alias }}" spellcheck="false" aria-describedby="h-alias">
-      <ul class="hint" id="h-alias">
-        <li>填写后 Agent 只能写 <code>alias://别名/路径</code>：真实地址由服务器代入，并从返回给 Agent 的结果里去掉。清空即恢复。</li>
-        <li>这台主机的所有端口和用途都不能再被 Agent 直接访问，包括 SSH。条目要绑定一个具体主机，并勾选 HTTP。</li>
-        <li>做不到的：同一台服务器的其他域名或 IP 不受保护；Agent 如果在能访问它的机器上有 shell，可以自己拼出地址。</li>
-      </ul>
+      <details class="help" id="h-alias"><summary>说明</summary>
+        <ul class="hint">
+          <li>填写后 Agent 只能写 <code>alias://别名/路径</code>：真实地址由服务器代入，并从返回给 Agent 的结果里去掉。清空即恢复。</li>
+          <li>这台主机的所有端口和用途都不能再被 Agent 直接访问，包括 SSH。条目要绑定一个具体主机，并勾选 HTTP。</li>
+          <li>做不到的：同一台服务器的其他域名或 IP 不受保护；Agent 如果在能访问它的机器上有 shell，可以自己拼出地址。</li>
+        </ul>
+      </details>
     </div>
     <div class="field">
       <label for="f-note">说明 <span class="opt">可选</span></label>
@@ -71,7 +46,10 @@
   </section>
 
   <section class="card">
-    <h2 class="card-title">{{ icon("key") }}类型与密钥</h2>
+    <div class="card-head">
+      <h2 class="card-title">{{ icon("key") }}密钥</h2>
+      {% if original %}{% if shown %}<a class="btn secondary small" href="/entries/{{ original | urlencode }}/edit">{{ icon("lock") }}隐藏</a>{% else %}<button class="secondary small" form="show-form">{{ icon("unlock") }}全部显示</button>{% endif %}{% endif %}
+    </div>
     <div class="field">
       <label for="f-kind">类型</label>
       <select id="f-kind" name="kind">
@@ -80,43 +58,39 @@
         <option value="fields" {% if form.kind == "fields" %}selected{% endif %}>多字段（例如 username / password）</option>
       </select>
     </div>
-    <fieldset class="k-single">
-      <legend>单个值 <span class="opt">类型为口令或 SSH 私钥时使用</span></legend>
-      <div class="field{% if flash_kind == "err" %} has-error{% endif %}">
-        <label for="f-secret">{% if original %}新的值 <span class="opt">留空表示不修改</span>{% else %}密钥{% endif %}</label>
-        {% if original and form.kind != "fields" %}<p class="current">{{ icon("lock") }}当前：{% if form.kind == "ssh-key" and public_key %}<code>{{ public_key }}</code> {% endif %}<code>{{ form.summary }}</code></p>{% endif %}
-        <textarea id="f-secret" name="secret" spellcheck="false" autocomplete="off" aria-describedby="h-secret"{% if original %} placeholder="留空表示保留当前的值"{% endif %}></textarea>
-        {% if flash_kind == "err" %}<p class="hint err" id="h-secret">{{ icon("warning") }}提交失败后不会回填：如需设置密钥，请重新输入。</p>{% else %}<p class="hint" id="h-secret">{{ icon("lock") }}输入时完整可见；保存后只显示摘要。</p>{% endif %}
-      </div>
-    </fieldset>
-    <fieldset class="k-fields">
-      <legend>字段 <span class="opt">类型为多字段时使用</span></legend>
-      {% if form.fields %}
-      <ul class="summaries">
-        {% for name in form.fields %}
-        <li>
-          <input type="hidden" name="field_name_{{ loop.index0 }}" value="{{ name }}">
-          <span class="grow"><code class="strong">{{ name }}</code> <span class="muted">{{ (form.field_summaries | default([]))[loop.index0] | default("") }}</span></span>
-          <label class="check danger-check"><input type="checkbox" name="field_remove_{{ loop.index0 }}" value="1">{{ icon("trash") }}删除</label>
-        </li>
-        {% endfor %}
-      </ul>
+    {# 统一的密钥区：已有的遮住（只能删除），新加的完全可编辑；"全部显示"后已有的也可以直接修改 #}
+    <div class="keys k-single{% if flash_kind == "err" %} has-error{% endif %}">
+      {% if original and shown %}
+      <label class="key-label" for="f-secret">密钥 <span class="opt">已显示，可以直接修改</span></label>
+      <textarea id="f-secret" name="secret" spellcheck="false" autocomplete="off">{{ shown_secret }}</textarea>
+      {% else %}
+      {% if original and form.kind != "fields" %}<div class="key-row"><span class="key-name">密钥</span><span class="mask" aria-label="已保存，已遮住">••••••••</span>{% if form.kind == "ssh-key" and public_key %}<code class="fp">{{ public_key }}</code>{% endif %}</div>{% endif %}
+      <textarea id="f-secret" name="secret" class="key-new" spellcheck="false" autocomplete="off" aria-label="{% if original %}新的值{% else %}密钥{% endif %}" placeholder="{% if original %}写入新的值替换它；留空保留{% else %}粘贴密钥{% endif %}"></textarea>
       {% endif %}
-      <div class="field{% if flash_kind == "err" %} has-error{% endif %}">
-        <label for="f-batch">{% if form.fields %}添加或修改字段{% else %}字段{% endif %} <span class="opt">每行一个：字段名=值</span></label>
-        <textarea id="f-batch" name="fields_batch" rows="6" spellcheck="false" autocomplete="off" aria-describedby="h-batch" placeholder="username=deploy&#10;password=…&#10;base_url=…"></textarea>
-        {% if flash_kind == "err" %}<p class="hint err" id="h-batch">{{ icon("warning") }}提交失败后不会回填：请重新输入这些字段。</p>{% else %}<p class="hint" id="h-batch">一次写多少行都可以；和已有字段同名时更新它的值，也可以写 <code>字段名: 值</code>。输入时完整可见，保存后只显示摘要。</p>{% endif %}
+    </div>
+    <div class="keys k-fields{% if flash_kind == "err" %} has-error{% endif %}">
+      {% for name in form.fields %}
+      <div class="key-row">
+        <input type="hidden" name="field_name_{{ loop.index0 }}" value="{{ name }}">
+        <span class="key-name">{{ name }}</span>
+        {% if shown %}<input class="key-value" name="field_value_{{ loop.index0 }}" value="{{ shown_values[loop.index0] }}" spellcheck="false" autocomplete="off" aria-label="{{ name }}">{% else %}<span class="mask" aria-label="已保存，已遮住">••••••••</span>{% endif %}
+        <label class="check danger-check"><input type="checkbox" name="field_remove_{{ loop.index0 }}" value="1">{{ icon("trash") }}删除</label>
       </div>
-    </fieldset>
-    <fieldset class="k-ssh">
-      <legend>SSH 主机密钥 <span class="opt">仅 SSH 私钥条目</span></legend>
+      {% endfor %}
+      <textarea id="f-batch" name="fields_batch" class="key-new" rows="4" spellcheck="false" autocomplete="off" aria-label="新增字段" placeholder="新增：每行一个 字段名=值&#10;username=deploy&#10;password=…"></textarea>
+    </div>
+    {% if flash_kind == "err" %}<p class="hint err">{{ icon("warning") }}提交失败后新输入的值不会回填，请重新输入。</p>
+    {% elif shown %}<p class="hint">{{ icon("warning") }}值只出现在这一页；离开或点"隐藏"后恢复遮住。</p>
+    {% elif original %}<p class="hint k-single">{{ icon("lock") }}已保存的值遮住显示；写入新的值来替换它。</p><p class="hint k-fields">{{ icon("lock") }}已保存的值遮住显示，只能删除；新加的输入时看得见。</p>
+    {% else %}<p class="hint">{{ icon("lock") }}输入时看得见；保存后遮住显示。</p>{% endif %}
+    <details class="help k-ssh"><summary>SSH 主机密钥</summary>
       <div class="field">
         <label for="f-hostkeys">允许 ssh-agent 桥签名的主机密钥指纹 <span class="opt">每行一个</span></label>
         <textarea id="f-hostkeys" name="host_keys" spellcheck="false" aria-describedby="h-hostkeys">{{ form.host_keys }}</textarea>
         <p class="hint" id="h-hostkeys">格式 <code>SHA256:…</code>，可用 <code>ssh-keygen -lf</code> 查看；指纹库里与域名匹配的主机也允许。</p>
       </div>
       <label class="check"><input type="checkbox" name="auto_accept_host_key" value="1" {% if form.auto_accept_host_key %}checked{% endif %}>主机密钥变更时自动接受（仅私钥条目）</label>
-    </fieldset>
+    </details>
   </section>
 
   <section class="card">
@@ -140,4 +114,8 @@
     <a class="btn secondary" href="/entries">取消</a>
   </div>
 </form>
+{% if original and not shown %}
+{# "全部显示"：独立的表单（按钮在上面的密钥区里，经 form 属性提交这里），不会带上主表单里正在输入的内容 #}
+<form id="show-form" method="post" action="/entries/{{ original | urlencode }}/show"><input type="hidden" name="csrf" value="{{ csrf }}"></form>
+{% endif %}
 {% endblock %}

@@ -32,18 +32,7 @@ impl Backend for Mock {
             }
             match req {
                 // 摘要在返回时现算（与服务端一样只露一小段），更新之后也是对的
-                Req::Entries => Resp::ok(
-                    self.entries
-                        .lock()
-                        .unwrap()
-                        .iter()
-                        .map(|(e, sec, fs)| EntryView {
-                            summary: if e.kind != "fields" { fake_summary(sec) } else { String::new() },
-                            field_summaries: fs.iter().map(|(_, v)| fake_summary(v)).collect(),
-                            ..e.clone()
-                        })
-                        .collect::<Vec<_>>(),
-                ),
+                Req::Entries => Resp::ok(self.entries.lock().unwrap().iter().map(|(e, _, _)| e.clone()).collect::<Vec<_>>()),
                 Req::ShowEntry { name } => match self.entries.lock().unwrap().iter().find(|(e, _, _)| e.name == name) {
                     Some((e, sec, fs)) => {
                         Resp::ok(pm_proto::ShownEntry { secret: (e.kind != "fields").then(|| sec.clone()), fields: fs.clone() })
@@ -80,8 +69,6 @@ impl Backend for Mock {
                         host_keys: entry.host_keys.clone().unwrap_or_default(),
                         ops: entry.ops.clone().unwrap_or_default(),
                         alias: entry.alias.clone().unwrap_or_default(),
-                        summary: String::new(),
-                        field_summaries: vec![],
                     };
                     self.entries.lock().unwrap().push((v, entry.secret.unwrap_or_default(), fields));
                     Resp::ok("added")
@@ -247,13 +234,6 @@ async fn send(st: &St, method: Method, uri: &str, cookie: Option<&str>, form: Op
     let headers = r.headers().clone();
     let bytes = r.into_body().collect().await.unwrap().to_bytes();
     Resp2 { status, headers, body: String::from_utf8_lossy(&bytes).into_owned() }
-}
-
-/// 测试用的摘要：最后 4 个字符与长度（形状与服务端相同，足够检查"显示摘要、不显示全文"）。
-fn fake_summary(v: &str) -> String {
-    let c: Vec<char> = v.chars().collect();
-    let tail: String = c[c.len().saturating_sub(4)..].iter().collect();
-    format!("…{tail}（{} 字符）", c.len())
 }
 
 fn enc(s: &str) -> String {
@@ -565,7 +545,7 @@ async fn entries_crud_and_secrets_are_write_only() {
     // 编辑：表单不含密钥；留空表示不修改。
     let e = send(&st, Method::GET, "/entries/gh/edit", Some(&cookie), None, &[]).await;
     assert_eq!(e.status, StatusCode::OK);
-    assert!(e.body.contains("*.github.com") && e.body.contains("留空表示不修改"));
+    assert!(e.body.contains("*.github.com") && e.body.contains("留空保留"));
     let up = format!("csrf={csrf}&name=gh&domains=new.example.com&secret=&note=n2");
     assert_eq!(send(&st, Method::POST, "/entries/gh", Some(&cookie), Some(&up), &[]).await.status, StatusCode::SEE_OTHER);
     assert_eq!(mock.entries.lock().unwrap()[0].1, SECRET, "留空不改密钥");
@@ -651,7 +631,8 @@ async fn multi_field_entries_and_kinds() {
         assert_eq!(l[0].2, vec![("username".to_string(), "user@example.com".to_string()), ("password".to_string(), SECRET.to_string())]);
     }
     let list = send(&st, Method::GET, "/entries", Some(&cookie), None, &[]).await;
-    assert!(list.body.contains("<code>username</code>") && list.body.contains("<code>password</code>"));
+    // 列表只说有几个字段，不列字段名，也没有任何值
+    assert!(list.body.contains("2 个字段") && !list.body.contains("<code>username</code>"));
     assert!(!list.body.contains(SECRET) && !list.body.contains("user@example.com"));
     let edit = send(&st, Method::GET, "/entries/mega/edit", Some(&cookie), None, &[]).await;
     assert!(edit.body.contains("value=\"username\"") && edit.body.contains("value=\"password\""));
@@ -682,10 +663,11 @@ async fn multi_field_entries_and_kinds() {
     );
     assert_eq!(send(&st, Method::POST, "/entries", Some(&cookie), Some(&key), &[]).await.status, StatusCode::SEE_OTHER);
     let list = send(&st, Method::GET, "/entries", Some(&cookie), None, &[]).await;
-    assert!(list.body.contains("SHA256:FAKEFINGERPRINT") && list.body.contains("未绑定域名"));
+    // 列表只有类型；公钥指纹在编辑页的密钥区（遮住的私钥旁边）
+    assert!(list.body.contains("SSH 私钥") && list.body.contains("未绑定域名") && !list.body.contains("SHA256:FAKEFINGERPRINT"));
     assert!(!list.body.contains("fakekeymaterial"));
     let edit = send(&st, Method::GET, "/entries/adminkey/edit", Some(&cookie), None, &[]).await;
-    assert!(edit.body.contains("公钥指纹") && !edit.body.contains("fakekeymaterial"));
+    assert!(edit.body.contains("SHA256:FAKEFINGERPRINT") && edit.body.contains("••••••••") && !edit.body.contains("fakekeymaterial"));
     assert!(edit.body.contains(hk), "主机密钥绑定回显（只有指纹）");
     assert!(mock.log.lock().unwrap().iter().any(|l| l.contains("AddEntry")));
 }
@@ -1520,48 +1502,64 @@ fn next_paths_and_encoding() {
     assert_eq!(urlenc("/entries/gh/edit?x=1"), "%2Fentries%2Fgh%2Fedit%3Fx%3D1");
 }
 
-/// 摘要与"显示"：列表和编辑页只有摘要；显示要 POST + CSRF，给出这个条目的全部值；GET 不行。
+/// 密钥遮住显示：列表里没有任何密钥信息；编辑页已有的值是 ••••••••（只能删除），新加的可编辑；
+/// "全部显示"（POST + CSRF）之后已有的值出现在可编辑的输入框里，原样保存不变，改了就保存新值。
 #[tokio::test]
-async fn summaries_and_show_button() {
+async fn masked_keys_and_show_all() {
     let (st, mock) = state();
     let (cookie, csrf) = login(&st).await;
     let form = format!("csrf={csrf}&name=gh&domains=api.example.com&kind=password&secret={}", enc(SECRET));
     assert_eq!(send(&st, Method::POST, "/entries", Some(&cookie), Some(&form), &[]).await.status, StatusCode::SEE_OTHER);
-    let sum = fake_summary(SECRET);
+    let tail = &SECRET[SECRET.len() - 4..];
     let list = send(&st, Method::GET, "/entries", Some(&cookie), None, &[]).await;
-    assert!(list.body.contains(&sum) && !list.body.contains(SECRET), "列表只有摘要");
+    assert!(!list.body.contains(SECRET) && !list.body.contains(tail) && !list.body.contains("••••"), "列表里没有任何密钥信息");
     let edit = send(&st, Method::GET, "/entries/gh/edit", Some(&cookie), None, &[]).await;
-    assert!(edit.body.contains(&sum) && !edit.body.contains(SECRET) && edit.body.contains("/entries/gh/show"), "编辑页只有摘要与显示按钮");
-    // 改密钥的地方也看得到当前的是哪一把：输入框上方有摘要，输入框提示留空保留
-    let at = edit.body.find("name=\"secret\"").unwrap();
-    let before = &edit.body[..at];
-    assert!(before.rfind("当前：").is_some_and(|i| before[i..].contains(&sum)), "输入框上方有当前值的摘要");
-    assert!(edit.body[at..].split('>').next().unwrap().contains("留空表示保留当前的值"));
+    assert!(!edit.body.contains(SECRET) && !edit.body.contains(tail), "编辑页不露出任何一段");
+    assert!(edit.body.contains("••••••••") && edit.body.contains("form=\"show-form\"") && edit.body.contains("id=\"show-form\""));
+    assert!(edit.body.contains("全部显示") && !edit.body.contains("readonly"));
     // 没有 CSRF、GET、未登录：都拿不到
     assert_eq!(send(&st, Method::POST, "/entries/gh/show", Some(&cookie), Some("csrf=nope"), &[]).await.status, StatusCode::FORBIDDEN);
     assert_eq!(send(&st, Method::GET, "/entries/gh/show", Some(&cookie), None, &[]).await.status, StatusCode::METHOD_NOT_ALLOWED);
     let anon = send(&st, Method::POST, "/entries/gh/show", None, Some(&format!("csrf={csrf}")), &[]).await;
     assert!(anon.status == StatusCode::SEE_OTHER && !anon.body.contains(SECRET));
-    // 显示：完整的值在页面里，并有"隐藏"回到摘要；页面不缓存
+    // 全部显示：值在可编辑的 secret 输入框里（不是只读），有"隐藏"，没有遮罩与第二个显示按钮；页面不缓存
     let shown = send(&st, Method::POST, "/entries/gh/show", Some(&cookie), Some(&format!("csrf={csrf}")), &[]).await;
     assert_eq!(shown.status, StatusCode::OK);
-    assert!(shown.body.contains(SECRET) && shown.body.contains("隐藏"), "显示后有完整的值");
+    let at = shown.body.find("name=\"secret\"").unwrap();
+    let field = &shown.body[at..shown.body[at..].find("</textarea>").unwrap() + at];
+    assert!(field.contains(SECRET) && !field.contains("readonly"), "值在可编辑的输入框里");
+    assert!(shown.body.contains("隐藏") && !shown.body.contains("••••••••") && !shown.body.contains("id=\"show-form\""));
     assert_eq!(shown.headers.get(header::CACHE_CONTROL).unwrap(), "no-store");
-    // 多字段：批量输入新建；显示给出全部字段
+    // 多字段：已有字段遮住、可删除，没有可编辑的值；全部显示后每个字段都是可编辑的值
     let fields = format!(
         "csrf={csrf}&name=mega&domains=mega.example.com&kind=fields&fields_batch={}",
         enc("username=user@example.com\npassword: p=a:ss-1234567890")
     );
     assert_eq!(send(&st, Method::POST, "/entries", Some(&cookie), Some(&fields), &[]).await.status, StatusCode::SEE_OTHER);
+    let edit = send(&st, Method::GET, "/entries/mega/edit", Some(&cookie), None, &[]).await;
+    assert!(!edit.body.contains("p=a:ss") && !edit.body.contains("user@example.com") && !edit.body.contains("name=\"field_value_"));
+    assert!(
+        edit.body.contains("name=\"field_remove_0\"")
+            && edit.body.contains("name=\"field_remove_1\"")
+            && edit.body.contains("name=\"fields_batch\"")
+    );
+    assert_eq!(edit.body.matches("••••••••").count(), 2, "每个已有字段一个遮罩");
+    let shown = send(&st, Method::POST, "/entries/mega/show", Some(&cookie), Some(&format!("csrf={csrf}")), &[]).await;
+    assert!(shown.body.contains("name=\"field_value_0\" value=\"user@example.com\""), "{}", shown.body);
+    assert!(shown.body.contains("name=\"field_value_1\" value=\"p=a:ss-1234567890\""));
+    // 显示后原样保存：值不变；改其中一个：只有它变
+    let same = format!(
+        "csrf={csrf}&name=mega&domains=mega.example.com&kind=fields&field_name_0=username&field_value_0={}&field_name_1=password&field_value_1={}",
+        enc("user@example.com"),
+        enc("p=a:ss-1234567890")
+    );
+    assert_eq!(send(&st, Method::POST, "/entries/mega", Some(&cookie), Some(&same), &[]).await.status, StatusCode::SEE_OTHER);
+    let changed = same.replace(&enc("p=a:ss-1234567890"), "new-pass-1");
+    assert_eq!(send(&st, Method::POST, "/entries/mega", Some(&cookie), Some(&changed), &[]).await.status, StatusCode::SEE_OTHER);
     assert_eq!(
         mock.entries.lock().unwrap()[1].2,
-        vec![("username".to_string(), "user@example.com".to_string()), ("password".to_string(), "p=a:ss-1234567890".to_string())]
+        vec![("username".to_string(), "user@example.com".to_string()), ("password".to_string(), "new-pass-1".to_string())]
     );
-    let edit = send(&st, Method::GET, "/entries/mega/edit", Some(&cookie), None, &[]).await;
-    assert!(edit.body.contains(&fake_summary("p=a:ss-1234567890")) && !edit.body.contains("p=a:ss-1234567890"));
-    assert!(edit.body.contains("name=\"fields_batch\""), "默认就有批量输入框");
-    let shown = send(&st, Method::POST, "/entries/mega/show", Some(&cookie), Some(&format!("csrf={csrf}")), &[]).await;
-    assert!(shown.body.contains("user@example.com") && shown.body.contains("p=a:ss-1234567890"));
 }
 
 /// 批量输入改已有条目：同名字段更新、新名字追加、勾选删除的去掉、没写的保持不变；格式错误时整批不保存，也不回填。

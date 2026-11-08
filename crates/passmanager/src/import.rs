@@ -300,8 +300,6 @@ mod tests {
             host_keys: vec![],
             ops: ops.iter().map(|o| o.to_string()).collect(),
             alias: String::new(),
-            summary: String::new(),
-            field_summaries: vec![],
         }
     }
 

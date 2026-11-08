@@ -89,7 +89,7 @@ command. A link from `login --auto` logs in as soon as it is opened: never send 
 
 
 `ssh root@pm.example.com passmanager login` prints a one-time link (2 minutes, single use). Open it and click the button.
-Pages show only a short summary of each stored value; the Show button on an entry's edit page shows all its values (logged on the server, entry name only). Multi-field entries take a batch box (one `name=value` per line). Sessions expire after 2 h idle / 12 h absolute. After a login the newly opened tab closes itself and the page you were on returns to where it was.
+Stored keys are never shown by default: the list has no key information and the edit page shows each key as `••••••••` (delete only). "Show all" on an entry's edit page puts its values into editable fields (logged on the server, entry name only). New keys go into the same key area (multi-field entries take one `name=value` per line). Sessions expire after 2 h idle / 12 h absolute. After a login the newly opened tab closes itself and the page you were on returns to where it was.
 
 ## 3. Agents (any platform)
 

@@ -1574,29 +1574,6 @@ fn check_kind(e: &Entry, kind: Option<&str>) -> Result<Option<String>, ApiErr> {
     }
 }
 
-/// 值的摘要，用来在网页上认出是哪一把，又不泄露能用的部分：
-/// - 多行：只有行数与字符数；
-/// - 24 个字符以上：开头 6 个、`…`、最后 4 个与长度（API 密钥的开头通常是公开的前缀，如 `sk-or-`）；
-/// - 16 到 23 个字符：`…`、最后 4 个与长度；
-/// - 更短（通常是口令）：只有长度。
-pub fn summary(v: &str) -> String {
-    let c: Vec<char> = v.chars().collect();
-    let n = c.len();
-    let lines = v.lines().count();
-    if lines > 1 {
-        return format!("{lines} 行，{n} 字符");
-    }
-    let tail: String = c[n.saturating_sub(4)..].iter().collect();
-    if n >= 24 {
-        let head: String = c[..6].iter().collect();
-        format!("{head}…{tail}（{n} 字符）")
-    } else if n >= 16 {
-        format!("…{tail}（{n} 字符）")
-    } else {
-        format!("{n} 字符")
-    }
-}
-
 fn entry_view(e: &Entry) -> EntryView {
     let public_key = if e.is_private_key() { ssh::key_fingerprint(&e.secret).ok() } else { None };
     EntryView {
@@ -1608,9 +1585,6 @@ fn entry_view(e: &Entry) -> EntryView {
             KIND_PASSWORD.into()
         },
         fields: e.fields.iter().map(|f| f.name.clone()).collect(),
-        // 摘要只够认出是哪一把（SSH 私钥是多行，只有行数与长度，另有公钥指纹）；多字段条目每个字段各一个
-        summary: if e.fields.is_empty() { summary(&e.secret) } else { String::new() },
-        field_summaries: e.fields.iter().map(|f| summary(&f.value)).collect(),
         host_keys: e.host_keys.clone(),
         ops: e.ops.clone(),
         public_key,
@@ -1860,19 +1834,6 @@ pub static ROOT_PHASE_KEY: std::sync::Mutex<Option<Zeroizing<[u8; 32]>>> = std::
 
 #[cfg(test)]
 mod tests {
-    /// 摘要：长值露出开头与结尾各一小段，中等长度只露结尾，短值与多行只有长度。
-    #[test]
-    fn summaries_show_only_a_little() {
-        use super::summary;
-        assert_eq!(summary("sk-or-v1-0123456789abcdefghijklmnopqrstuvwxyz"), "sk-or-…wxyz（45 字符）");
-        assert_eq!(summary("ghp_0123456789abcd"), "…abcd（18 字符）");
-        assert_eq!(summary("hunter2-hunter2"), "15 字符");
-        assert_eq!(summary(""), "0 字符");
-        assert_eq!(summary("line one\nline two\nline three"), "3 行，28 字符");
-        // 按字符而不是字节截取（中文与 emoji 不会被切坏）
-        assert_eq!(summary("口令口令口令口令口令口令口令口令口令口令口令口令"), "口令口令口令…口令口令（24 字符）");
-    }
-
     use super::*;
 
     /// ssh-agent 桥的主机绑定与其他用途使用同一套匹配规则：通配符（不含顶点）、网段（只匹配字面 IP）、host:port。

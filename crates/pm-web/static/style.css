@@ -157,8 +157,25 @@ input:not([type=checkbox]),select,textarea{width:100%;max-width:40rem;display:bl
 textarea{font-family:var(--mono);font-size:var(--fs-sm);min-height:6rem;resize:vertical}
 /* 一两行的普通文字（说明）：正文字体，不要求 6 行高 */
 textarea.short{font-family:var(--sans);font-size:var(--fs-md);min-height:0}
-/* 编辑时当前保存的值（摘要）：放在输入框上方 */
-.current{display:flex;flex-wrap:wrap;align-items:center;gap:var(--s2);margin:0 0 var(--s2);font-size:var(--fs-sm);color:var(--muted)}
+/* 卡片标题与右侧的按钮（例如"全部显示"）放在同一行 */
+.card-head{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:var(--s2) var(--s3);margin-bottom:var(--s3)}
+.card-head .card-title{margin:0}
+/* 可展开的说明：默认收起，减少页面上的文字 */
+details.help{margin-top:var(--s2);font-size:var(--fs-sm)}
+details.help>summary{cursor:pointer;color:var(--muted);width:max-content}
+details.help .hint{margin-top:var(--s2)}
+/* 统一的密钥区：已有的每行一条（遮住，只能删除），新增的输入区接在最下面，同一个框 */
+.keys{border:1px solid var(--line2);border-radius:var(--radius-sm);background:var(--surface);max-width:40rem;margin-bottom:var(--s2);overflow:hidden}
+.keys.has-error{border-color:var(--bad-line)}
+.key-row{display:flex;align-items:center;gap:var(--s2) var(--s3);padding:.55rem .7rem;border-bottom:1px solid var(--line)}
+.key-row .key-name{font-family:var(--mono);font-size:var(--fs-sm);font-weight:600;flex:none;max-width:40%;overflow-wrap:anywhere}
+.key-row .mask{font-family:var(--mono);letter-spacing:.12em;color:var(--muted);flex:1 1 auto;min-width:0;user-select:none}
+.key-row .fp{font-size:.75em;flex:1 1 100%;order:3}
+.key-row .key-value{flex:1 1 auto;min-width:0;max-width:none;font-family:var(--mono);font-size:var(--fs-sm);padding:.3rem .5rem}
+.key-row .check{margin:0 0 0 auto;flex:none}
+.keys textarea{border:0;border-radius:0;max-width:none;box-shadow:none;background:transparent}
+.keys textarea:focus{box-shadow:inset 0 0 0 2px var(--focus)}
+.keys>label.key-label{display:block;padding:.55rem .7rem 0;font-size:var(--fs-sm);font-weight:600}
 input:hover,select:hover,textarea:hover{border-color:var(--muted)}
 input:focus,select:focus,textarea:focus{outline:0;border-color:var(--acc);box-shadow:0 0 0 3px color-mix(in srgb,var(--acc) 28%,transparent)}
 input:user-invalid,textarea:user-invalid,select:user-invalid{border-color:var(--bad);box-shadow:0 0 0 3px color-mix(in srgb,var(--bad) 18%,transparent)}
@@ -167,16 +184,6 @@ input[type=checkbox]{width:1.05rem;height:1.05rem;margin:0;flex:none;accent-colo
 .checks{display:flex;flex-wrap:wrap;gap:var(--s1) var(--s5)}
 .danger-check{color:var(--bad);font-size:var(--fs-sm)}
 .field-row{display:flex;flex-wrap:wrap;gap:0 var(--s4);align-items:flex-start}
-.summaries{list-style:none;margin:0 0 var(--s3);padding:0}
-.summaries li{display:flex;flex-wrap:nowrap;gap:var(--s2) var(--s4);align-items:center;padding:var(--s2) 0;border-bottom:1px solid var(--line)}
-/* 名称与摘要在左边可以折行，删除始终在右边 */
-.summaries li>.muted{min-width:0}
-.summaries li:last-child{border-bottom:0}
-.summaries li .check{margin:0 0 0 auto;flex:none}
-.summaries li .grow{flex:1 1 auto;min-width:0}
-.summaries li .muted{overflow-wrap:break-word}
-.k-fields .field-row{padding:var(--s3) var(--s3) 0;border:1px solid var(--line);border-radius:var(--radius-sm);margin:0 0 var(--s3);background:color-mix(in srgb,var(--surface2) 40%,transparent)}
-.k-fields .field-row .field{margin-bottom:var(--s3)}
 .form fieldset>.field:last-child{margin-bottom:0}
 .field.has-error textarea,.field.has-error input{border-color:var(--bad)}
 .hint.err{color:var(--bad);font-weight:600}
