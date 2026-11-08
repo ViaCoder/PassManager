@@ -133,6 +133,7 @@ mod tests {
             host_keys: vec![],
             ops: vec![],
             alias: String::new(),
+            secret_lines: 1,
         }];
         app
     }

@@ -969,6 +969,8 @@ struct EntryForm {
     kind: String,
     /// 已有字段名（值遮住显示；"全部显示"之后才给出并允许修改）。
     fields: Vec<String>,
+    /// 口令 / 令牌条目的行数：每行一个遮罩，可以单独删除。
+    secret_lines: usize,
     /// SSH 私钥条目：允许 ssh-agent 桥签名的主机密钥指纹（每行一个）。
     host_keys: String,
     /// 限定的用途（`http` / `ssh` / `git`，至少一种）。
@@ -1031,14 +1033,16 @@ fn form_of(f: &HashMap<String, String>) -> (EntryForm, Option<String>, Option<Ve
         fields.push(FieldInput { name, value });
     }
     // 批量输入：同名的已有字段更新值，其他的作为新字段追加
+    // 批量输入只能新增：和保留着的已有字段同名时不覆盖，而是报错（已有的只能删除；勾选删除后再写同名的就是换成新的值）
     let batch = parse_batch(f.get("fields_batch").map(String::as_str).unwrap_or(""));
-    let batch_err = batch.as_ref().err().cloned();
+    let mut batch_err = batch.as_ref().err().cloned();
     for (name, value) in batch.unwrap_or_default() {
-        match fields.iter_mut().find(|x| x.name == name) {
-            Some(x) => x.value = Some(value),
-            // 新字段不放进回显：保存失败时批量输入框不回填（值是密钥），已有字段列表里也不出现它
-            None => fields.push(FieldInput { name, value: Some(value) }),
+        if fields.iter().any(|x| x.name == name) {
+            batch_err.get_or_insert(format!("字段 {name} 已经有了：要换成新的值，先勾选删除它再新增，或点\"全部显示\"后直接修改"));
+            continue;
         }
+        // 新字段不放进回显：保存失败时批量输入框不回填（值是密钥），已有字段列表里也不出现它
+        fields.push(FieldInput { name, value: Some(value) });
     }
     let form = EntryForm {
         name: g("name"),
@@ -1049,6 +1053,7 @@ fn form_of(f: &HashMap<String, String>) -> (EntryForm, Option<String>, Option<Ve
         auto_accept_host_key: f.get("auto_accept_host_key").is_some_and(|v| v == "1"),
         kind: kind.clone(),
         fields: names,
+        secret_lines: 0,
         host_keys: g("host_keys"),
         ops: pm_vault_ops().iter().filter(|o| f.get(&format!("op_{o}")).is_some_and(|v| v == "1")).map(|o| o.to_string()).collect(),
         alias: g("alias"),
@@ -1064,10 +1069,16 @@ fn pm_vault_ops() -> [&'static str; 3] {
     ["http", "ssh", "git"]
 }
 
-fn input_of(form: &EntryForm, secret: Option<String>, fields: Option<Vec<FieldInput>>) -> EntryInput {
+fn input_of(
+    form: &EntryForm,
+    secret: Option<String>,
+    fields: Option<Vec<FieldInput>>,
+    secret_lines: Option<pm_proto::SecretLines>,
+) -> EntryInput {
     EntryInput {
         name: form.name.clone(),
         secret,
+        secret_lines,
         domains: form
             .domains
             .split(|c: char| c == '\n' || c == ',' || c.is_whitespace())
@@ -1142,6 +1153,7 @@ async fn edit_page(st: &AppState, c: &Ctx, name: &str, shown: Option<pm_proto::S
         auto_accept_host_key: e.auto_accept_host_key,
         kind: if e.kind.is_empty() { "password".into() } else { e.kind.clone() },
         fields: e.fields.clone(),
+        secret_lines: e.secret_lines,
         host_keys: e.host_keys.join("\n"),
         ops: e.ops.clone(),
         alias: e.alias.clone(),
@@ -1186,10 +1198,40 @@ async fn entry_create(
     if secret.is_none() && fields.as_ref().is_none_or(|f| f.is_empty()) {
         return form_error(&st, &c, form, None, &("BAD_REQUEST".into(), "密钥不能为空".into()));
     }
-    match call::<serde_json::Value>(&st, Req::AddEntry { entry: input_of(&form, secret, fields) }).await {
+    match call::<serde_json::Value>(&st, Req::AddEntry { entry: input_of(&form, secret, fields, None) }).await {
         Ok(_) => done("/entries", "saved"),
         Err(e) => form_error(&st, &c, form, None, &e),
     }
+}
+
+/// SSH 私钥是一整把，已保存的只能删除、不能被新的覆盖：要换成新的，勾选删除旧的再新增。"全部显示"之后可以直接修改。
+/// 违反时返回错误信息（不含任何值）。口令 / 令牌按行编辑，见 `secret_lines_of`。
+fn single_key_rule(f: &HashMap<String, String>, form: &EntryForm, new_secret: bool) -> Option<&'static str> {
+    let flag = |k: &str| f.get(k).is_some_and(|v| v == "1");
+    if form.kind != "ssh-key" || !flag("had_secret") || flag("shown") {
+        return None;
+    }
+    match (flag("secret_remove"), new_secret) {
+        (false, true) => Some("SSH 私钥只有一把：要换成新的，先勾选删除旧的再新增"),
+        (true, false) => Some("勾选了删除旧私钥，但没有新增私钥：这个条目必须有一把私钥"),
+        _ => None,
+    }
+}
+
+/// 口令 / 令牌条目遮住时的按行编辑：页面给出的行数、勾选删除的行、新增框里的每一行。
+/// 只在遮住状态（有 `line_count`、不是"全部显示"）且类型仍是口令时使用；什么都没改时返回 None（保留原值）。
+fn secret_lines_of(f: &HashMap<String, String>, form: &EntryForm) -> Option<pm_proto::SecretLines> {
+    let flag = |k: &str| f.get(k).is_some_and(|v| v == "1");
+    if form.kind != "password" || flag("shown") {
+        return None;
+    }
+    let expect: usize = f.get("line_count")?.parse().ok()?;
+    let remove: Vec<usize> = (0..expect.min(MAX_FIELD_ROWS * 16)).filter(|i| flag(&format!("line_remove_{i}"))).collect();
+    let append: Vec<String> = f
+        .get("secret")
+        .map(|s| s.replace("\r\n", "\n").split('\n').map(|l| l.trim_end().to_string()).filter(|l| !l.is_empty()).collect())
+        .unwrap_or_default();
+    (!remove.is_empty() || !append.is_empty()).then_some(pm_proto::SecretLines { expect, remove, append })
 }
 
 async fn entry_update(
@@ -1207,7 +1249,14 @@ async fn entry_update(
     if let Some(m) = batch_err {
         return form_error(&st, &c, form, Some(name), &("BAD_REQUEST".into(), m));
     }
-    match call::<serde_json::Value>(&st, Req::UpdateEntry { original: name.clone(), entry: input_of(&form, secret, fields) }).await {
+    if let Some(m) = single_key_rule(&f, &form, secret.is_some()) {
+        return form_error(&st, &c, form, Some(name), &("BAD_REQUEST".into(), m.into()));
+    }
+    // 口令 / 令牌遮住时按行编辑：删掉勾选的行、把新增框里的每一行追加在最后（服务端在原值上做，不发送整个值）
+    let lines = secret_lines_of(&f, &form);
+    let secret = if lines.is_some() { None } else { secret };
+    let entry = input_of(&form, secret, fields, lines);
+    match call::<serde_json::Value>(&st, Req::UpdateEntry { original: name.clone(), entry }).await {
         Ok(_) => done("/entries", "saved"),
         Err(e) => form_error(&st, &c, form, Some(name), &e),
     }

@@ -353,6 +353,20 @@ fn lan_server_end_to_end() {
     let shown = https(&env, "POST", "/entries/echo/show", Some(&cookie), Some(&format!("csrf={csrf}")));
     assert_eq!(shown.status, 200);
     assert!(shown.body.contains(&SECRET.replace('/', "&#x2f;")) || shown.body.contains(SECRET), "显示后有完整的值");
+    // 遮住时新增一行：服务端在原值后追加（不覆盖），之后编辑页显示两个遮罩；全部显示能看到原来的与新增的
+    let add =
+        format!("csrf={csrf}&name=echo&domains=127.0.0.1&op_http=1&self_signed=1&kind=password&line_count=1&secret=second-line-value");
+    assert_eq!(https(&env, "POST", "/entries/echo", Some(&cookie), Some(&add)).status, 303);
+    let edit = https(&env, "GET", "/entries/echo/edit", Some(&cookie), None);
+    assert_eq!(edit.body.matches("••••••••").count(), 2, "两行两个遮罩");
+    assert!(!edit.body.contains("second-line-value") && !edit.body.contains(SECRET));
+    let shown = https(&env, "POST", "/entries/echo/show", Some(&cookie), Some(&format!("csrf={csrf}")));
+    assert!(shown.body.contains("second-line-value"), "追加的行");
+    assert!(shown.body.contains(&SECRET.replace('/', "&#x2f;")) || shown.body.contains(SECRET), "原来的行还在");
+    // 删回去：勾选删除第 2 行，值恢复原样（之后的 Agent 测试仍用这个条目）
+    let del = format!("csrf={csrf}&name=echo&domains=127.0.0.1&op_http=1&self_signed=1&kind=password&line_count=2&line_remove_1=1&secret=");
+    assert_eq!(https(&env, "POST", "/entries/echo", Some(&cookie), Some(&del)).status, 303);
+    assert_eq!(https(&env, "GET", "/entries/echo/edit", Some(&cookie), None).body.matches("••••••••").count(), 1);
 
     // ---- Agent：MCP lookup 与 http（经双层通道），结果脱敏 ----
     let echo = echo_server();

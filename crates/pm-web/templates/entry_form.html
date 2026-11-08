@@ -61,11 +61,21 @@
     {# 统一的密钥区：已有的遮住（只能删除），新加的完全可编辑；"全部显示"后已有的也可以直接修改 #}
     <div class="keys k-single{% if flash_kind == "err" %} has-error{% endif %}">
       {% if original and shown %}
+      <input type="hidden" name="shown" value="1">
       <label class="key-label" for="f-secret">密钥 <span class="opt">已显示，可以直接修改</span></label>
       <textarea id="f-secret" name="secret" spellcheck="false" autocomplete="off">{{ shown_secret }}</textarea>
       {% else %}
-      {% if original and form.kind != "fields" %}<div class="key-row"><span class="key-name">密钥</span><span class="mask" aria-label="已保存，已遮住">••••••••</span>{% if form.kind == "ssh-key" and public_key %}<code class="fp">{{ public_key }}</code>{% endif %}</div>{% endif %}
-      <textarea id="f-secret" name="secret" class="key-new" spellcheck="false" autocomplete="off" aria-label="{% if original %}新的值{% else %}密钥{% endif %}" placeholder="{% if original %}写入新的值替换它；留空保留{% else %}粘贴密钥{% endif %}"></textarea>
+      {% if original and form.kind == "ssh-key" %}
+      <input type="hidden" name="had_secret" value="1">
+      <div class="key-row"><span class="key-name">SSH 私钥</span><span class="mask" aria-label="已保存，已遮住">••••••••</span>{% if public_key %}<code class="fp">{{ public_key }}</code>{% endif %}<label class="check danger-check"><input type="checkbox" name="secret_remove" value="1">{{ icon("trash") }}删除</label></div>
+      {% elif original and form.kind == "password" %}
+      {# 每一行一个遮罩，各自可以删除；新增框里的每一行追加在最后（服务端按行处理，页面从不拿到原值） #}
+      <input type="hidden" name="line_count" value="{{ form.secret_lines }}">
+      {% for i in range(form.secret_lines) %}
+      <div class="key-row"><span class="key-name">{% if form.secret_lines > 1 %}第 {{ i + 1 }} 行{% else %}密钥{% endif %}</span><span class="mask" aria-label="已保存，已遮住">••••••••</span><label class="check danger-check"><input type="checkbox" name="line_remove_{{ i }}" value="1">{{ icon("trash") }}删除</label></div>
+      {% endfor %}
+      {% endif %}
+      <textarea id="f-secret" name="secret" class="key-new" spellcheck="false" autocomplete="off" aria-label="新增" placeholder="{% if original and form.kind == "password" %}新增：每行一个{% elif original %}新增私钥{% else %}粘贴密钥（可以多行）{% endif %}"></textarea>
       {% endif %}
     </div>
     <div class="keys k-fields{% if flash_kind == "err" %} has-error{% endif %}">
@@ -81,7 +91,7 @@
     </div>
     {% if flash_kind == "err" %}<p class="hint err">{{ icon("warning") }}提交失败后新输入的值不会回填，请重新输入。</p>
     {% elif shown %}<p class="hint">{{ icon("warning") }}值只出现在这一页；离开或点"隐藏"后恢复遮住。</p>
-    {% elif original %}<p class="hint k-single">{{ icon("lock") }}已保存的值遮住显示；写入新的值来替换它。</p><p class="hint k-fields">{{ icon("lock") }}已保存的值遮住显示，只能删除；新加的输入时看得见。</p>
+    {% elif original %}<p class="hint k-single">{{ icon("lock") }}{% if form.kind == "ssh-key" %}已保存的私钥遮住显示，只能删除；要换成新的，勾选删除旧的再新增。{% else %}已保存的每一行都遮住显示，只能删除；新增的每一行追加在后面。{% endif %}</p><p class="hint k-fields">{{ icon("lock") }}已保存的值遮住显示，只能删除；在下面新增的输入时看得见。要换掉某个字段，勾选删除它再新增同名的。</p>
     {% else %}<p class="hint">{{ icon("lock") }}输入时看得见；保存后遮住显示。</p>{% endif %}
     <details class="help k-ssh"><summary>SSH 主机密钥</summary>
       <div class="field">

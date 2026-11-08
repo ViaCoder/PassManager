@@ -82,6 +82,22 @@ pub struct EntryInput {
     /// 允许的用途（`http` / `ssh` / `git`，至少一种）。None 表示不改。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ops: Option<Vec<String>>,
+    /// 单值条目按行编辑（网页遮住时的"删除某几行、追加几行"）：服务端在原值上操作，网页从不需要知道原值。
+    /// 与 `secret` 互斥。None 表示不按行编辑。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secret_lines: Option<SecretLines>,
+}
+
+/// 按行编辑单值条目。`expect` 是网页看到的行数：与服务端的不一致（期间被改过）时拒绝，免得删错行。
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq)]
+pub struct SecretLines {
+    pub expect: usize,
+    /// 要删除的行（从 0 开始）。
+    #[serde(default)]
+    pub remove: Vec<usize>,
+    /// 追加在最后的行。
+    #[serde(default)]
+    pub append: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -355,6 +371,9 @@ pub struct EntryView {
     /// URL 别名（没有时为空）。
     #[serde(default)]
     pub alias: String,
+    /// 口令 / 令牌条目的行数（网页按行显示遮罩，每行可以单独删除）；SSH 私钥与多字段条目为 0。只有行数，没有内容。
+    #[serde(default)]
+    pub secret_lines: usize,
 }
 
 /// `ShowEntry` 的结果：单值条目的值，或多字段条目的全部字段（名称，值）。

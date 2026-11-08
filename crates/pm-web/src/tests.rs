@@ -32,7 +32,18 @@ impl Backend for Mock {
             }
             match req {
                 // 摘要在返回时现算（与服务端一样只露一小段），更新之后也是对的
-                Req::Entries => Resp::ok(self.entries.lock().unwrap().iter().map(|(e, _, _)| e.clone()).collect::<Vec<_>>()),
+                // 口令条目的行数按真实值计算（页面按行画遮罩）
+                Req::Entries => Resp::ok(
+                    self.entries
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .map(|(e, sec, _)| EntryView {
+                            secret_lines: if e.kind == "password" { sec.lines().count() } else { 0 },
+                            ..e.clone()
+                        })
+                        .collect::<Vec<_>>(),
+                ),
                 Req::ShowEntry { name } => match self.entries.lock().unwrap().iter().find(|(e, _, _)| e.name == name) {
                     Some((e, sec, fs)) => {
                         Resp::ok(pm_proto::ShownEntry { secret: (e.kind != "fields").then(|| sec.clone()), fields: fs.clone() })
@@ -69,6 +80,7 @@ impl Backend for Mock {
                         host_keys: entry.host_keys.clone().unwrap_or_default(),
                         ops: entry.ops.clone().unwrap_or_default(),
                         alias: entry.alias.clone().unwrap_or_default(),
+                        secret_lines: 0,
                     };
                     self.entries.lock().unwrap().push((v, entry.secret.unwrap_or_default(), fields));
                     Resp::ok("added")
@@ -85,6 +97,20 @@ impl Backend for Mock {
                     }
                     if let Some(s) = entry.secret {
                         e.1 = s;
+                    }
+                    // 按行编辑：与服务端相同的语义（行数要对得上，至少留一行）
+                    if let Some(sl) = entry.secret_lines {
+                        let lines: Vec<String> = e.1.lines().map(str::to_string).collect();
+                        if lines.len() != sl.expect {
+                            return Resp::err("BAD_REQUEST", "这个条目刚被改过，请重新打开编辑页");
+                        }
+                        let mut kept: Vec<String> =
+                            lines.into_iter().enumerate().filter(|(i, _)| !sl.remove.contains(i)).map(|(_, l)| l).collect();
+                        kept.extend(sl.append);
+                        if kept.is_empty() {
+                            return Resp::err("BAD_REQUEST", "至少要保留一行");
+                        }
+                        e.1 = kept.join("\n");
                     }
                     if let Some(fs) = entry.fields {
                         // 与服务端相同的语义：按给出的顺序设置，值为空时保留同名旧值，未列出的删除。
@@ -545,7 +571,7 @@ async fn entries_crud_and_secrets_are_write_only() {
     // 编辑：表单不含密钥；留空表示不修改。
     let e = send(&st, Method::GET, "/entries/gh/edit", Some(&cookie), None, &[]).await;
     assert_eq!(e.status, StatusCode::OK);
-    assert!(e.body.contains("*.github.com") && e.body.contains("留空保留"));
+    assert!(e.body.contains("*.github.com") && e.body.contains("新增：每行一个"));
     let up = format!("csrf={csrf}&name=gh&domains=new.example.com&secret=&note=n2");
     assert_eq!(send(&st, Method::POST, "/entries/gh", Some(&cookie), Some(&up), &[]).await.status, StatusCode::SEE_OTHER);
     assert_eq!(mock.entries.lock().unwrap()[0].1, SECRET, "留空不改密钥");
@@ -1562,17 +1588,27 @@ async fn masked_keys_and_show_all() {
     );
 }
 
-/// 批量输入改已有条目：同名字段更新、新名字追加、勾选删除的去掉、没写的保持不变；格式错误时整批不保存，也不回填。
+/// 批量输入只能新增：和保留着的已有字段同名时报错（不覆盖）；勾选删除后再新增同名的，就是换成新的值；
+/// 格式错误或同名冲突时整批不保存，指出问题，从不回填值。
 #[tokio::test]
-async fn batch_box_updates_one_entry_at_once() {
+async fn batch_box_adds_and_never_overwrites() {
     let (st, mock) = state();
     let (cookie, csrf) = login(&st).await;
     let create =
         format!("csrf={csrf}&name=db&domains=db.example.com&kind=fields&fields_batch={}", enc("user=app\npassword=old-pass\nhost=db1"));
     assert_eq!(send(&st, Method::POST, "/entries", Some(&cookie), Some(&create), &[]).await.status, StatusCode::SEE_OTHER);
-    // 已有字段按行提交名称；password 用批量框改，host 勾选删除，再加两个新字段
+    let start: Vec<(String, String)> =
+        [("user", "app"), ("password", "old-pass"), ("host", "db1")].iter().map(|(a, b)| (a.to_string(), b.to_string())).collect();
+    let rows = "field_name_0=user&field_name_1=password&field_name_2=host";
+    // 同名没有勾选删除：400，说明怎么做，什么都不保存，值不回填
+    let over = format!("csrf={csrf}&name=db&domains=db.example.com&kind=fields&{rows}&fields_batch={}", enc("password=SHOULD-NOT-SAVE"));
+    let r = send(&st, Method::POST, "/entries/db", Some(&cookie), Some(&over), &[]).await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST);
+    assert!(r.body.contains("password 已经有了") && r.body.contains("勾选删除") && !r.body.contains("SHOULD-NOT-SAVE"), "{}", r.body);
+    assert_eq!(mock.entries.lock().unwrap()[0].2, start, "整批不保存");
+    // 勾选删除 password 与 host，再新增 password（换成新值）和两个新字段
     let upd = format!(
-        "csrf={csrf}&name=db&domains=db.example.com&kind=fields&field_name_0=user&field_name_1=password&field_name_2=host&field_remove_2=1&fields_batch={}",
+        "csrf={csrf}&name=db&domains=db.example.com&kind=fields&{rows}&field_remove_1=1&field_remove_2=1&fields_batch={}",
         enc("password=new-pass\nport=5432\nsslmode: require")
     );
     assert_eq!(send(&st, Method::POST, "/entries/db", Some(&cookie), Some(&upd), &[]).await.status, StatusCode::SEE_OTHER);
@@ -1581,15 +1617,60 @@ async fn batch_box_updates_one_entry_at_once() {
         .map(|(a, b)| (a.to_string(), b.to_string()))
         .collect();
     assert_eq!(mock.entries.lock().unwrap()[0].2, want);
-    // 格式错误：400，指出第几行，什么都不保存，值不回填
-    let bad = format!(
-        "csrf={csrf}&name=db&domains=db.example.com&kind=fields&field_name_0=user&field_name_1=password&field_name_2=port&field_name_3=sslmode&fields_batch={}",
-        enc("password=SHOULD-NOT-SAVE\nbroken-line")
-    );
+    // 格式错误：400，指出第几行
+    let bad = format!("csrf={csrf}&name=db&domains=db.example.com&kind=fields&fields_batch={}", enc("extra=SHOULD-NOT-SAVE\nbroken-line"));
     let r = send(&st, Method::POST, "/entries/db", Some(&cookie), Some(&bad), &[]).await;
     assert_eq!(r.status, StatusCode::BAD_REQUEST);
     assert!(r.body.contains("第 2 行") && !r.body.contains("SHOULD-NOT-SAVE"), "{}", r.body);
     assert_eq!(mock.entries.lock().unwrap()[0].2, want, "整批不保存");
+}
+
+/// 口令 / 令牌按行：两行的值显示两个遮罩（不露任何内容）；新增的行追加，不覆盖；勾选删除某一行；不能删光。
+/// SSH 私钥只有一把：没勾选删除就新增会报错，删除旧的再新增就是换成新的。
+#[tokio::test]
+async fn single_values_add_lines_and_delete_lines() {
+    let (st, mock) = state();
+    let (cookie, csrf) = login(&st).await;
+    let form = format!("csrf={csrf}&name=keys&domains=api.example.com&kind=password&secret={}", enc("sk-first-0001\nsk-second-0002"));
+    assert_eq!(send(&st, Method::POST, "/entries", Some(&cookie), Some(&form), &[]).await.status, StatusCode::SEE_OTHER);
+    let edit = send(&st, Method::GET, "/entries/keys/edit", Some(&cookie), None, &[]).await;
+    assert_eq!(edit.body.matches("••••••••").count(), 2, "两行的值显示两个遮罩");
+    assert!(edit.body.contains("第 1 行") && edit.body.contains("第 2 行") && edit.body.contains("name=\"line_remove_1\""));
+    assert!(!edit.body.contains("sk-first") && !edit.body.contains("sk-second") && edit.body.contains("name=\"line_count\" value=\"2\""));
+    // 新增一行：追加在后面，原来两行不变
+    let base = format!("csrf={csrf}&name=keys&domains=api.example.com&kind=password&line_count=2");
+    let add = format!("{base}&secret={}", enc("sk-third-0003"));
+    assert_eq!(send(&st, Method::POST, "/entries/keys", Some(&cookie), Some(&add), &[]).await.status, StatusCode::SEE_OTHER);
+    assert_eq!(mock.entries.lock().unwrap()[0].1, "sk-first-0001\nsk-second-0002\nsk-third-0003");
+    // 删除第 1 行
+    let del = format!("csrf={csrf}&name=keys&domains=api.example.com&kind=password&line_count=3&line_remove_0=1&secret=");
+    assert_eq!(send(&st, Method::POST, "/entries/keys", Some(&cookie), Some(&del), &[]).await.status, StatusCode::SEE_OTHER);
+    assert_eq!(mock.entries.lock().unwrap()[0].1, "sk-second-0002\nsk-third-0003");
+    // 删光：400，值不变
+    let all = format!("csrf={csrf}&name=keys&domains=api.example.com&kind=password&line_count=2&line_remove_0=1&line_remove_1=1&secret=");
+    assert_eq!(send(&st, Method::POST, "/entries/keys", Some(&cookie), Some(&all), &[]).await.status, StatusCode::BAD_REQUEST);
+    assert_eq!(mock.entries.lock().unwrap()[0].1, "sk-second-0002\nsk-third-0003");
+    // 只改说明（没有勾选、没有新增）：值一个字节都不动
+    let note = format!("{base}&note=changed&secret=").replace("line_count=2", "line_count=2");
+    assert_eq!(send(&st, Method::POST, "/entries/keys", Some(&cookie), Some(&note), &[]).await.status, StatusCode::SEE_OTHER);
+    assert_eq!(mock.entries.lock().unwrap()[0].1, "sk-second-0002\nsk-third-0003");
+    // 全部显示后直接修改：整个值按显示的内容保存
+    let shown = format!("csrf={csrf}&name=keys&domains=api.example.com&kind=password&shown=1&secret={}", enc("sk-only-0009"));
+    assert_eq!(send(&st, Method::POST, "/entries/keys", Some(&cookie), Some(&shown), &[]).await.status, StatusCode::SEE_OTHER);
+    assert_eq!(mock.entries.lock().unwrap()[0].1, "sk-only-0009");
+    // SSH 私钥：没勾选删除就新增 → 400；勾选删除旧的再新增 → 换成新的
+    let pem = |m: &str| enc(&format!("-----BEGIN OPENSSH PRIVATE KEY-----\n{m}\n-----END OPENSSH PRIVATE KEY-----"));
+    let key = format!("csrf={csrf}&name=dk&domains=b.example.com&kind=ssh-key&secret={}", pem("AAAAold"));
+    assert_eq!(send(&st, Method::POST, "/entries", Some(&cookie), Some(&key), &[]).await.status, StatusCode::SEE_OTHER);
+    let edit = send(&st, Method::GET, "/entries/dk/edit", Some(&cookie), None, &[]).await;
+    assert_eq!(edit.body.matches("••••••••").count(), 1, "私钥是一整把，一个遮罩");
+    let over = format!("csrf={csrf}&name=dk&domains=b.example.com&kind=ssh-key&had_secret=1&secret={}", pem("AAAAnew"));
+    let r = send(&st, Method::POST, "/entries/dk", Some(&cookie), Some(&over), &[]).await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST);
+    assert!(r.body.contains("先勾选删除旧的") && !r.body.contains("AAAA"), "{}", r.body);
+    let swap = format!("{over}&secret_remove=1");
+    assert_eq!(send(&st, Method::POST, "/entries/dk", Some(&cookie), Some(&swap), &[]).await.status, StatusCode::SEE_OTHER);
+    assert!(mock.entries.lock().unwrap()[1].1.contains("AAAAnew"));
 }
 
 /// 登录后只留一个页面：过期页面记住原来的位置；旧页面轮询到登录后回到那里；新页面在旧页面还在时关闭自己。

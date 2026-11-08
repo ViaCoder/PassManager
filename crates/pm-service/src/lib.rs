@@ -1519,6 +1519,9 @@ impl Shared {
 /// - `entry.fields` 为 Some：按给出的顺序设置全部字段，值为空时沿用原条目同名字段（不存在则报错），未列出的字段删除；
 /// - 否则单值：`secret` 非空时替换；为空时沿用原值（原条目是多字段时保留原字段）。
 fn apply_secret(e: &mut Entry, old: Option<&Entry>, input: &EntryInput) -> Result<(), ApiErr> {
+    if let Some(sl) = &input.secret_lines {
+        return apply_secret_lines(e, old, input, sl);
+    }
     match &input.fields {
         Some(list) if !list.is_empty() => {
             if input.secret.as_deref().is_some_and(|s| !s.is_empty()) {
@@ -1556,6 +1559,36 @@ fn apply_secret(e: &mut Entry, old: Option<&Entry>, input: &EntryInput) -> Resul
     Ok(())
 }
 
+/// 单值条目按行编辑：在原值上删除若干行、在最后追加若干行（网页遮住时用，网页从不需要知道原值）。
+/// 行数与网页看到的不一致时拒绝（期间被改过，删错行的代价太大）；删完必须至少剩一行；什么都没改时原值一个字节都不动。
+fn apply_secret_lines(e: &mut Entry, old: Option<&Entry>, input: &EntryInput, sl: &SecretLines) -> Result<(), ApiErr> {
+    let o = old.ok_or_else(|| err("BAD_REQUEST", "按行编辑只用于已有的条目"))?;
+    if input.secret.is_some() || input.fields.is_some() || !o.fields.is_empty() {
+        return Err(err("BAD_REQUEST", "按行编辑只用于单值条目，且不能同时提供整个新值"));
+    }
+    let lines: Vec<&str> = o.secret.lines().collect();
+    if lines.len() != sl.expect || sl.remove.iter().any(|&i| i >= lines.len()) {
+        return Err(err("BAD_REQUEST", "这个条目刚被改过，请重新打开编辑页"));
+    }
+    // 追加的行：去掉行尾空白，空行不算
+    let append: Vec<&str> = sl.append.iter().map(|l| l.trim_end()).filter(|l| !l.is_empty()).collect();
+    if append.iter().any(|l| l.contains(['\n', '\r'])) {
+        return Err(err("BAD_REQUEST", "追加的每一项只能是一行"));
+    }
+    e.fields = Vec::new();
+    if sl.remove.is_empty() && append.is_empty() {
+        e.secret = o.secret.clone();
+        return Ok(());
+    }
+    let mut kept: Vec<&str> = lines.iter().enumerate().filter(|(i, _)| !sl.remove.contains(i)).map(|(_, l)| *l).collect();
+    kept.extend(append);
+    if kept.is_empty() {
+        return Err(err("BAD_REQUEST", "至少要保留一行：单值条目不能没有密钥"));
+    }
+    e.secret = Zeroizing::new(kept.join("\n"));
+    Ok(())
+}
+
 /// 校验声明的类型。`ssh-key`：必须是能解析的（未加密）SSH 私钥，返回公钥指纹。
 fn check_kind(e: &Entry, kind: Option<&str>) -> Result<Option<String>, ApiErr> {
     match kind.unwrap_or("") {
@@ -1585,6 +1618,8 @@ fn entry_view(e: &Entry) -> EntryView {
             KIND_PASSWORD.into()
         },
         fields: e.fields.iter().map(|f| f.name.clone()).collect(),
+        // 口令 / 令牌按行显示遮罩（只有行数）；SSH 私钥是一整把，多字段条目按字段
+        secret_lines: if e.fields.is_empty() && !e.is_private_key() { e.secret.lines().count() } else { 0 },
         host_keys: e.host_keys.clone(),
         ops: e.ops.clone(),
         public_key,
@@ -1834,6 +1869,56 @@ pub static ROOT_PHASE_KEY: std::sync::Mutex<Option<Zeroizing<[u8; 32]>>> = std::
 
 #[cfg(test)]
 mod tests {
+    /// 按行编辑：删除与追加在服务端完成；行数对不上、删光、与整值同时提供都拒绝；什么都不改时原值逐字节不变。
+    #[test]
+    fn secret_lines_edit_in_place() {
+        use super::*;
+        let ent = |secret: &str| Entry {
+            name: "k".into(),
+            secret: Zeroizing::new(secret.into()),
+            domains: vec![],
+            note: String::new(),
+            self_signed: false,
+            auto_accept_host_key: false,
+            created: 0,
+            updated: 0,
+            fields: vec![],
+            host_keys: vec![],
+            ops: vec![],
+        };
+        let input = |sl: SecretLines| EntryInput { secret_lines: Some(sl), ..Default::default() };
+        let old = ent("key-a\r\nkey-b\nkey-c");
+        let run = |sl: SecretLines| {
+            let mut e = ent("");
+            apply_secret(&mut e, Some(&old), &input(sl)).map(|_| e.secret.to_string()).map_err(|x| x.message)
+        };
+        // 删第 2 行、追加两行（空行与行尾空白忽略）
+        let r = run(SecretLines { expect: 3, remove: vec![1], append: vec!["key-d  ".into(), "".into(), "key-e".into()] });
+        assert_eq!(r.unwrap(), "key-a\nkey-c\nkey-d\nkey-e");
+        // 什么都不改：原值逐字节不变（包括 CRLF）
+        assert_eq!(run(SecretLines { expect: 3, ..Default::default() }).unwrap(), "key-a\r\nkey-b\nkey-c");
+        // 行数对不上、行号越界、删光：拒绝，错误里没有值
+        for bad in [
+            SecretLines { expect: 2, ..Default::default() },
+            SecretLines { expect: 3, remove: vec![3], append: vec![] },
+            SecretLines { expect: 3, remove: vec![0, 1, 2], append: vec![] },
+        ] {
+            let m = run(bad).unwrap_err();
+            assert!(!m.contains("key-"), "{m}");
+        }
+        // 与整值同时提供、用在多字段条目上：拒绝
+        let mut e = ent("");
+        let both = EntryInput {
+            secret: Some("x".into()),
+            secret_lines: Some(SecretLines { expect: 3, ..Default::default() }),
+            ..Default::default()
+        };
+        assert!(apply_secret(&mut e, Some(&old), &both).is_err());
+        let mut multi = ent("");
+        multi.fields = vec![pm_vault::Field { name: "u".into(), value: Zeroizing::new("v".into()) }];
+        assert!(apply_secret(&mut e, Some(&multi), &input(SecretLines { expect: 0, ..Default::default() })).is_err());
+    }
+
     use super::*;
 
     /// ssh-agent 桥的主机绑定与其他用途使用同一套匹配规则：通配符（不含顶点）、网段（只匹配字面 IP）、host:port。

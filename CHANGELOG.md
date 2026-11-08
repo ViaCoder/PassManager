@@ -4,6 +4,17 @@ English | [简体中文](CHANGELOG.zh-CN.md)
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.3.11-rc.17] - 2026-11-08
+
+### Changed
+
+- **New keys are added, never overwrite.** A password/token entry now shows one masked row per stored line (two lines, two
+  rows; nothing about the content); each row can be deleted, and what you type in the key area is appended as new lines. The
+  web never sends or receives the stored value for this: the server deletes and appends lines itself and refuses if the line
+  count changed meanwhile, and at least one line must remain. In a multi-field entry, a new field with the name of a kept field
+  is refused instead of overwriting it: tick Delete on the old one first. An SSH key stays one masked row: tick Delete before
+  adding a new key. After "Show all" the values can still be edited directly.
+
 ## [0.3.11-rc.16] - 2026-11-08
 
 ### Changed
