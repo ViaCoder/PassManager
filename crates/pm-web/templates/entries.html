@@ -4,19 +4,18 @@
 <div class="page-head">
   <div>
     <h1>{{ icon("key") }}条目</h1>
-    <p class="lede">密钥只能写入，任何页面都不会显示。Agent 用 <code>{{ "{{secret}}" }}</code> 占位，服务端按主机自动填入并对结果脱敏。</p>
+    <p class="lede">这里只显示每个值的摘要；在编辑页点"显示"查看完整的值。Agent 用 <code>{{ "{{secret}}" }}</code> 占位，服务端按主机自动填入并对结果脱敏。</p>
   </div>
   <div class="actions"><a class="btn" href="/entries/new">{{ icon("plus") }}新增条目</a></div>
 </div>
 {% if entries %}
 <div class="table-wrap"><table class="list stack">
-  <thead><tr><th scope="col">引用名</th><th scope="col">域名</th><th scope="col">说明</th><th scope="col">类型</th><th scope="col">更新</th><th scope="col"><span class="sr-only">操作</span></th></tr></thead>
+  <thead><tr><th scope="col">引用名 / 说明</th><th scope="col">域名</th><th scope="col">类型</th><th scope="col">更新</th><th scope="col"><span class="sr-only">操作</span></th></tr></thead>
   <tbody>
   {% for e in entries %}
   <tr>
-    <td data-label="引用名"><code class="strong">{{ e.name }}</code>{% if e.alias %}<br><span class="tag">{{ icon("link") }}alias://{{ e.alias }}</span>{% endif %}</td>
-    <td data-label="域名">{% for d in e.domains %}<code>{{ d }}</code> {% else %}<span class="badge warn">{{ icon("warning") }}未绑定域名</span>{% endfor %}</td>
-    <td data-label="说明">{% if e.note %}{{ e.note }}{% else %}<span class="muted">—</span>{% endif %}</td>
+    <td data-label="引用名" class="entry-name"><code class="strong">{{ e.name }}</code>{% if e.alias %}<br><span class="tag">{{ icon("link") }}alias://{{ e.alias }}</span>{% endif %}{% if e.note %}<div class="sub">{{ e.note }}</div>{% endif %}</td>
+    <td data-label="域名" class="domains">{% for d in e.domains %}<code>{{ d }}</code> {% else %}<span class="badge warn">{{ icon("warning") }}未绑定域名</span>{% endfor %}</td>
     <td data-label="类型"><div class="tags">{% if e.kind == "ssh-key" %}<span class="tag">{{ icon("key") }}SSH 私钥</span>{% elif e.kind == "fields" %}<span class="tag">{{ e.fields | length }} 个字段</span>{% else %}<span class="tag">{{ icon("lock") }}密钥</span>{% endif %}{% if e.self_signed %} <span class="tag">自签证书</span>{% endif %}{% if e.ops %} <span class="tag info">仅 {{ e.ops | join("、") }}</span>{% endif %}</div>{% if e.kind == "ssh-key" and e.public_key %}<div class="sub"><code>{{ e.public_key }}</code></div>{% elif e.kind == "fields" %}<div class="sub">{% for f in e.fields %}<span class="nowrap"><code>{{ f }}</code> <span class="muted">{{ (e.field_summaries | default([]))[loop.index0] | default("") }}</span></span> {% endfor %}</div>{% elif e.summary | default("") %}<div class="sub"><code>{{ e.summary }}</code></div>{% endif %}</td>
     <td data-label="更新" class="nowrap">{{ e.updated | datetime }}</td>
     <td class="actions-cell">

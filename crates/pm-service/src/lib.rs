@@ -1608,8 +1608,8 @@ fn entry_view(e: &Entry) -> EntryView {
             KIND_PASSWORD.into()
         },
         fields: e.fields.iter().map(|f| f.name.clone()).collect(),
-        // 摘要只够认出是哪一把；SSH 私钥用公钥指纹辨认，多字段条目每个字段各一个
-        summary: if e.fields.is_empty() && !e.is_private_key() { summary(&e.secret) } else { String::new() },
+        // 摘要只够认出是哪一把（SSH 私钥是多行，只有行数与长度，另有公钥指纹）；多字段条目每个字段各一个
+        summary: if e.fields.is_empty() { summary(&e.secret) } else { String::new() },
         field_summaries: e.fields.iter().map(|f| summary(&f.value)).collect(),
         host_keys: e.host_keys.clone(),
         ops: e.ops.clone(),

@@ -4,6 +4,19 @@ English | [简体中文](CHANGELOG.zh-CN.md)
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.3.11-rc.15] - 2026-11-08
+
+### Fixed
+
+- **Web UI layout on laptops, tablets and phones.** The entries table squeezed the description column to a few letters (the page
+  wraps text "anywhere", which tables read as permission to shrink a column to one character) and clipped the Edit/Delete buttons
+  between 720 and 1100 pixels. The description now sits under the entry name, long host names no longer break at hyphens, the
+  list switches to cards below 1101 pixels, and on phones below 421 pixels the labels move above their values. Checked at twelve
+  widths from 320 to 1920 pixels with no page or table overflow.
+- **Editing an entry shows which key is stored** right above the "new value" box (summary, plus the public key fingerprint for SSH
+  keys; SSH keys now also get a summary). The description is a two-line box so a long one is readable; line breaks become spaces.
+  Existing fields keep their Delete box on the same line on phones.
+
 ## [0.3.11-rc.13] - 2026-11-08
 
 ### Changed

@@ -24,7 +24,7 @@
     {% if form.kind == "fields" %}
     <ul class="summaries">{% for name in form.fields %}<li><code class="strong">{{ name }}</code> <span class="muted">{{ (form.field_summaries | default([]))[loop.index0] | default("") }}</span></li>{% endfor %}</ul>
     {% elif form.kind == "ssh-key" %}
-    <p>{% if public_key %}公钥指纹 <code>{{ public_key }}</code>{% else %}SSH 私钥{% endif %}</p>
+    <p>{% if public_key %}公钥指纹 <code>{{ public_key }}</code> {% endif %}<code>{{ form.summary }}</code></p>
     {% else %}
     <p><code>{{ form.summary }}</code></p>
     {% endif %}
@@ -66,7 +66,7 @@
     </div>
     <div class="field">
       <label for="f-note">说明 <span class="opt">可选</span></label>
-      <input id="f-note" name="note" maxlength="200" value="{{ form.note }}">
+      <textarea id="f-note" name="note" maxlength="200" rows="2" class="short">{{ form.note }}</textarea>
     </div>
   </section>
 
@@ -84,7 +84,8 @@
       <legend>单个值 <span class="opt">类型为口令或 SSH 私钥时使用</span></legend>
       <div class="field{% if flash_kind == "err" %} has-error{% endif %}">
         <label for="f-secret">{% if original %}新的值 <span class="opt">留空表示不修改</span>{% else %}密钥{% endif %}</label>
-        <textarea id="f-secret" name="secret" spellcheck="false" autocomplete="off" aria-describedby="h-secret"></textarea>
+        {% if original and form.kind != "fields" %}<p class="current">{{ icon("lock") }}当前：{% if form.kind == "ssh-key" and public_key %}<code>{{ public_key }}</code> {% endif %}<code>{{ form.summary }}</code></p>{% endif %}
+        <textarea id="f-secret" name="secret" spellcheck="false" autocomplete="off" aria-describedby="h-secret"{% if original %} placeholder="留空表示保留当前的值"{% endif %}></textarea>
         {% if flash_kind == "err" %}<p class="hint err" id="h-secret">{{ icon("warning") }}提交失败后不会回填：如需设置密钥，请重新输入。</p>{% else %}<p class="hint" id="h-secret">{{ icon("lock") }}输入时完整可见；保存后只显示摘要。</p>{% endif %}
       </div>
     </fieldset>
@@ -93,9 +94,9 @@
       {% if form.fields %}
       <ul class="summaries">
         {% for name in form.fields %}
-        <li class="field-row">
+        <li>
           <input type="hidden" name="field_name_{{ loop.index0 }}" value="{{ name }}">
-          <code class="strong">{{ name }}</code> <span class="muted">{{ (form.field_summaries | default([]))[loop.index0] | default("") }}</span>
+          <span class="grow"><code class="strong">{{ name }}</code> <span class="muted">{{ (form.field_summaries | default([]))[loop.index0] | default("") }}</span></span>
           <label class="check danger-check"><input type="checkbox" name="field_remove_{{ loop.index0 }}" value="1">{{ icon("trash") }}删除</label>
         </li>
         {% endfor %}

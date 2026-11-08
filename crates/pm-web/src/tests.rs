@@ -38,7 +38,7 @@ impl Backend for Mock {
                         .unwrap()
                         .iter()
                         .map(|(e, sec, fs)| EntryView {
-                            summary: if e.kind == "password" { fake_summary(sec) } else { String::new() },
+                            summary: if e.kind != "fields" { fake_summary(sec) } else { String::new() },
                             field_summaries: fs.iter().map(|(_, v)| fake_summary(v)).collect(),
                             ..e.clone()
                         })
@@ -1532,6 +1532,11 @@ async fn summaries_and_show_button() {
     assert!(list.body.contains(&sum) && !list.body.contains(SECRET), "列表只有摘要");
     let edit = send(&st, Method::GET, "/entries/gh/edit", Some(&cookie), None, &[]).await;
     assert!(edit.body.contains(&sum) && !edit.body.contains(SECRET) && edit.body.contains("/entries/gh/show"), "编辑页只有摘要与显示按钮");
+    // 改密钥的地方也看得到当前的是哪一把：输入框上方有摘要，输入框提示留空保留
+    let at = edit.body.find("name=\"secret\"").unwrap();
+    let before = &edit.body[..at];
+    assert!(before.rfind("当前：").is_some_and(|i| before[i..].contains(&sum)), "输入框上方有当前值的摘要");
+    assert!(edit.body[at..].split('>').next().unwrap().contains("留空表示保留当前的值"));
     // 没有 CSRF、GET、未登录：都拿不到
     assert_eq!(send(&st, Method::POST, "/entries/gh/show", Some(&cookie), Some("csrf=nope"), &[]).await.status, StatusCode::FORBIDDEN);
     assert_eq!(send(&st, Method::GET, "/entries/gh/show", Some(&cookie), None, &[]).await.status, StatusCode::METHOD_NOT_ALLOWED);

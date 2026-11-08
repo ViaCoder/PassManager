@@ -155,6 +155,10 @@ ul.hint li{margin:.15rem 0}
 input,select,textarea{font:inherit;font-size:var(--fs-md);color:var(--fg);background:var(--surface);border:1px solid var(--line2);border-radius:var(--radius-sm);padding:.5rem .7rem;transition:border-color .15s,box-shadow .15s}
 input:not([type=checkbox]),select,textarea{width:100%;max-width:40rem;display:block}
 textarea{font-family:var(--mono);font-size:var(--fs-sm);min-height:6rem;resize:vertical}
+/* 一两行的普通文字（说明）：正文字体，不要求 6 行高 */
+textarea.short{font-family:var(--sans);font-size:var(--fs-md);min-height:0}
+/* 编辑时当前保存的值（摘要）：放在输入框上方 */
+.current{display:flex;flex-wrap:wrap;align-items:center;gap:var(--s2);margin:0 0 var(--s2);font-size:var(--fs-sm);color:var(--muted)}
 input:hover,select:hover,textarea:hover{border-color:var(--muted)}
 input:focus,select:focus,textarea:focus{outline:0;border-color:var(--acc);box-shadow:0 0 0 3px color-mix(in srgb,var(--acc) 28%,transparent)}
 input:user-invalid,textarea:user-invalid,select:user-invalid{border-color:var(--bad);box-shadow:0 0 0 3px color-mix(in srgb,var(--bad) 18%,transparent)}
@@ -164,8 +168,13 @@ input[type=checkbox]{width:1.05rem;height:1.05rem;margin:0;flex:none;accent-colo
 .danger-check{color:var(--bad);font-size:var(--fs-sm)}
 .field-row{display:flex;flex-wrap:wrap;gap:0 var(--s4);align-items:flex-start}
 .summaries{list-style:none;margin:0 0 var(--s3);padding:0}
-.summaries li{display:flex;flex-wrap:wrap;gap:var(--s2) var(--s4);align-items:center;padding:var(--s2) 0;border-bottom:1px solid var(--line)}
+.summaries li{display:flex;flex-wrap:nowrap;gap:var(--s2) var(--s4);align-items:center;padding:var(--s2) 0;border-bottom:1px solid var(--line)}
+/* 名称与摘要在左边可以折行，删除始终在右边 */
+.summaries li>.muted{min-width:0}
 .summaries li:last-child{border-bottom:0}
+.summaries li .check{margin:0 0 0 auto;flex:none}
+.summaries li .grow{flex:1 1 auto;min-width:0}
+.summaries li .muted{overflow-wrap:break-word}
 .k-fields .field-row{padding:var(--s3) var(--s3) 0;border:1px solid var(--line);border-radius:var(--radius-sm);margin:0 0 var(--s3);background:color-mix(in srgb,var(--surface2) 40%,transparent)}
 .k-fields .field-row .field{margin-bottom:var(--s3)}
 .form fieldset>.field:last-child{margin-bottom:0}
@@ -211,6 +220,12 @@ details.confirm[open]>summary{background:var(--bad-soft)}
 table.list{border-collapse:collapse;width:100%}
 table.list th{font-size:var(--fs-xs);letter-spacing:.02em;color:var(--muted);font-weight:600;background:var(--surface2);white-space:nowrap}
 table.list td,table.list th{border-bottom:1px solid var(--line);padding:.7rem .9rem;text-align:left;vertical-align:top}
+/* body 的 overflow-wrap:anywhere 会让表格把文字列压到一个字母宽；表格里只在一个词放不下时才断开 */
+table.list td{overflow-wrap:break-word}
+/* 引用名列下面是说明：给它足够的宽度换行，但不让一句长说明把整张表撑宽 */
+table.list td.entry-name{min-width:11rem;max-width:22rem}
+table.list td.domains code{white-space:nowrap}
+table.list td.domains{min-width:9rem}
 table.list tbody tr:last-child td{border-bottom:0}
 table.list tbody tr:hover{background:color-mix(in srgb,var(--surface2) 50%,transparent)}
 table.list.small td{font-size:var(--fs-sm)}
@@ -259,7 +274,10 @@ td.actions-cell .row{justify-content:flex-end;flex-wrap:nowrap;align-items:flex-
   .auth-card{padding:var(--s5)}
   .kv{grid-template-columns:1fr;gap:0}
   .kv dd{margin-bottom:var(--s3)}
-  /* 表格改为卡片式堆叠 */
+  .page-head .actions{width:100%}
+}
+@media (max-width:1100px){
+  /* 表格改为卡片式堆叠（笔记本、平板与手机）：五列表格在这个宽度以下放不下 */
   table.list.stack thead{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)}
   table.list.stack,table.list.stack tbody,table.list.stack tr,table.list.stack td{display:block;width:100%}
   table.list.stack tr{padding:var(--s3) var(--s4);border-bottom:1px solid var(--line)}
@@ -270,7 +288,13 @@ td.actions-cell .row{justify-content:flex-end;flex-wrap:nowrap;align-items:flex-
   table.list.stack td.actions-cell::before{content:none}
   table.list.stack td.actions-cell .row{justify-content:flex-start;flex-wrap:wrap}
   table.list.stack td.nowrap{white-space:normal}
-  .page-head .actions{width:100%}
+  table.list.stack td.entry-name,table.list.stack td.domains{min-width:0;max-width:none}
+  table.list.stack td.domains code{white-space:normal}
+}
+/* 很窄的手机：标签放在内容上方，内容用满整行 */
+@media (max-width:420px){
+  table.list.stack td{padding:.15rem 0}
+  table.list.stack td::before{position:static;display:block;width:auto;margin-top:var(--s2)}
 }
 
 /* 减少动态效果 */

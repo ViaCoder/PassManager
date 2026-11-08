@@ -1047,7 +1047,8 @@ fn form_of(f: &HashMap<String, String>) -> (EntryForm, Option<String>, Option<Ve
     let form = EntryForm {
         name: g("name"),
         domains: g("domains"),
-        note: g("note"),
+        // 说明是一句话：文本框里的换行与连续空白合并成一个空格
+        note: g("note").split_whitespace().collect::<Vec<_>>().join(" "),
         self_signed: f.get("self_signed").is_some_and(|v| v == "1"),
         auto_accept_host_key: f.get("auto_accept_host_key").is_some_and(|v| v == "1"),
         kind: kind.clone(),
