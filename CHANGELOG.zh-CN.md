@@ -4,6 +4,13 @@
 
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.3.11-rc.13] - 2026-11-08
+
+### 变更
+
+- Windows arm64 上的 CI 与发布构建缓存 LLVM 安装包（`actions/cache` v6.1.0，按提交固定；每次仍校验 SHA-256）。以前每次都从
+  github.com 下载，2026-11-08 多次因 504 Gateway Time-out 失败；发布下载页失败时，改用 GitHub API 的资源下载接口再试一次同一个文件。
+
 ## [0.3.11-rc.12] - 2026-11-08
 
 ### 新增

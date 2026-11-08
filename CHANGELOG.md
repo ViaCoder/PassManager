@@ -4,6 +4,14 @@ English | [简体中文](CHANGELOG.zh-CN.md)
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.3.11-rc.13] - 2026-11-08
+
+### Changed
+
+- CI and release builds on Windows arm64 cache the LLVM installer (`actions/cache` v6.1.0, pinned by commit; the SHA-256 is
+  still checked every time). Downloading it from github.com on every run failed several times on 2026-11-08 with 504 Gateway
+  Time-out; when the release download page fails, the build tries the GitHub API asset endpoint for the same file once.
+
 ## [0.3.11-rc.12] - 2026-11-08
 
 ### Added

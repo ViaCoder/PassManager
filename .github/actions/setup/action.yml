@@ -27,6 +27,15 @@ runs:
       if: runner.os == 'Linux'
       shell: bash
       run: sudo apt-get update -q && sudo apt-get install -y -q cmake clang libclang-dev zip zsh
+    # Windows arm64 的 LLVM 安装包（约 340 MB）每次都从 github.com 下载时，下载服务偶尔返回 504，整个 job 失败。
+    # 缓存安装包：只在第一次下载；键里有版本与安装包 SHA-256 的前 8 位，换版本时自动失效。分支只能用到自己与
+    # main 上建的缓存，所以 main 的 CI 跑过一次之后，发布分支与 tag 都会命中。
+    - name: Cache the LLVM installer (Windows arm64)
+      if: runner.os == 'Windows' && runner.arch == 'ARM64'
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ${{ runner.temp }}\llvm-installer
+        key: llvm-19.1.7-woa64-08d871c9
     - name: Build tools (Windows)
       if: runner.os == 'Windows'
       shell: pwsh
@@ -38,21 +47,31 @@ runs:
           $v = "19.1.7"
           $llvm = "C:\llvm-$v\bin"
           if (-not (Test-Path "$llvm\libclang.dll")) {
-            # 安装包下载到 RUNNER_TEMP，不放进检出目录（工作区必须保持干净，见最后一步与 release_scan）。
-            $installer = Join-Path $env:RUNNER_TEMP "LLVM-$v-woa64.exe"
-            Invoke-WebRequest "https://github.com/llvm/llvm-project/releases/download/llvmorg-$v/LLVM-$v-woa64.exe" -OutFile $installer
-            # 校验值取自已用 LLVM 官方发布密钥（GPG）验证过签名的同一文件。
+            # 安装包放在 RUNNER_TEMP 下的缓存目录，不放进检出目录（工作区必须保持干净，见最后一步与 release_scan）。
+            # 校验值取自已用 LLVM 官方发布密钥（GPG）验证过签名的同一文件；缓存里的安装包同样每次校验。
+            $want = "08D871C9A20CAF0987EDE1A4E44D489E28854C9F2FFF3DA98B486891F4856E05"
+            $dir = Join-Path $env:RUNNER_TEMP "llvm-installer"
+            New-Item -ItemType Directory -Force -Path $dir | Out-Null
+            $installer = Join-Path $dir "LLVM-$v-woa64.exe"
+            if ((Test-Path $installer) -and ((Get-FileHash $installer -Algorithm SHA256).Hash -eq $want)) {
+              "LLVM 安装包来自缓存"
+            } else {
+              # 主地址是 github.com 的发布下载页，它偶尔返回 504 或超时页；这时只再试一次 API 的资源下载接口
+              # （同一个文件的另一个入口，资源 ID 228315816）。两处下载的都按上面的 SHA-256 校验。
+              try {
+                Invoke-WebRequest "https://github.com/llvm/llvm-project/releases/download/llvmorg-$v/LLVM-$v-woa64.exe" -OutFile $installer
+              } catch {
+                "主地址失败（$($_.Exception.GetType().Name)），改用 API 的资源下载接口"
+                Invoke-WebRequest "https://api.github.com/repos/llvm/llvm-project/releases/assets/228315816" -Headers @{ Accept = "application/octet-stream" } -OutFile $installer
+              }
+            }
             $sum = (Get-FileHash $installer -Algorithm SHA256).Hash
-            if ($sum -ne "08D871C9A20CAF0987EDE1A4E44D489E28854C9F2FFF3DA98B486891F4856E05") { throw "LLVM 安装包校验失败：$sum" }
-            # 等安装程序结束并检查退出码；删除安装包不是必需的（RUNNER_TEMP 由运行器清理），失败只重试几次后忽略。
+            if ($sum -ne $want) { throw "LLVM 安装包校验失败：$sum" }
+            # 等安装程序结束并检查退出码。安装包留在缓存目录里，任务结束时由 actions/cache 保存（RUNNER_TEMP 由运行器清理）。
             $p = Start-Process -Wait -PassThru -FilePath $installer -ArgumentList "/S", "/D=C:\llvm-$v"
             if ($p.ExitCode -ne 0) { throw "LLVM 安装失败：退出码 $($p.ExitCode)" }
             for ($i = 0; $i -lt 30 -and -not (Test-Path "$llvm\libclang.dll"); $i++) { Start-Sleep -Seconds 2 }
             if (-not (Test-Path "$llvm\libclang.dll")) { throw "LLVM 安装后没有找到 $llvm\libclang.dll" }
-            for ($i = 0; $i -lt 5 -and (Test-Path $installer); $i++) {
-              Start-Sleep -Seconds 2
-              Remove-Item -Force -ErrorAction SilentlyContinue $installer
-            }
           }
         } else {
           $llvm = "C:\Program Files\LLVM\bin"
