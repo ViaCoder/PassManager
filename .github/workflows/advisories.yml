@@ -14,7 +14,7 @@ permissions:
 
 jobs:
   advisories:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
@@ -25,7 +25,7 @@ jobs:
   fix:
     needs: advisories
     if: ${{ failure() }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       changed: ${{ steps.lock.outputs.changed }}
     steps:
@@ -57,7 +57,7 @@ jobs:
   publish:
     needs: fix
     if: ${{ !cancelled() && needs.fix.result == 'success' && needs.fix.outputs.changed == 'true' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
       pull-requests: write

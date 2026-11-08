@@ -235,7 +235,7 @@ MCP 服务器为 stdio、按行分隔的 JSON-RPC 2.0，支持协议版本 2025-
 
 ## 9. 验证状态
 
-CI 在 6 种 GitHub 原生运行器上执行：Linux（ubuntu-latest、ubuntu-24.04-arm）、macOS（macos-latest = Apple 芯片、macos-15-intel）、Windows（windows-latest、windows-11-arm）。
+CI 在 6 种 GitHub 原生运行器上执行：Linux（ubuntu-24.04、ubuntu-24.04-arm；固定版本，ubuntu-latest 换成 26.04 后 oqs-sys 的 bindgen 结果出错）、macOS（macos-latest = Apple 芯片、macos-15-intel）、Windows（windows-latest、windows-11-arm）。
 
 | 项目 | 覆盖范围 | 状态 |
 |---|---|---|

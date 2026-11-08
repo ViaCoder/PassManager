@@ -410,6 +410,74 @@ pub fn alias_remove(name: String) -> ExitCode {
     }
 }
 
+/// 一份策略的文字形式（`relay list` 与 `relay set` 的输出；不含任何密钥）。
+pub fn relay_text(p: &pm_proto::RelayPolicyView) -> String {
+    let lim = |n: u64| if n == 0 { "不限".to_string() } else { n.to_string() };
+    let mut out = format!("{}\n  认证头：{}\n", p.entry, p.auth);
+    for a in &p.allow {
+        out.push_str(&format!("  允许：{a}\n"));
+    }
+    for r in &p.require {
+        out.push_str(&format!("  请求体：{r}\n"));
+    }
+    if !p.response_headers.is_empty() {
+        out.push_str(&format!("  额外响应头：{}\n", p.response_headers.join(", ")));
+    }
+    out.push_str(&format!(
+        "  每次运行：{} 个请求、{} 字节；每 24 小时：{} 个请求、{} 字节",
+        lim(p.max_requests_run),
+        lim(p.max_bytes_run),
+        lim(p.max_requests_day),
+        lim(p.max_bytes_day)
+    ));
+    out
+}
+
+/// `passmanager relay list`
+pub fn relay_list() -> ExitCode {
+    if let Err(e) = need_root(&layout()) {
+        return fail(e);
+    }
+    match root_call::<Vec<pm_proto::RelayPolicyView>>(Request::RelayPolicies) {
+        Ok(list) => {
+            for p in &list {
+                println!("{}", relay_text(p));
+            }
+            println!("共 {} 份中继策略", list.len());
+            ExitCode::SUCCESS
+        }
+        Err(e) => fail(e),
+    }
+}
+
+/// `passmanager relay set`：新增或替换。
+pub fn relay_set(policy: pm_proto::RelayPolicyView) -> ExitCode {
+    if let Err(e) = need_root(&layout()) {
+        return fail(e);
+    }
+    match root_call::<pm_proto::RelayPolicyView>(Request::PutRelayPolicy { policy }) {
+        Ok(p) => {
+            println!("已保存：\n{}", relay_text(&p));
+            ExitCode::SUCCESS
+        }
+        Err(e) => fail(e),
+    }
+}
+
+/// `passmanager relay remove`
+pub fn relay_remove(name: String) -> ExitCode {
+    if let Err(e) = need_root(&layout()) {
+        return fail(e);
+    }
+    match root_call::<serde_json::Value>(Request::DeleteRelayPolicy { entry: name.clone() }) {
+        Ok(_) => {
+            println!("已删除 {name} 的中继策略");
+            ExitCode::SUCCESS
+        }
+        Err(e) => fail(e),
+    }
+}
+
 pub fn update(o: crate::import::UpdateOpts) -> ExitCode {
     let l = layout();
     if let Err(e) = need_root(&l) {

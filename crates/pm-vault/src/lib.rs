@@ -3,6 +3,7 @@
 pub mod domain;
 pub mod format;
 pub mod model;
+pub mod relay;
 pub mod store;
 
 use std::path::{Path, PathBuf};
@@ -14,6 +15,7 @@ use thiserror::Error;
 
 pub use crate::format::{Header, VaultMode};
 pub use crate::model::*;
+pub use crate::relay::{BodyRule, RelayPolicy};
 
 #[derive(Debug, Error)]
 pub enum VaultError {
@@ -461,7 +463,28 @@ mod tests {
         assert_eq!(&v3[4..9], format::PAYLOAD_V3_MAGIC);
         let back = format::decode_payload(&v3).unwrap();
         assert_eq!((back.entries[0].name.as_str(), back.aliases), ("x", p.aliases.clone()));
-        // 别名全部删除后回到 v2。
+        // v3 的字节与 0.3.11-rc.6~rc.9 写出的完全相同（当时直接序列化四个字段的 Payload）。
+        let old = PayloadV3 { entries: p.entries.clone(), pins: vec![], settings: p.settings.clone(), aliases: p.aliases.clone() };
+        assert_eq!(&v3[9..9 + postcard::to_allocvec(&old).unwrap().len()], postcard::to_allocvec(&old).unwrap().as_slice());
+        // 有中继策略：写 v4，读回策略与别名。
+        p.relay.push(crate::relay::RelayPolicy {
+            entry: "x".into(),
+            allow: vec!["GET /v1/models".into()],
+            auth: "authorization: Bearer {{secret}}".into(),
+            require: vec![],
+            response_headers: vec![],
+            max_requests_run: 1,
+            max_bytes_run: 2,
+            max_requests_day: 3,
+            max_bytes_day: 4,
+        });
+        let v4 = format::encode_payload(&p).unwrap();
+        assert_eq!(&v4[4..9], format::PAYLOAD_V4_MAGIC);
+        let back = format::decode_payload(&v4).unwrap();
+        assert_eq!((back.relay.clone(), back.aliases.len(), back.relay("x").map(|r| r.max_bytes_day)), (p.relay.clone(), 1, Some(4)));
+        // 策略删除后回到 v3，再删别名回到 v2。
+        p.relay.clear();
+        assert_eq!(&format::encode_payload(&p).unwrap()[4..9], format::PAYLOAD_V3_MAGIC);
         p.aliases.clear();
         assert_eq!(&format::encode_payload(&p).unwrap()[4..9], format::PAYLOAD_V2_MAGIC);
     }

@@ -194,6 +194,8 @@ pub fn decode_file(data: &[u8]) -> Result<(Header, SealedPayload), VaultError> {
 pub const PAYLOAD_V2_MAGIC: &[u8; 5] = b"PMP2\0";
 /// v3 载荷的标记：比 v2 多了别名。
 pub const PAYLOAD_V3_MAGIC: &[u8; 5] = b"PMP3\0";
+/// v4 载荷的标记：比 v3 多了中继策略。
+pub const PAYLOAD_V4_MAGIC: &[u8; 5] = b"PMP4\0";
 
 /// v2 载荷的字段（借用，写入时不复制密钥）。
 #[derive(serde::Serialize)]
@@ -203,18 +205,35 @@ struct V2Ref<'a> {
     settings: &'a crate::model::Settings,
 }
 
+/// v3 载荷的字段（借用）。
+#[derive(serde::Serialize)]
+struct V3Ref<'a> {
+    entries: &'a Vec<crate::model::Entry>,
+    pins: &'a Vec<crate::model::Pin>,
+    settings: &'a crate::model::Settings,
+    aliases: &'a Vec<crate::model::Alias>,
+}
+
 /// 序列化载荷并填充到 4 KiB 的整数倍（隐藏条目数量与长度）。
-/// 没有别名时写 v2：回滚到旧版本的程序仍能打开库。有别名时写 v3：旧程序打不开，而不是忽略别名、放开原地址。
+/// 只写需要的最低版本，回滚到旧版本的程序仍能打开库：没有别名和策略时写 v2，有别名时写 v3，有中继策略时写 v4。
+/// 别名让旧程序打不开库，而不是忽略别名、放开原地址；中继策略只有新程序会用，写 v4 只是因为 postcard 不能跳过未知字段。
 pub fn encode_payload(p: &Payload) -> Result<Zeroizing<Vec<u8>>, VaultError> {
     let bad = |_| VaultError::Corrupt("payload encode");
-    if p.aliases.is_empty() {
-        let mut v = Zeroizing::new(PAYLOAD_V2_MAGIC.to_vec());
-        let r = V2Ref { entries: &p.entries, pins: &p.pins, settings: &p.settings };
-        v.extend_from_slice(&Zeroizing::new(postcard::to_allocvec(&r).map_err(bad)?));
-        return pad(v);
-    }
-    let mut v = Zeroizing::new(PAYLOAD_V3_MAGIC.to_vec());
-    v.extend_from_slice(&Zeroizing::new(postcard::to_allocvec(p).map_err(bad)?));
+    let (magic, body) = if !p.relay.is_empty() {
+        (PAYLOAD_V4_MAGIC, postcard::to_allocvec(p).map_err(bad)?)
+    } else if !p.aliases.is_empty() {
+        (
+            PAYLOAD_V3_MAGIC,
+            postcard::to_allocvec(&V3Ref { entries: &p.entries, pins: &p.pins, settings: &p.settings, aliases: &p.aliases })
+                .map_err(bad)?,
+        )
+    } else {
+        (PAYLOAD_V2_MAGIC, postcard::to_allocvec(&V2Ref { entries: &p.entries, pins: &p.pins, settings: &p.settings }).map_err(bad)?)
+    };
+    // 序列化结果里有密钥：放进 Zeroizing，用完清零
+    let body = Zeroizing::new(body);
+    let mut v = Zeroizing::new(magic.to_vec());
+    v.extend_from_slice(&body);
     pad(v)
 }
 
@@ -242,8 +261,11 @@ pub fn decode_payload(data: &[u8]) -> Result<Payload, VaultError> {
         return Err(VaultError::Corrupt("payload length"));
     }
     let body = &data[4..4 + len];
+    if let Some(v4) = body.strip_prefix(PAYLOAD_V4_MAGIC.as_slice()) {
+        return postcard::from_bytes(v4).map_err(|_| VaultError::Corrupt("payload decode"));
+    }
     if let Some(v3) = body.strip_prefix(PAYLOAD_V3_MAGIC.as_slice()) {
-        return postcard::from_bytes(v3).map_err(|_| VaultError::Corrupt("payload decode"));
+        return postcard::from_bytes::<crate::model::PayloadV3>(v3).map(Payload::from).map_err(|_| VaultError::Corrupt("payload decode"));
     }
     match body.strip_prefix(PAYLOAD_V2_MAGIC.as_slice()) {
         Some(v2) => {

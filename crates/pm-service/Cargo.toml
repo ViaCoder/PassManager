@@ -32,6 +32,7 @@ hyper-util = { version = "0.1", features = ["tokio"] }
 http-body = "1"
 http-body-util = "0.1"
 bytes = "1"
+flate2 = "1"
 webpki-root-certs = "1"
 
 [target.'cfg(unix)'.dependencies]

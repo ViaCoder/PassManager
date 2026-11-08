@@ -4,6 +4,24 @@
 
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.3.11-rc.10] - 2026-11-08
+
+### 新增
+
+- **`passmanager run --http <origin>`：本机程序不经手凭据就能调用 HTTPS API。** SDK、CLI 或 curl 拿到一个带一次性令牌的本机地址
+  （`--env-url NAME=/路径`）和一个占位密钥（`--env-key NAME`）；每个请求都经服务器，服务器按凭据的中继策略检查、加上凭据，再把回答
+  流式送回。SSE 事件逐个到达，单个请求最长 30 分钟，程序断开时上游请求随之取消。
+- **中继策略**（`passmanager relay set/list/remove`，root）：允许的 `方法 路径`（精确，或以 `/*` 结尾的前缀）、凭据怎样发出、JSON
+  请求体规则、每次运行与每 24 小时的上限。管理密钥、登录、账号或计费的路径永远不放行。`--max-requests`、`--max-bytes`、`--require`
+  只能收窄策略。有策略的凭据，`lookup` 会给出 `run --http` 的命令。
+- **流式脱敏：** 回答按滑动窗口脱敏，结果与整段脱敏完全相同（所有编码形式），只扣住可能是匹配开头的几个字节。压缩的回答先解压。
+
+### 变更
+
+- 有中继策略的库用新格式（v4）写入；没有策略的库仍用原来的格式。
+- CI 与发布构建改在 `ubuntu-24.04` 上运行，不再用 `ubuntu-latest`。GitHub 把 `ubuntu-latest` 换成了 26.04，那里 `oqs-sys` 用系统
+  libclang 生成的绑定结构体大小不对，构建失败。
+
 ## [0.3.11-rc.9] - 2026-11-06
 
 ### 修复

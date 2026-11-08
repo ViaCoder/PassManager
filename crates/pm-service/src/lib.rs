@@ -6,6 +6,7 @@ pub mod http;
 pub mod lookup;
 pub mod online;
 pub mod redact;
+pub mod relay;
 mod server;
 pub mod server_files;
 pub mod ssh;
@@ -101,6 +102,8 @@ pub struct Shared {
     recovered: std::sync::atomic::AtomicBool,
     /// ssh-agent 桥的签名速率限制（全局：每分钟 30 次）。
     sign_limiter: std::sync::Mutex<agent::SignLimiter>,
+    /// `passmanager run --http` 的运行与每个凭据的用量。
+    relay_runs: Arc<std::sync::Mutex<relay::Runs>>,
 }
 
 /// 会话类型。
@@ -200,6 +203,7 @@ impl Shared {
             online: None,
             recovered: std::sync::atomic::AtomicBool::new(false),
             sign_limiter: std::sync::Mutex::new(agent::SignLimiter::new(30, Duration::from_secs(60))),
+            relay_runs: Arc::new(std::sync::Mutex::new(relay::Runs::default())),
         })
     }
 
@@ -752,6 +756,79 @@ impl Shared {
             }
             Request::AgentSign { key, data, flags, binding } => self.agent_sign(&key, &data, flags, binding).await,
             Request::GitProxy { .. } => Err(err("BAD_REQUEST", "git proxy requests must be the streaming form")),
+            Request::Relay { .. } => Err(err("BAD_REQUEST", "relay requests must be the streaming form")),
+            Request::RelayOpen { origin, max_requests, max_bytes, require } => {
+                let run = {
+                    let inner = self.inner.lock().await;
+                    let v = inner.vault.as_ref().ok_or_else(|| self.locked_err())?;
+                    relay::open(&v.payload, &origin, max_requests, max_bytes, &require)
+                };
+                let run = match run {
+                    Ok(r) => r,
+                    Err(e) => {
+                        log(&format!("relay refused: open code={}", e.code));
+                        return Err(e);
+                    }
+                };
+                let (label, entry) = (run.label.clone(), run.entry.clone());
+                let id = self.relay_runs.lock().unwrap_or_else(|e| e.into_inner()).insert(run)?;
+                log(&format!("relay: open entry={entry} origin={label}"));
+                ok(RelayRunView { run: id, origin: label })
+            }
+            Request::RelayClose { run } => {
+                let closed = self.relay_runs.lock().unwrap_or_else(|e| e.into_inner()).close(&run);
+                ok(closed)
+            }
+            Request::RelayPolicies => {
+                let inner = self.inner.lock().await;
+                let v = inner.vault.as_ref().ok_or_else(|| self.locked_err())?;
+                let mut list: Vec<RelayPolicyView> = v.payload.relay.iter().map(relay_view).collect();
+                list.sort_by(|a, b| a.entry.cmp(&b.entry));
+                ok(list)
+            }
+            Request::PutRelayPolicy { policy } => {
+                let mut require = Vec::new();
+                for r in &policy.require {
+                    require.push(pm_vault::relay::parse_require(r).map_err(|m| err("BAD_REQUEST", m))?);
+                }
+                let mut p = pm_vault::RelayPolicy {
+                    entry: policy.entry.trim().to_string(),
+                    allow: policy.allow,
+                    auth: policy.auth,
+                    require,
+                    response_headers: policy.response_headers,
+                    max_requests_run: policy.max_requests_run,
+                    max_bytes_run: policy.max_bytes_run,
+                    max_requests_day: policy.max_requests_day,
+                    max_bytes_day: policy.max_bytes_day,
+                };
+                let mut view = None;
+                self.mutate(|v| {
+                    let e = v.payload.entry(&p.entry).ok_or_else(|| err("UNKNOWN_CREDENTIAL", format!("条目 {} 不存在", p.entry)))?;
+                    pm_vault::relay::validate_relay(&mut p, e).map_err(|m| err("BAD_REQUEST", m))?;
+                    view = Some(relay_view(&p));
+                    v.payload.relay.retain(|x| x.entry != p.entry);
+                    v.payload.relay.push(p);
+                    Ok(())
+                })
+                .await?;
+                let view = view.unwrap_or_default();
+                log(&format!("relay policy saved: {}", view.entry));
+                ok(view)
+            }
+            Request::DeleteRelayPolicy { entry } => {
+                self.mutate(|v| {
+                    let before = v.payload.relay.len();
+                    v.payload.relay.retain(|x| x.entry != entry);
+                    if v.payload.relay.len() == before {
+                        return Err(err("UNKNOWN_CREDENTIAL", format!("条目 {entry} 没有中继策略")));
+                    }
+                    Ok(())
+                })
+                .await?;
+                log(&format!("relay policy deleted: {entry}"));
+                ok("deleted")
+            }
             Request::Ssh { target, command } => {
                 let (_, dest) = ssh::parse_route(&target)?;
                 // 命令里不能提到设了别名的主机（否则可以在别的主机上直接访问原地址）。文字检查挡不住有意的拼接，
@@ -932,6 +1009,18 @@ impl Shared {
                         v.payload.alias_conflict(&a, cur.as_deref()).map_err(|m| err("BAD_REQUEST", m))?;
                         Some(a)
                     };
+                    // 中继策略跟着条目改名；条目已不满足策略（例如去掉了 http 用途、换了字段）时删除策略。
+                    if let Some(pos) = v.payload.relay.iter().position(|p| p.entry == old.name) {
+                        let mut pol = v.payload.relay[pos].clone();
+                        pol.entry = e.name.clone();
+                        match pm_vault::relay::validate_relay(&mut pol, &e) {
+                            Ok(()) => v.payload.relay[pos] = pol,
+                            Err(m) => {
+                                log(&format!("relay policy removed: {} ({m})", e.name));
+                                v.payload.relay.remove(pos);
+                            }
+                        }
+                    }
                     v.payload.entries[idx] = e;
                     if !keep {
                         v.payload.aliases.retain(|x| Some(x.name.as_str()) != cur.as_deref());
@@ -947,6 +1036,7 @@ impl Shared {
                     let gone = v.payload.entry(&name).ok_or_else(|| err("UNKNOWN_CREDENTIAL", "条目不存在"))?;
                     let alias = v.payload.alias_of(gone).map(|a| a.name.clone());
                     v.payload.entries.retain(|e| e.name != name);
+                    v.payload.relay.retain(|p| p.entry != name);
                     // 别名随条目删除：网页上没有别的入口，留下它这台主机就再也解不开了。还有条目用它时保留。
                     let used = |p: &pm_vault::Payload, n: &str| p.entries.iter().any(|e| p.alias_of(e).is_some_and(|a| a.name == n));
                     if let Some(n) = alias.filter(|n| !used(&v.payload, n)) {
@@ -1117,6 +1207,43 @@ impl Shared {
         let v = inner.vault.as_ref().ok_or_else(|| self.locked_err())?;
         let plan = git::plan(&v.payload, &host, port, inner.redactor.clone())?;
         Ok((svc, u, plan))
+    }
+
+    /// 中继：检查会话与运行，准备好这一个请求（失败也记一行日志，便于发现被拒绝的请求）。
+    pub(crate) async fn relay_prepare(
+        &self,
+        session: &Session,
+        run: &str,
+        method: &str,
+        path: &str,
+        headers: &[(String, String)],
+    ) -> Result<relay::Plan, ApiErr> {
+        if !matches!(session, Session::Agent | Session::Root) {
+            return Err(err("FORBIDDEN", "the relay is only available to agents"));
+        }
+        if !self.ready_cached() {
+            return Err(err("NOT_READY", "PassManager security check failed, the vault stays locked."));
+        }
+        let inner = self.inner.lock().await;
+        let v = inner.vault.as_ref().ok_or_else(|| self.locked_err())?;
+        let r = relay::prepare(&v.payload, &self.relay_runs, run, method, path, headers, inner.redactor.clone());
+        if let Err(e) = &r {
+            log(&format!("relay refused: method={} last={} code={}", method.to_ascii_uppercase(), relay::last_segment(path), e.code));
+        }
+        r
+    }
+
+    /// 当前的脱敏器（给 Agent 的错误信息用）。
+    pub(crate) async fn agent_redactor(&self) -> Arc<Redactor> {
+        self.inner.lock().await.redactor.clone()
+    }
+
+    /// 中继结束：记录日志与首次看到的自签证书指纹。
+    pub(crate) async fn relay_finish(&self, out: relay::Outcome) {
+        log(&out.line);
+        if let Some((hp, fp)) = out.observed_pin {
+            self.record_pin(PinKind::Https, &hp, "x509-spki", &fp).await;
+        }
     }
 
     /// git 代理结束：记录审计与首次看到的自签证书指纹。
@@ -1461,6 +1588,21 @@ fn pin_kind_str(k: PinKind) -> &'static str {
     match k {
         PinKind::Ssh => "ssh",
         PinKind::Https => "https",
+    }
+}
+
+/// 中继策略给 root 看的样子（请求体规则写回 `json:键=值`）。
+fn relay_view(p: &pm_vault::RelayPolicy) -> RelayPolicyView {
+    RelayPolicyView {
+        entry: p.entry.clone(),
+        allow: p.allow.clone(),
+        auth: p.auth.clone(),
+        require: p.require.iter().flat_map(|r| r.values.iter().map(move |v| format!("json:{}={v}", r.key))).collect(),
+        response_headers: p.response_headers.clone(),
+        max_requests_run: p.max_requests_run,
+        max_bytes_run: p.max_bytes_run,
+        max_requests_day: p.max_requests_day,
+        max_bytes_day: p.max_bytes_day,
     }
 }
 

@@ -246,9 +246,54 @@ mod tests {
         assert!(parse(&["PassManager", "git-proxy", "--uninstall"]).is_ok());
         // run：选项在命令之前；命令之后的参数（包括以 - 开头的）都属于命令
         match parse(&["PassManager", "run", "--host", "h", "git", "push", "--force", "--host", "x"]).unwrap().cmd {
-            Some(crate::Cmd::Run { hosts, command }) => assert!(hosts == ["h"] && command == ["git", "push", "--force", "--host", "x"]),
+            Some(crate::Cmd::Run { hosts, http, command, .. }) => {
+                assert!(hosts == ["h"] && http.is_empty() && command == ["git", "push", "--force", "--host", "x"])
+            }
             _ => panic!("run"),
         }
+        // run --http：中继选项也在命令之前；命令自己的 --http 属于命令
+        let args = [
+            "PassManager",
+            "run",
+            "--http",
+            "https://openrouter.ai",
+            "--env-url",
+            "OPENAI_BASE_URL=/api/v1",
+            "--env-key",
+            "OPENAI_API_KEY",
+            "--max-requests",
+            "5",
+            "--require",
+            "json:model=m",
+            "curl",
+            "--http",
+            "x",
+        ];
+        match parse(&args).unwrap().cmd {
+            Some(crate::Cmd::Run { http, env_url, env_key, max_requests, max_bytes, require, command, .. }) => {
+                assert_eq!(
+                    (http, env_url, env_key),
+                    (
+                        vec!["https://openrouter.ai".to_string()],
+                        vec!["OPENAI_BASE_URL=/api/v1".to_string()],
+                        vec!["OPENAI_API_KEY".to_string()]
+                    )
+                );
+                assert_eq!((max_requests, max_bytes, require), (5, 0, vec!["json:model=m".to_string()]));
+                assert_eq!(command, ["curl", "--http", "x"]);
+            }
+            _ => panic!("run --http"),
+        }
+        // relay set：--allow 必须写，--auth 有默认值
+        match parse(&["PassManager", "relay", "set", "--name", "or", "--allow", "GET /v1/models"]).unwrap().cmd {
+            Some(crate::Cmd::Relay(crate::RelayCmd::Set(o))) => {
+                let v = o.into_view();
+                assert!(v.entry == "or" && v.allow == ["GET /v1/models"] && v.auth == "Authorization: Bearer {{secret}}");
+            }
+            _ => panic!("relay set"),
+        }
+        assert!(parse(&["PassManager", "relay", "set", "--name", "or"]).is_err(), "没有 --allow");
+        assert!(parse(&["PassManager", "relay", "remove", "--name", "or"]).is_ok() && parse(&["PassManager", "relay", "list"]).is_ok());
         assert!(parse(&["PassManager", "run"]).is_err(), "run 必须带命令");
         assert!(parse(&["PassManager", "git-proxy", "--install", "--uninstall"]).is_err());
         assert!(parse(&["PassManager", "git-proxy", "--uninstall", "--host", "x"]).is_err());

@@ -123,14 +123,18 @@ fn start_agent(dir: &Path) -> Result<PathBuf, String> {
     Ok(sock)
 }
 
-/// `passmanager run`：`hosts` 为空时用服务器上有 git 用途条目的主机。
-pub fn run(hosts: Vec<String>, command: Vec<String>) -> ExitCode {
+/// `passmanager run`：`hosts` 为空时用服务器上有 git 用途条目的主机；`http` 是 `--http` 中继（见 `http_relay`）。
+pub fn run(hosts: Vec<String>, http: crate::http_relay::Opts, command: Vec<String>) -> ExitCode {
     if crate::remote::load_in(&crate::remote::dir()).is_none() {
         return crate::install::fail("没有远程配置：先运行 passmanager enroll '<注册码>'");
     }
     let Some((program, args)) = command.split_first() else {
         return crate::install::fail("用法：passmanager run <命令> [参数…]，例如 passmanager run git push");
     };
+    // 先检查 --http 的选项：写错时什么都不打开
+    if let Err(e) = crate::http_relay::check(&http) {
+        return crate::install::fail(e);
+    }
     let hosts = if hosts.is_empty() {
         crate::git_service::default_hosts().unwrap_or_else(|e| {
             eprintln!("[PassManager run] 无法取得 git 主机（{e}）：这条命令里的 git 不经 PassManager");
@@ -155,6 +159,19 @@ pub fn run(hosts: Vec<String>, command: Vec<String>) -> ExitCode {
             }
         }
     }
+    let mut relays = Vec::new();
+    if !http.origins.is_empty() {
+        match crate::http_relay::start(&http) {
+            Ok((v, opened)) => {
+                envs.extend(v);
+                relays = opened;
+            }
+            Err(e) => {
+                let _ = std::fs::remove_dir_all(&dir);
+                return crate::install::fail(e);
+            }
+        }
+    }
     let code = match Command::new(program).args(args).envs(envs).spawn() {
         Ok(mut child) => {
             ignore_interrupts();
@@ -166,6 +183,7 @@ pub fn run(hosts: Vec<String>, command: Vec<String>) -> ExitCode {
         }
     };
     let _ = std::fs::remove_dir_all(&dir);
+    crate::http_relay::close(&relays);
     ExitCode::from(code)
 }
 

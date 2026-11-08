@@ -175,8 +175,17 @@ pub fn plan(payload: &pm_vault::Payload, host: &str, port: u16, redactor: Arc<Re
 }
 
 fn tls_config(p: &Plan, observed: Arc<Mutex<Option<String>>>) -> Result<rustls::ClientConfig, ApiErr> {
-    let mut cfg = if p.self_signed {
-        http::pin_tls_config(p.expected_pin.clone(), observed)?
+    client_tls(p.self_signed, p.expected_pin.clone(), observed)
+}
+
+/// 连接上游用的 TLS 配置（git 代理与中继共用）：自签证书按记录的指纹校验，否则用公共 CA；只用 HTTP/1.1。
+pub(crate) fn client_tls(
+    self_signed: bool,
+    expected_pin: Option<String>,
+    observed: Arc<Mutex<Option<String>>>,
+) -> Result<rustls::ClientConfig, ApiErr> {
+    let mut cfg = if self_signed {
+        http::pin_tls_config(expected_pin, observed)?
     } else {
         let mut roots = rustls::RootCertStore::empty();
         roots.add_parsable_certificates(webpki_root_certs::TLS_SERVER_ROOT_CERTS.iter().cloned());

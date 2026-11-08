@@ -42,3 +42,6 @@ entropy	crates/pm-web/src/tang.rs	69da9b8a6e4eb34f	RFC 7638 第 3.1 节公开测
 entropy	crates/pm-web/src/tang.rs	2fc34706e91a2916	RFC 7638 第 3.1 节公开测试向量（该 RSA 密钥的 SHA-256 指纹）
 entropy	crates/pm-web/src/tests.rs	69da9b8a6e4eb34f	RFC 7638 第 3.1 节公开测试向量（RSA 模数）
 entropy	crates/pm-web/src/tests.rs	2fc34706e91a2916	RFC 7638 第 3.1 节公开测试向量（该 RSA 密钥的 SHA-256 指纹）
+entropy	crates/passmanager/tests/relay_e2e.rs	82a7fc7cbdccff55	run --http 端到端测试的假凭据
+entropy	crates/passmanager/tests/relay_e2e.rs	d37933396b2488f1	run --http 端到端测试的请求体标记（证明日志里没有请求体）
+entropy	crates/passmanager/tests/relay_e2e.rs	67017656c345198c	run --http 端到端测试的响应体标记（证明日志里没有响应体）

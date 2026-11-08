@@ -113,6 +113,22 @@ pub(crate) async fn handle_conn<S: AsyncRead + AsyncWrite + Unpin + Send + 'stat
                 }
                 Err(e) => Response::err(&e.code, e.message),
             },
+            // 中继同样是流式的：这条连接交给中继处理，结束后关闭。
+            Ok(Request::Relay { run, method, path, headers }) => match shared.relay_prepare(&session, &run, &method, &path, &headers).await
+            {
+                Ok(plan) => {
+                    if write_frame(&mut s, &serde_json::to_vec(&Response::ok("continue")).unwrap_or_default()).await.is_err() {
+                        return;
+                    }
+                    let out = crate::relay::serve(s, plan).await;
+                    shared.relay_finish(out).await;
+                    return;
+                }
+                Err(e) => {
+                    let red = shared.agent_redactor().await;
+                    Response::err(&e.code, red.redact_str(&e.message))
+                }
+            },
             Ok(req) => shared.dispatch(&session, req).await,
             Err(e) => Response::err("BAD_REQUEST", format!("invalid request: {e}")),
         };

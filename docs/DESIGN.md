@@ -235,7 +235,7 @@ User mode (`install --user`, the fallback without administrator rights) has no a
 
 ## 9. Verification status
 
-CI runs on 6 native GitHub runners: Linux (ubuntu-latest, ubuntu-24.04-arm), macOS (macos-latest = Apple silicon, macos-15-intel), Windows (windows-latest, windows-11-arm).
+CI runs on 6 native GitHub runners: Linux (ubuntu-24.04, ubuntu-24.04-arm; pinned, because on ubuntu-latest = 26.04 the bindgen output of oqs-sys is wrong), macOS (macos-latest = Apple silicon, macos-15-intel), Windows (windows-latest, windows-11-arm).
 
 | Item | Coverage | Status |
 |---|---|---|

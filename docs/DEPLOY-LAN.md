@@ -206,6 +206,53 @@ piece, and text filtering cannot see through a deliberate transformation such as
 hosts that must stay hidden. A vault with aliases is written in a newer format that older versions refuse to open, which
 is deliberate: an older program would ignore the alias. Remove the aliases before rolling back to a version without them.
 
+### 3.1.2 Local programs: `passmanager run --http`
+
+A program on an agent machine (an OpenAI-compatible SDK, a CLI, curl) can call an HTTPS API that needs a credential, for the
+time of one command, without the credential ever reaching that machine. Root on the server gives the credential a relay
+policy; without one it cannot be used this way:
+
+```sh
+passmanager relay set --name openrouter --allow 'POST /api/v1/chat/completions' --allow 'GET /api/v1/models' \
+    --require 'json:model=@preset/gemma31b' --max-requests-day 2000
+passmanager relay list
+passmanager relay remove --name openrouter
+```
+
+On the agent machine:
+
+```sh
+passmanager run --http https://openrouter.ai --env-url OPENAI_BASE_URL=/api/v1 --env-key OPENAI_API_KEY python3 app.py
+```
+
+The program gets `OPENAI_BASE_URL=http://127.0.0.1:<random port>/<one-time token>/api/v1` and a dummy `OPENAI_API_KEY` that is
+useless outside the run. With several `--http` origins write `NAME=<origin>|<path>`; `--max-requests`, `--max-bytes` and
+`--require` narrow the policy for this run only. `lookup` on the API's URL tells agents the exact command.
+
+- **Policy** (set by root, never by the client): allowed `METHOD PATH` rules, either an exact path or a prefix ending in `/*`
+  (no other wildcard); how the credential is sent (`--auth`, default `Authorization: Bearer {{secret}}`); JSON body rules
+  (`json:key=value`; several values for one key mean "one of"; a body with duplicate keys is refused; requests without a body
+  are not checked); ceilings per run and per 24 hours; extra response headers to pass. Paths with a segment such as `keys`,
+  `auth`, `token`, `billing` or `account` are never allowed, whatever the policy says; paths are compared after
+  percent-decoding, and `..` or an encoded `/` is refused.
+- **Each request**: the relay answers 403 without contacting the server when the token is wrong. The server drops any credential
+  the program sent (`Authorization`, `x-api-key`, `x-goog-api-key`, `api-key`, `Cookie`, a `key`/`api_key`/`access_token`
+  query parameter), adds the real one, and takes the host, port and TLS name from the credential's binding. It follows a
+  redirect only within the origin and the policy. A request outside the policy gets 403 and one past a limit 429; the
+  upstream never sees either.
+- **Each answer**: the server asks for `identity` and unpacks gzip/deflate if the upstream compresses anyway (other encodings
+  are refused). Every secret in the vault, in every encoded form, and every alias address is replaced in the status line,
+  headers and body (`[REDACTED:<name>]` or `alias://<name>`). Streams are scanned with a sliding window that holds back only
+  bytes that could start a match, so each server-sent event arrives at once. Only a short list of response headers is passed.
+- **Logs** hold origin, method, last path segment, status, byte counts, duration and the number of replacements; never
+  headers, bodies, tokens or credentials. A request may run 30 minutes; when the program disconnects the server cancels the
+  upstream request within 10 seconds.
+
+Limits, stated plainly: during the run, any process of the same local user that can read the program's environment can use the
+relay, within the policy and the limits; it still cannot read the credential. The 24-hour counters live in the server's memory
+and start again after a restart. A vault with relay policies is written in a newer format; remove the policies before rolling
+back to an older version.
+
 ### 3.2 ssh-agent bridge (agent machine, Linux / macOS)
 
 ```sh

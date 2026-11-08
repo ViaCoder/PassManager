@@ -4,6 +4,27 @@ English | [简体中文](CHANGELOG.zh-CN.md)
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.3.11-rc.10] - 2026-11-08
+
+### Added
+
+- **`passmanager run --http <origin>`: local programs call HTTPS APIs without the credential.** An SDK, CLI or curl gets a
+  loopback URL with a one-time token (`--env-url NAME=/path`) and a dummy key (`--env-key NAME`); each request goes through the
+  server, which checks it against the credential's relay policy, adds the credential and streams the answer back. Server-sent
+  events arrive one by one, a request may run 30 minutes, and the upstream request is cancelled when the program disconnects.
+- **Relay policies** (`passmanager relay set/list/remove`, root): allowed `METHOD PATH` rules (exact, or a prefix ending in
+  `/*`), how the credential is sent, JSON body rules, and ceilings per run and per 24 hours. Paths that manage keys, logins,
+  accounts or billing are never allowed. `--max-requests`, `--max-bytes` and `--require` can only narrow a policy. `lookup`
+  shows the `run --http` command for a credential that has a policy.
+- **Streaming redaction:** answers are redacted with a sliding window that gives the same result as redacting the whole body,
+  in every encoded form, and holds back only bytes that could start a match. Compressed answers are unpacked first.
+
+### Changed
+
+- A vault with relay policies is written in a new format (v4); vaults without them keep the older formats.
+- CI and release builds run on `ubuntu-24.04` instead of `ubuntu-latest`. GitHub moved `ubuntu-latest` to 26.04, where the
+  bindings that `oqs-sys` generates with the system libclang get a wrong struct size and the build fails.
+
 ## [0.3.11-rc.9] - 2026-11-06
 
 ### Fixed

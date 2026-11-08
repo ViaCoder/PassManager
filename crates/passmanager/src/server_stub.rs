@@ -42,6 +42,15 @@ pub fn alias_add(_: String, _: String, _: String) -> ExitCode {
 pub fn alias_remove(_: String) -> ExitCode {
     linux_only()
 }
+pub fn relay_list() -> ExitCode {
+    linux_only()
+}
+pub fn relay_set(_: pm_proto::RelayPolicyView) -> ExitCode {
+    linux_only()
+}
+pub fn relay_remove(_: String) -> ExitCode {
+    linux_only()
+}
 pub fn token_list() -> ExitCode {
     linux_only()
 }

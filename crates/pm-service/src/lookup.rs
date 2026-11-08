@@ -141,6 +141,30 @@ fn http_how(e: &Entry, url_prefix: &str, named: bool) -> String {
     )
 }
 
+/// 条目有中继策略时附在 `how` 后面：本机程序（SDK、CLI）怎样经 `passmanager run --http` 使用它。
+/// 别名的 origin 只列出相对别名基础路径的规则（真实路径不出现）。
+fn relay_how(payload: &Payload, e: &Entry, origin: &str, base: &str) -> String {
+    let Some(p) = payload.relay(&e.name) else { return String::new() };
+    let allow: Vec<String> = p
+        .allow
+        .iter()
+        .filter_map(|a| {
+            let (m, path) = a.split_once(' ')?;
+            let rel = if base.is_empty() { path } else { path.strip_prefix(base).filter(|r| r.starts_with('/'))? };
+            Some(format!("{m} {rel}"))
+        })
+        .collect();
+    if allow.is_empty() {
+        return String::new();
+    }
+    format!(
+        ". A local program (SDK, CLI, curl) uses this credential through: passmanager run --http {origin} \
+         --env-url <BASE_URL_VAR>=<path prefix> --env-key <API_KEY_VAR> <command> - the program gets a local URL and a dummy \
+         key, the server adds the credential; allowed: {}",
+        allow.join(", ")
+    )
+}
+
 fn ssh_how(target: &str, has_password: bool) -> String {
     let sudo = if has_password { "; a command starting with \"sudo \" gets the password automatically" } else { "" };
     format!(
@@ -159,7 +183,7 @@ fn git_how(hp: &str) -> String {
 fn by_alias(payload: &Payload, rest: &str) -> Result<LookupView, ApiErr> {
     let (name, _) = split_alias(rest)?;
     let a = payload.alias(name).ok_or_else(|| err("UNKNOWN_ALIAS", format!("no alias \"{name}\"")))?;
-    let (host, port, _) = pm_vault::alias_parts(&a.url).ok_or_else(|| err("INTERNAL", "stored alias is not valid"))?;
+    let (host, port, base) = pm_vault::alias_parts(&a.url).ok_or_else(|| err("INTERNAL", "stored alias is not valid"))?;
     let prefix = format!("{ALIAS_SCHEME}{name}");
     let e = crate::http::select_by_host(payload, &host, port, OP_HTTP).ok();
     let fields = e.map(field_names).unwrap_or_default();
@@ -175,7 +199,8 @@ fn by_alias(payload: &Payload, rest: &str) -> Result<LookupView, ApiErr> {
         fields,
         how: format!(
             "http {{\"method\":\"GET\",\"url\":\"{prefix}/<path>\"{header}}} - the server fills in the real address; it never appears \
-             in results and that host cannot be used directly"
+             in results and that host cannot be used directly{}",
+            e.map(|e| relay_how(payload, e, &prefix, &base)).unwrap_or_default()
         ),
     })
 }
@@ -238,7 +263,12 @@ fn by_host(payload: &Payload, host: &str, port: u16, use_: Use, name: Option<&st
         Use::Http | Use::Git => {
             let op = if use_ == Use::Http { OP_HTTP } else { OP_GIT };
             let e = crate::http::select(payload, name, host, port, op)?;
-            let how = if use_ == Use::Http { http_how(&e, &format!("https://{hp}"), name.is_some()) } else { git_how(&hp) };
+            let how = if use_ == Use::Http {
+                let origin = format!("https://{hp}");
+                format!("{}{}", http_how(&e, &origin, name.is_some()), relay_how(payload, &e, &origin, ""))
+            } else {
+                git_how(&hp)
+            };
             Ok(LookupView {
                 target: host_port(host, port, 0),
                 use_: use_.as_str().into(),
@@ -524,6 +554,36 @@ mod tests {
         p.entries.push(entry("dup1", "D1", &["dup.example.com"], &[]));
         p.entries.push(entry("dup2", "D2", &["dup.example.com"], &[]));
         p
+    }
+
+    #[test]
+    fn relay_policy_shows_in_how() {
+        let mut p = aliased();
+        let pol = |entry: &str, allow: &[&str]| pm_vault::RelayPolicy {
+            entry: entry.into(),
+            allow: allow.iter().map(|s| s.to_string()).collect(),
+            auth: "authorization: Bearer {{secret}}".into(),
+            require: vec![],
+            response_headers: vec![],
+            max_requests_run: 0,
+            max_bytes_run: 0,
+            max_requests_day: 0,
+            max_bytes_day: 0,
+        };
+        // 没有策略：不提 run --http
+        assert!(!lookup(&p, "https://other.example.com/x", None).unwrap().how.contains("run --http"));
+        p.relay.push(pol("plain", &["POST /v1/chat/completions"]));
+        let v = lookup(&p, "https://other.example.com/x", None).unwrap();
+        assert!(
+            v.how.contains("passmanager run --http https://other.example.com ") && v.how.contains("allowed: POST /v1/chat/completions"),
+            "{}",
+            v.how
+        );
+        // 别名：origin 写别名，规则只列相对基础路径的部分，真实路径不出现
+        p.relay.push(pol("api.example.com", &["GET /v1/models", "GET /other/x"]));
+        let v = lookup(&p, "alias://billing", None).unwrap();
+        assert!(v.how.contains("run --http alias://billing ") && v.how.contains("allowed: GET /models"), "{}", v.how);
+        assert!(!v.how.contains("/v1/models") && !v.how.contains("/other/x") && !v.how.contains("api.example.com"), "{}", v.how);
     }
 
     fn json(v: &LookupView) -> String {

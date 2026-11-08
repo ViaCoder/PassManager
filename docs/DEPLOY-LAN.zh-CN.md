@@ -206,6 +206,44 @@ Agent 在 `http` 里写 `alias://billing/items?q=1`（`lookup alias://billing` �
 有 shell，可以把地址一段段拼出来，文字过滤也看不穿 `rev` 这类有意的变换；必须隐藏的主机，不要给这类 Agent 留路径。
 有别名的库用新格式保存，旧版本打不开，这是有意的：旧程序会忽略别名。回滚到没有别名功能的版本之前，先删除别名。
 
+### 3.1.2 本机程序：`passmanager run --http`
+
+Agent 机器上的程序（OpenAI 兼容的 SDK、CLI、curl）可以在一条命令的时间里调用需要凭据的 HTTPS API，而凭据从不到达那台机器。
+服务器上的 root 先给凭据设中继策略；没有策略的凭据不能这样用：
+
+```sh
+passmanager relay set --name openrouter --allow 'POST /api/v1/chat/completions' --allow 'GET /api/v1/models' \
+    --require 'json:model=@preset/gemma31b' --max-requests-day 2000
+passmanager relay list
+passmanager relay remove --name openrouter
+```
+
+在 Agent 机器上：
+
+```sh
+passmanager run --http https://openrouter.ai --env-url OPENAI_BASE_URL=/api/v1 --env-key OPENAI_API_KEY python3 app.py
+```
+
+程序拿到 `OPENAI_BASE_URL=http://127.0.0.1:<随机端口>/<一次性令牌>/api/v1`，以及一个离开这次运行就没有用的占位
+`OPENAI_API_KEY`。有多个 `--http` 时写 `NAME=<origin>|<路径>`；`--max-requests`、`--max-bytes`、`--require` 只在这次运行里收窄策略。
+对这个 API 的地址做 `lookup`，Agent 就能拿到准确的命令。
+
+- **策略**（由 root 设置，客户端不能设）：允许的 `方法 路径`，要么是精确路径，要么是以 `/*` 结尾的前缀（没有其他通配写法）；
+  凭据怎样发出（`--auth`，默认 `Authorization: Bearer {{secret}}`）；JSON 请求体规则（`json:键=值`，同一个键的多个值表示"之一"；
+  有重复键的请求体一律拒绝；没有请求体的请求不检查）；每次运行与每 24 小时的上限；额外放行的响应头。任何一段是 `keys`、`auth`、
+  `token`、`billing`、`account` 之类的路径永远不放行，策略怎么写都一样；路径先做百分号解码再比较，`..` 与编码的 `/` 一律拒绝。
+- **每个请求**：令牌不对时，中继直接回 403，不联系服务器。服务器丢掉程序发来的任何凭据（`Authorization`、`x-api-key`、
+  `x-goog-api-key`、`api-key`、`Cookie`、`key`/`api_key`/`access_token` 查询参数），加上真实凭据；主机、端口与 TLS 名称来自凭据的
+  绑定。只跟随同源而且仍在策略之内的重定向。策略之外的请求回 403，超过上限回 429，上游都收不到。
+- **每个回答**：服务器要求 `identity`，上游仍压缩时解开 gzip/deflate（其他编码拒绝）。库里的每个密钥（所有编码形式）与每个别名地址
+  都在状态行、响应头与响应体里被替换（`[REDACTED:<名称>]` 或 `alias://<名称>`）。流式数据按滑动窗口处理，只扣住可能是匹配开头的
+  几个字节，所以 SSE 事件立刻到达。响应头只放行一小份白名单。
+- **日志**只记 origin、方法、路径的最后一段、状态、字节数、耗时与替换次数；不记请求头、请求体、令牌或凭据。单个请求最长 30 分钟；
+  程序断开后，服务器在 10 秒内取消上游请求。
+
+实际的边界：运行期间，同一个本机用户下、能读到这个程序环境变量的任何进程都可以在策略与上限之内使用这个中继，但仍然读不到凭据。
+24 小时的计数在服务器内存里，重启后重新开始。有中继策略的库用新格式写入；回滚到旧版本之前先删除策略。
+
 ### 3.2 ssh-agent 桥（Agent 机器，Linux / macOS）
 
 ```sh

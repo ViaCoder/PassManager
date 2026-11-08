@@ -13,6 +13,8 @@ mod agent_instructions;
 mod cli;
 mod git_proxy;
 mod git_service;
+#[cfg(unix)]
+mod http_relay;
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 mod import;
 mod install;
@@ -336,6 +338,9 @@ enum Cmd {
     /// [服务器 root] URL 别名：Agent 只能写 alias://名称，这台主机不能再被直接访问，真实地址不会出现在结果里
     #[command(subcommand)]
     Alias(AliasCmd),
+    /// [服务器 root] 中继策略：本机程序经 passmanager run --http 使用凭据时，服务器只放行策略之内的请求
+    #[command(subcommand)]
+    Relay(RelayCmd),
     /// 显示 Agent 接入说明；服务器上的 root 加 --label 时附带一次性注册码（10 分钟有效，只能使用一次）
     #[command(after_help = "\
 服务器上的 root 加 --label：生成一次性注册码，打印给 AI Agent 的完整接入说明——一行安装命令（安装客户端、注册、
@@ -476,6 +481,8 @@ enroll 已把它装成开机 / 登录时自动启动的用户服务（Linux：sy
   passmanager run git clone https://github.com/<所有者>/<仓库>.git
   passmanager run ssh deploy@db1.example.com       # ssh / scp / rsync / 基于 SSH 的 git：由服务器签名
   passmanager run rsync -a ./site/ deploy@db1.example.com:/srv/site/
+  passmanager run --http https://openrouter.ai --env-url OPENAI_BASE_URL=/api/v1 --env-key OPENAI_API_KEY python3 app.py
+                                                   # 本机程序调用 HTTPS API：服务器按凭据的中继策略带上凭据
 
 不写任何 git 或 ssh 配置，也不需要常驻服务：转发口（随机端口、一次性令牌）和 agent 套接字只在这条命令运行期间存在。
 令牌和私钥从不离开服务器。退出码与命令相同。")]
@@ -483,6 +490,24 @@ enroll 已把它装成开机 / 登录时自动启动的用户服务（Linux：sy
         /// 经 PassManager 的 git 主机（可重复）；默认是服务器上有 git 用途的所有条目的主机
         #[arg(long = "host")]
         hosts: Vec<String>,
+        /// 经服务器中继的 HTTPS API：https://<主机>[:<端口>] 或 alias://<名称>（可重复；凭据要有中继策略）
+        #[arg(long = "http", value_name = "ORIGIN")]
+        http: Vec<String>,
+        /// 告诉程序中继的地址：NAME=/路径（多个 --http 时写 NAME=<origin>|/路径）；可重复
+        #[arg(long = "env-url", value_name = "NAME=PATH")]
+        env_url: Vec<String>,
+        /// 给程序一个没有用的占位密钥，只为让它发出认证头（服务器会丢掉它）；可重复
+        #[arg(long = "env-key", value_name = "NAME")]
+        env_key: Vec<String>,
+        /// 这次运行最多中继多少个请求（只能比策略更严）
+        #[arg(long, default_value_t = 0, hide_default_value = true)]
+        max_requests: u64,
+        /// 这次运行最多传多少字节（请求体加回答；只能比策略更严）
+        #[arg(long, default_value_t = 0, hide_default_value = true)]
+        max_bytes: u64,
+        /// 额外的请求体规则：json:键=值（可重复；同一个键的多条表示"之一"）
+        #[arg(long, value_name = "json:KEY=VALUE")]
+        require: Vec<String>,
         /// 要运行的命令和参数
         #[arg(required = true, trailing_var_arg = true, allow_hyphen_values = true)]
         command: Vec<String>,
@@ -518,6 +543,73 @@ enroll 已把它装成开机 / 登录时自动启动的用户服务（Linux：sy
         source: String,
         destination: String,
     },
+}
+
+#[derive(Subcommand)]
+enum RelayCmd {
+    /// 列出全部中继策略（不含任何密钥）
+    List,
+    /// 新增或替换一个条目的策略
+    #[command(after_help = "\
+示例：
+  passmanager relay set --name openrouter --allow 'POST /api/v1/chat/completions' --allow 'GET /api/v1/models' \\
+      --require 'json:model=@preset/gemma31b' --max-requests-day 2000
+
+规则：允许的请求写成 \"方法 路径\"；路径精确匹配，或以 /* 结尾表示该前缀之下的任意路径。没有其他通配写法。
+管理凭据或账号的路径（任何一段是 keys、auth、token、billing、account 等）永远不放行。上限为 0 表示不限。")]
+    Set(RelaySetOpts),
+    /// 删除一个条目的策略（之后这个凭据不能再经 run --http 使用）
+    Remove {
+        #[arg(long)]
+        name: String,
+    },
+}
+
+#[derive(clap::Args)]
+struct RelaySetOpts {
+    /// 条目的引用名
+    #[arg(long)]
+    name: String,
+    /// 允许的请求："方法 路径"（可重复）
+    #[arg(long = "allow", required = true, value_name = "METHOD PATH")]
+    allow: Vec<String>,
+    /// 凭据怎样发出：头名: 值，值里恰好一个占位符（单值条目写 {{secret}}，多字段条目写 {{字段名}}）
+    #[arg(long, default_value = "Authorization: Bearer {{secret}}")]
+    auth: String,
+    /// 请求体规则：json:键=值（可重复）
+    #[arg(long, value_name = "json:KEY=VALUE")]
+    require: Vec<String>,
+    /// 额外放行给本机程序的响应头名称（可重复）
+    #[arg(long = "response-header", value_name = "NAME")]
+    response_headers: Vec<String>,
+    /// 每次运行最多多少个请求
+    #[arg(long, default_value_t = 0)]
+    max_requests_run: u64,
+    /// 每次运行最多多少字节（请求体加回答）
+    #[arg(long, default_value_t = 0)]
+    max_bytes_run: u64,
+    /// 每 24 小时最多多少个请求（这个凭据的全部运行合计）
+    #[arg(long, default_value_t = 0)]
+    max_requests_day: u64,
+    /// 每 24 小时最多多少字节
+    #[arg(long, default_value_t = 0)]
+    max_bytes_day: u64,
+}
+
+impl RelaySetOpts {
+    fn into_view(self) -> pm_proto::RelayPolicyView {
+        pm_proto::RelayPolicyView {
+            entry: self.name,
+            allow: self.allow,
+            auth: self.auth,
+            require: self.require,
+            response_headers: self.response_headers,
+            max_requests_run: self.max_requests_run,
+            max_bytes_run: self.max_bytes_run,
+            max_requests_day: self.max_requests_day,
+            max_bytes_day: self.max_bytes_day,
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -634,6 +726,9 @@ fn run_cli() -> ExitCode {
         Some(Cmd::Alias(AliasCmd::List)) => server::alias_list(),
         Some(Cmd::Alias(AliasCmd::Add { name, url, note })) => server::alias_add(name, url, note),
         Some(Cmd::Alias(AliasCmd::Remove { name })) => server::alias_remove(name),
+        Some(Cmd::Relay(RelayCmd::List)) => server::relay_list(),
+        Some(Cmd::Relay(RelayCmd::Set(o))) => server::relay_set(o.into_view()),
+        Some(Cmd::Relay(RelayCmd::Remove { name })) => server::relay_remove(name),
         Some(Cmd::Token(TokenCmd::List)) => server::token_list(),
         Some(Cmd::Token(TokenCmd::Revoke { id })) => server::token_revoke(&id),
         Some(Cmd::Status) => server::status(),
@@ -681,14 +776,14 @@ fn run_cli() -> ExitCode {
                 install::fail("ssh-agent 桥目前只支持 Linux / macOS（Unix 套接字）。")
             }
         }
-        Some(Cmd::Run { hosts, command }) => {
+        Some(Cmd::Run { hosts, http, env_url, env_key, max_requests, max_bytes, require, command }) => {
             #[cfg(unix)]
             {
-                run::run(hosts, command)
+                run::run(hosts, http_relay::Opts { origins: http, env_url, env_key, max_requests, max_bytes, require }, command)
             }
             #[cfg(not(unix))]
             {
-                let _ = (hosts, command);
+                let _ = (hosts, http, env_url, env_key, max_requests, max_bytes, require, command);
                 install::fail("passmanager run 目前只支持 Linux / macOS（Unix 套接字）。")
             }
         }

@@ -106,6 +106,9 @@ passmanager show --label laptop                                            # 打
   `passmanager run git push`、`passmanager run ssh deploy@db1`、`passmanager run rsync …`。它开一个本机转发口（随机端口、
   一次性路径令牌，只经 `GIT_CONFIG_*` 环境变量交给 git）和一个临时 agent 套接字（`SSH_AUTH_SOCK`），命令结束就都删除。
   令牌和私钥留在服务器上。Agent 使用规则采用这种方式。
+- **`PassManager run --http <origin>`**（Agent 机器，Unix）：本机程序（OpenAI 兼容的 SDK、CLI、curl）经本机中继调用 HTTPS API；
+  服务器按凭据的中继策略（`passmanager relay set`）检查每个请求、加上凭据，把脱敏后的回答流式送回。见
+  [docs/DEPLOY-LAN.zh-CN.md](docs/DEPLOY-LAN.zh-CN.md) §3.1.2。
 
 - **单端口模式与 IP 允许列表**：`install-server.sh --port 8121` 在一个端口上同时提供网页与 Agent 通道（按 TLS ALPN 分流），
   `--allow "203.0.113.7 2001:db8::/32"` 让额外的地址访问这个端口（但不能访问 SSH）；防火墙与服务使用同一份列表。

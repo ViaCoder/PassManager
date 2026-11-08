@@ -144,8 +144,40 @@ pub enum Request {
         #[serde(default)]
         headers: Vec<(String, String)>,
     },
+    /// `passmanager run --http`：为这次运行打开一个中继。服务器按 `origin` 找到凭据和它的策略，返回运行编号；
+    /// 三个上限只能收窄策略（0 表示沿用策略），`require` 是额外的请求体规则（`json:键=值`）。
+    RelayOpen {
+        origin: String,
+        #[serde(default)]
+        max_requests: u64,
+        #[serde(default)]
+        max_bytes: u64,
+        #[serde(default)]
+        require: Vec<String>,
+    },
+    /// 中继一个请求（流式，见 `Client::relay`）。`path` 是 origin 之后的路径，含查询串。
+    Relay {
+        run: String,
+        method: String,
+        path: String,
+        #[serde(default)]
+        headers: Vec<(String, String)>,
+    },
+    /// 运行结束：作废运行编号。
+    RelayClose {
+        run: String,
+    },
     // ---- 管理类（口令会话） ----
     Entries,
+    /// 中继策略（root）。
+    RelayPolicies,
+    /// 新增或替换一个条目的中继策略。
+    PutRelayPolicy {
+        policy: RelayPolicyView,
+    },
+    DeleteRelayPolicy {
+        entry: String,
+    },
     /// URL 别名（只给管理员：Agent 看不到真实地址，也不能列出别名）。
     Aliases,
     /// 新增或替换别名。
@@ -244,6 +276,9 @@ impl Request {
                 | Request::AgentKeys
                 | Request::AgentSign { .. }
                 | Request::GitProxy { .. }
+                | Request::RelayOpen { .. }
+                | Request::Relay { .. }
+                | Request::RelayClose { .. }
         )
     }
 }
@@ -327,6 +362,40 @@ pub struct GitHead {
 
 /// git 代理的帧大小（请求体与响应体都按这个大小分帧）。
 pub const GIT_CHUNK: usize = 64 * 1024;
+
+/// 中继策略（root 查看与设置；`require` 每条写成 `json:键=值`）。上限为 0 表示不限。
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq)]
+pub struct RelayPolicyView {
+    pub entry: String,
+    pub allow: Vec<String>,
+    pub auth: String,
+    #[serde(default)]
+    pub require: Vec<String>,
+    #[serde(default)]
+    pub response_headers: Vec<String>,
+    #[serde(default)]
+    pub max_requests_run: u64,
+    #[serde(default)]
+    pub max_bytes_run: u64,
+    #[serde(default)]
+    pub max_requests_day: u64,
+    #[serde(default)]
+    pub max_bytes_day: u64,
+}
+
+/// 打开的中继：运行编号（只在这次运行有效），以及给日志用的 origin 写法（别名时是 `alias://名称`）。
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct RelayRunView {
+    pub run: String,
+    pub origin: String,
+}
+
+/// 中继响应的帧类型（每帧第一个字节）：响应头（JSON 的 `GitHead`）、数据、心跳、错误（JSON 的 `Response`）、结束。
+pub const RELAY_HEAD: u8 = b'H';
+pub const RELAY_DATA: u8 = b'D';
+pub const RELAY_KEEPALIVE: u8 = b'K';
+pub const RELAY_ERROR: u8 = b'E';
+pub const RELAY_END: u8 = b'Z';
 
 /// ssh-agent 桥：OpenSSH 的 `session-bind@openssh.com` 绑定信息（base64）。
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
@@ -697,6 +766,58 @@ impl Client {
         }
     }
 
+    /// 中继（流式）：发送请求 → 等服务端确认 → 发送请求体（分帧，空帧结束）→ 读带类型的帧：
+    /// 响应头交给 `on_head`，数据写入 `out` 并立即 flush（SSE 事件不在这里积压），心跳时问一次 `cancelled`
+    /// （本机程序已断开就返回 CANCELLED：连接随之关闭，服务器取消上游请求），错误帧与结束帧结束。
+    pub fn relay(
+        &mut self,
+        req: &Request,
+        body: &mut dyn Read,
+        on_head: &mut dyn FnMut(&GitHead) -> std::io::Result<()>,
+        out: &mut dyn Write,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<(), ApiError> {
+        let dis = |e: std::io::Error| ApiError::new("DISCONNECTED", e.to_string());
+        let parse = |b: &[u8]| serde_json::from_slice::<Response>(b).map_err(|e| ApiError::new("INTERNAL", e.to_string()));
+        let fail = |r: Response| ApiError::new(r.code.as_deref().unwrap_or("ERROR"), r.message.unwrap_or_default());
+        let bytes = serde_json::to_vec(req).map_err(|e| ApiError::new("INTERNAL", e.to_string()))?;
+        write_frame(&mut self.stream, &bytes).map_err(dis)?;
+        let first = parse(&read_frame(&mut self.stream).map_err(dis)?)?;
+        if !first.ok {
+            return Err(fail(first));
+        }
+        let mut buf = vec![0u8; GIT_CHUNK];
+        loop {
+            let n = body.read(&mut buf).map_err(|e| ApiError::new("BAD_REQUEST", format!("reading request body: {e}")))?;
+            if n == 0 {
+                break;
+            }
+            write_frame(&mut self.stream, &buf[..n]).map_err(dis)?;
+        }
+        write_frame(&mut self.stream, &[]).map_err(dis)?;
+        loop {
+            let f = read_frame(&mut self.stream).map_err(dis)?;
+            if cancelled() {
+                return Err(ApiError::new("CANCELLED", "the local program disconnected"));
+            }
+            let (kind, rest) = f.split_first().ok_or_else(|| ApiError::new("INTERNAL", "empty relay frame"))?;
+            match *kind {
+                RELAY_KEEPALIVE => {}
+                RELAY_HEAD => {
+                    let head: GitHead = serde_json::from_slice(rest).map_err(|e| ApiError::new("INTERNAL", e.to_string()))?;
+                    on_head(&head).map_err(dis)?;
+                }
+                RELAY_DATA => {
+                    out.write_all(rest).map_err(dis)?;
+                    out.flush().map_err(dis)?;
+                }
+                RELAY_ERROR => return Err(fail(parse(rest)?)),
+                RELAY_END => return Ok(()),
+                _ => return Err(ApiError::new("INTERNAL", "unknown relay frame")),
+            }
+        }
+    }
+
     /// 调用并反序列化为具体类型。
     pub fn call_as<T: for<'de> Deserialize<'de>>(&mut self, req: &Request) -> Result<T, ApiError> {
         let v = self.call(req)?;
@@ -772,5 +893,66 @@ mod tests {
         // 服务端静默断开（读到 EOF）。
         let p = Pipe { input: std::io::Cursor::new(vec![]), output: vec![] };
         assert!(Client::enroll_stream(p, "code", "h").is_err());
+    }
+
+    /// 一帧：类型字节 + 内容。
+    fn typed(kind: u8, body: &[u8]) -> Vec<u8> {
+        let mut v = ((body.len() + 1) as u32).to_be_bytes().to_vec();
+        v.push(kind);
+        v.extend_from_slice(body);
+        v
+    }
+
+    #[test]
+    fn relay_frames() {
+        // 服务端脚本：握手确认、继续、心跳、响应头、两块数据、结束。
+        let script = |tail: Vec<u8>| {
+            let mut v = framed(r#"{"ok":true}"#);
+            v.extend(framed(r#"{"ok":true,"data":"continue"}"#));
+            v.extend(tail);
+            v
+        };
+        let mut tail = typed(RELAY_KEEPALIVE, b"");
+        tail.extend(typed(RELAY_HEAD, br#"{"status":200,"headers":[["content-type","text/event-stream"]]}"#));
+        tail.extend(typed(RELAY_DATA, b"data: 1\n\n"));
+        tail.extend(typed(RELAY_DATA, b"data: 2\n\n"));
+        tail.extend(typed(RELAY_END, b""));
+        let pipe = Pipe { input: std::io::Cursor::new(script(tail)), output: vec![] };
+        let mut c = Client::connect_stream(pipe, &Hello::Root { v: 1 }).unwrap();
+        let req = Request::Relay { run: "r".into(), method: "POST".into(), path: "/v1/x".into(), headers: vec![] };
+        let (mut status, mut out) = (0u16, Vec::new());
+        c.relay(
+            &req,
+            &mut &b"{}"[..],
+            &mut |h| {
+                status = h.status;
+                Ok(())
+            },
+            &mut out,
+            &|| false,
+        )
+        .unwrap();
+        assert_eq!((status, out.as_slice()), (200, &b"data: 1\n\ndata: 2\n\n"[..]));
+
+        // 响应头之前的错误帧：返回服务器的错误码。
+        let tail = typed(RELAY_ERROR, br#"{"ok":false,"code":"RATE_LIMIT","message":"max requests"}"#);
+        let pipe = Pipe { input: std::io::Cursor::new(script(tail)), output: vec![] };
+        let mut c = Client::connect_stream(pipe, &Hello::Root { v: 1 }).unwrap();
+        let e = c.relay(&req, &mut &b""[..], &mut |_| Ok(()), &mut Vec::new(), &|| false).unwrap_err();
+        assert_eq!(e.code, "RATE_LIMIT");
+
+        // 本机程序已断开：下一帧（心跳）时返回 CANCELLED。
+        let mut tail = typed(RELAY_KEEPALIVE, b"");
+        tail.extend(typed(RELAY_END, b""));
+        let pipe = Pipe { input: std::io::Cursor::new(script(tail)), output: vec![] };
+        let mut c = Client::connect_stream(pipe, &Hello::Root { v: 1 }).unwrap();
+        assert_eq!(c.relay(&req, &mut &b""[..], &mut |_| Ok(()), &mut Vec::new(), &|| true).unwrap_err().code, "CANCELLED");
+
+        // 服务端拒绝请求本身（第一帧就是错误）。
+        let mut v = framed(r#"{"ok":true}"#);
+        v.extend(framed(r#"{"ok":false,"code":"FORBIDDEN","message":"no"}"#));
+        let mut c = Client::connect_stream(Pipe { input: std::io::Cursor::new(v), output: vec![] }, &Hello::Root { v: 1 }).unwrap();
+        assert_eq!(c.relay(&req, &mut &b""[..], &mut |_| Ok(()), &mut Vec::new(), &|| false).unwrap_err().code, "FORBIDDEN");
+        assert!(req.is_usage() && Request::RelayClose { run: "r".into() }.is_usage() && !Request::RelayPolicies.is_usage());
     }
 }

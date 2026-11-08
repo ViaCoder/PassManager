@@ -383,7 +383,22 @@ pub struct PayloadV2 {
 
 impl From<PayloadV2> for Payload {
     fn from(p: PayloadV2) -> Self {
-        Self { entries: p.entries, pins: p.pins, settings: p.settings, aliases: Vec::new() }
+        Self { entries: p.entries, pins: p.pins, settings: p.settings, aliases: Vec::new(), relay: Vec::new() }
+    }
+}
+
+/// v3 载荷（0.3.11-rc.6 起，有别名时写入），只用于读取：比 v2 多了别名。
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct PayloadV3 {
+    pub entries: Vec<Entry>,
+    pub pins: Vec<Pin>,
+    pub settings: Settings,
+    pub aliases: Vec<Alias>,
+}
+
+impl From<PayloadV3> for Payload {
+    fn from(p: PayloadV3) -> Self {
+        Self { entries: p.entries, pins: p.pins, settings: p.settings, aliases: p.aliases, relay: Vec::new() }
     }
 }
 
@@ -403,7 +418,13 @@ impl std::fmt::Debug for EntryV1 {
 
 impl From<PayloadV1> for Payload {
     fn from(p: PayloadV1) -> Self {
-        Self { entries: p.entries.into_iter().map(Entry::from).collect(), pins: p.pins, settings: p.settings, aliases: Vec::new() }
+        Self {
+            entries: p.entries.into_iter().map(Entry::from).collect(),
+            pins: p.pins,
+            settings: p.settings,
+            aliases: Vec::new(),
+            relay: Vec::new(),
+        }
     }
 }
 
@@ -414,9 +435,16 @@ pub struct Payload {
     pub pins: Vec<Pin>,
     pub settings: Settings,
     pub aliases: Vec<Alias>,
+    /// `passmanager run --http` 的凭据策略（每个条目最多一份）。v4 新增。
+    pub relay: Vec<crate::relay::RelayPolicy>,
 }
 
 impl Payload {
+    /// 条目的中继策略。
+    pub fn relay(&self, entry: &str) -> Option<&crate::relay::RelayPolicy> {
+        self.relay.iter().find(|p| p.entry == entry)
+    }
+
     pub fn entry(&self, name: &str) -> Option<&Entry> {
         self.entries.iter().find(|e| e.name == name)
     }

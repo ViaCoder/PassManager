@@ -16,6 +16,56 @@ pub struct Redactor {
     /// 别名的真实地址与主机（不区分大小写：主机名大小写不敏感，服务器常把它原样或改写后回显）。
     alias_ac: Option<AhoCorasick>,
     alias_replacements: Vec<String>,
+    /// 流式脱敏用：全部模式（排序后）及其首字节，用来判断数据末尾是否可能是某个模式的开头。
+    prefixes: Prefixes,
+    alias_prefixes: Prefixes,
+}
+
+/// 排好序的模式，回答"这段字节是不是某个模式的开头"。
+#[derive(Default)]
+struct Prefixes {
+    sorted: Vec<Vec<u8>>,
+    first: Vec<bool>,
+    max: usize,
+    /// 不区分大小写（别名）：模式与被查的字节都转成小写。
+    ci: bool,
+}
+
+impl Prefixes {
+    fn new(patterns: &[Vec<u8>], ci: bool) -> Self {
+        let mut sorted: Vec<Vec<u8>> = patterns.iter().map(|p| if ci { p.to_ascii_lowercase() } else { p.clone() }).collect();
+        sorted.sort();
+        sorted.dedup();
+        let mut first = vec![false; 256];
+        for p in &sorted {
+            first[p[0] as usize] = true;
+        }
+        let max = sorted.iter().map(Vec::len).max().unwrap_or(0);
+        Self { sorted, first, max, ci }
+    }
+
+    /// `buf` 末尾最长的、恰好是某个模式开头的那一段有多长（最多比最长的模式短一个字节）。
+    /// 这一段之前的字节不可能再属于一个还没出现完整的匹配，可以放心送出。
+    fn hold(&self, buf: &[u8]) -> usize {
+        let lim = self.max.saturating_sub(1).min(buf.len());
+        if lim == 0 {
+            return 0;
+        }
+        let tail = &buf[buf.len() - lim..];
+        let tail = if self.ci { tail.to_ascii_lowercase() } else { tail.to_vec() };
+        for k in (1..=lim).rev() {
+            let s = &tail[lim - k..];
+            if !self.first[s[0] as usize] {
+                continue;
+            }
+            // 排序后第一个不小于 s 的模式：如果有以 s 开头的模式，它就是其中之一
+            let i = self.sorted.partition_point(|p| p.as_slice() < s);
+            if self.sorted.get(i).is_some_and(|p| p.starts_with(s)) {
+                return k;
+            }
+        }
+        0
+    }
 }
 
 fn push(out: &mut Vec<Vec<u8>>, v: Vec<u8>) {
@@ -126,7 +176,14 @@ fn lower_hex_escapes(s: &str) -> String {
 
 impl Redactor {
     pub fn empty() -> Self {
-        Self { ac: None, replacements: vec![], alias_ac: None, alias_replacements: vec![] }
+        Self {
+            ac: None,
+            replacements: vec![],
+            alias_ac: None,
+            alias_replacements: vec![],
+            prefixes: Prefixes::default(),
+            alias_prefixes: Prefixes::default(),
+        }
     }
 
     pub fn build<'a>(secrets: impl IntoIterator<Item = (&'a str, &'a str)>) -> Self {
@@ -150,7 +207,7 @@ impl Redactor {
             b.kind(Some(aho_corasick::AhoCorasickKind::ContiguousNFA));
         }
         let ac = b.build(&patterns).ok();
-        Self { ac, replacements, ..Self::empty() }
+        Self { ac, replacements, prefixes: Prefixes::new(&patterns, false), ..Self::empty() }
     }
 
     /// 加上别名：结果里的真实地址（URL、`主机:端口`、`主机/路径`、主机，以及它们的编码形式）都换成 `alias://名称`。
@@ -176,6 +233,7 @@ impl Redactor {
             b.match_kind(MatchKind::LeftmostLongest).ascii_case_insensitive(true);
             self.alias_ac = b.build(&patterns).ok();
             self.alias_replacements = replacements;
+            self.alias_prefixes = Prefixes::new(&patterns, true);
         }
         self
     }
@@ -205,6 +263,71 @@ impl Redactor {
     pub fn redact_str(&self, s: &str) -> String {
         String::from_utf8_lossy(&self.redact(s.as_bytes()).0).into_owned()
     }
+}
+
+/// 流式脱敏：数据一块一块地进来，结果与对整段数据调用 [`Redactor::redact`] 完全相同；
+/// 每一轮只扣住末尾"可能是某个模式开头"的几个字节，所以 SSE 事件（以空行结尾）会立刻送出，不等下一块。
+pub struct StreamRedact {
+    r: std::sync::Arc<Redactor>,
+    /// 两轮（密钥、别名）各自扣住的尾巴。
+    tails: [Vec<u8>; 2],
+    /// 已替换的次数。
+    pub count: usize,
+}
+
+impl StreamRedact {
+    pub fn new(r: std::sync::Arc<Redactor>) -> Self {
+        Self { r, tails: [Vec::new(), Vec::new()], count: 0 }
+    }
+
+    /// 送入一块数据，返回现在就可以发出的脱敏结果。
+    pub fn feed(&mut self, chunk: &[u8]) -> Vec<u8> {
+        self.run(chunk, false)
+    }
+
+    /// 数据结束：把扣住的尾巴也处理完。
+    pub fn finish(&mut self) -> Vec<u8> {
+        self.run(&[], true)
+    }
+
+    fn run(&mut self, chunk: &[u8], last: bool) -> Vec<u8> {
+        let r = self.r.clone();
+        let [t0, t1] = &mut self.tails;
+        let a = step(&r.ac, &r.replacements, &r.prefixes, t0, chunk, last, &mut self.count);
+        step(&r.alias_ac, &r.alias_replacements, &r.alias_prefixes, t1, &a, last, &mut self.count)
+    }
+}
+
+/// 一轮流式替换：`tail` 是上次扣住的字节。返回可以发出的部分，新的尾巴留在 `tail` 里。
+fn step(
+    ac: &Option<AhoCorasick>,
+    reps: &[String],
+    pre: &Prefixes,
+    tail: &mut Vec<u8>,
+    chunk: &[u8],
+    last: bool,
+    count: &mut usize,
+) -> Vec<u8> {
+    let Some(ac) = ac else { return chunk.to_vec() };
+    let mut buf = std::mem::take(tail);
+    buf.extend_from_slice(chunk);
+    // cut 之前开始的匹配都已经确定（不会因为后面的数据变长），cut 之后的留到下一块
+    let cut = if last { buf.len() } else { buf.len() - pre.hold(&buf) };
+    let mut out = Vec::with_capacity(buf.len());
+    let mut pos = 0;
+    for m in ac.find_iter(&buf) {
+        if m.start() >= cut {
+            break;
+        }
+        out.extend_from_slice(&buf[pos..m.start()]);
+        out.extend_from_slice(reps[m.pattern().as_usize()].as_bytes());
+        pos = m.end();
+        *count += 1;
+    }
+    let keep = pos.max(cut);
+    out.extend_from_slice(&buf[pos..keep]);
+    *tail = buf[keep..].to_vec();
+    out
 }
 
 #[cfg(test)]
@@ -282,6 +405,56 @@ mod tests {
         let (out, n) = r.redact(b"nothing here");
         assert_eq!(n, 0);
         assert_eq!(out, b"nothing here");
+    }
+
+    /// 把 `data` 在每个字节位置切成两块（以及逐字节）送入流式脱敏，结果都必须与整段脱敏相同。
+    fn stream_equals_batch(r: &std::sync::Arc<Redactor>, data: &[u8]) {
+        let (want, n) = r.redact(data);
+        for cut in 0..=data.len() {
+            let mut s = StreamRedact::new(r.clone());
+            let mut got = s.feed(&data[..cut]);
+            got.extend(s.feed(&data[cut..]));
+            got.extend(s.finish());
+            assert_eq!((String::from_utf8_lossy(&got), s.count), (String::from_utf8_lossy(&want), n), "cut at {cut}");
+        }
+        let mut s = StreamRedact::new(r.clone());
+        let mut got = Vec::new();
+        for b in data {
+            got.extend(s.feed(std::slice::from_ref(b)));
+        }
+        got.extend(s.finish());
+        assert_eq!(got, want, "byte by byte");
+    }
+
+    #[test]
+    fn streaming_matches_batch_at_every_split() {
+        let secret = "sk-or-v1-0123456789abcdef";
+        let alias = pm_vault::Alias { name: "llm".into(), url: "https://api.example.com/v1".into(), note: String::new() };
+        let r = std::sync::Arc::new(Redactor::build([("or", secret)]).with_aliases(&[alias]));
+        let b64 = STANDARD.encode(format!("Bearer {secret}"));
+        let url = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(secret);
+        let pct = percent_encoding::utf8_percent_encode(secret, percent_encoding::NON_ALPHANUMERIC).to_string();
+        let json = serde_json::to_string(&format!("a\"{secret}")).unwrap();
+        let data = format!("data: {{\"auth\":\"Bearer {secret}\"}}\n\ndata: {b64} {url} {pct} {json} API.Example.com/v1/x\n\n");
+        stream_equals_batch(&r, data.as_bytes());
+        // 没有任何密钥与别名：原样通过，也不扣字节
+        let empty = std::sync::Arc::new(Redactor::empty());
+        let mut s = StreamRedact::new(empty);
+        assert_eq!(s.feed(b"abc"), b"abc");
+    }
+
+    #[test]
+    fn streaming_holds_back_only_possible_prefixes() {
+        let r = std::sync::Arc::new(Redactor::build([("or", "sk-or-v1-0123456789abcdef")]));
+        let mut s = StreamRedact::new(r);
+        // 一个完整的 SSE 事件：末尾的空行不可能是密钥的开头，立刻全部送出
+        assert_eq!(s.feed(b"data: {\"x\":1}\n\n"), b"data: {\"x\":1}\n\n");
+        // 末尾像密钥的开头：只扣住这几个字节
+        assert_eq!(s.feed(b"data: sk-or"), b"data: ");
+        assert_eq!(s.feed(b"-v2\n\n"), b"sk-or-v2\n\n", "不是密钥：补齐后送出");
+        assert_eq!(s.feed(b"x sk-or-v1-0123456789abcdef y"), b"x [REDACTED:or] y");
+        assert_eq!(s.count, 1);
+        assert!(s.finish().is_empty());
     }
 
     #[test]

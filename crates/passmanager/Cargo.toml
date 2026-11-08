@@ -46,3 +46,5 @@ russh = "0.64"
 russh-sftp = "3"
 rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std", "tls12"] }
 rcgen = "0.14"
+flate2 = "1"
+percent-encoding = "2"
