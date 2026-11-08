@@ -31,7 +31,25 @@ impl Backend for Mock {
                 return Resp::err("LOCKED", "locked");
             }
             match req {
-                Req::Entries => Resp::ok(self.entries.lock().unwrap().iter().map(|(e, _, _)| e.clone()).collect::<Vec<_>>()),
+                // 摘要在返回时现算（与服务端一样只露一小段），更新之后也是对的
+                Req::Entries => Resp::ok(
+                    self.entries
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .map(|(e, sec, fs)| EntryView {
+                            summary: if e.kind == "password" { fake_summary(sec) } else { String::new() },
+                            field_summaries: fs.iter().map(|(_, v)| fake_summary(v)).collect(),
+                            ..e.clone()
+                        })
+                        .collect::<Vec<_>>(),
+                ),
+                Req::ShowEntry { name } => match self.entries.lock().unwrap().iter().find(|(e, _, _)| e.name == name) {
+                    Some((e, sec, fs)) => {
+                        Resp::ok(pm_proto::ShownEntry { secret: (e.kind != "fields").then(|| sec.clone()), fields: fs.clone() })
+                    }
+                    None => Resp::err("UNKNOWN_CREDENTIAL", "条目不存在"),
+                },
                 Req::AddEntry { entry } => {
                     if entry.domains.iter().any(|d| d == "*.com") {
                         return Resp::err("BAD_REQUEST", "通配符的基础域名不能是公共后缀");
@@ -62,6 +80,8 @@ impl Backend for Mock {
                         host_keys: entry.host_keys.clone().unwrap_or_default(),
                         ops: entry.ops.clone().unwrap_or_default(),
                         alias: entry.alias.clone().unwrap_or_default(),
+                        summary: String::new(),
+                        field_summaries: vec![],
                     };
                     self.entries.lock().unwrap().push((v, entry.secret.unwrap_or_default(), fields));
                     Resp::ok("added")
@@ -227,6 +247,13 @@ async fn send(st: &St, method: Method, uri: &str, cookie: Option<&str>, form: Op
     let headers = r.headers().clone();
     let bytes = r.into_body().collect().await.unwrap().to_bytes();
     Resp2 { status, headers, body: String::from_utf8_lossy(&bytes).into_owned() }
+}
+
+/// 测试用的摘要：最后 4 个字符与长度（形状与服务端相同，足够检查"显示摘要、不显示全文"）。
+fn fake_summary(v: &str) -> String {
+    let c: Vec<char> = v.chars().collect();
+    let tail: String = c[c.len().saturating_sub(4)..].iter().collect();
+    format!("…{tail}（{} 字符）", c.len())
 }
 
 fn enc(s: &str) -> String {
@@ -489,7 +516,8 @@ async fn security_headers_host_check_and_body_limit() {
     ] {
         assert!(r.headers.contains_key(h), "{h}");
     }
-    assert!(!r.body.contains("<script"), "页面没有任何脚本");
+    assert_eq!(r.body.matches("<script").count(), 1, "登录页只有轮询脚本");
+    assert!(r.body.contains(&format!("<script>{POLL_JS}</script>")));
     // Host 不对（DNS 重绑定）。
     let req = axum::http::Request::builder().uri("/login").header("host", "evil.example").body(Body::empty()).unwrap();
     assert_eq!(router(st.clone()).oneshot(req).await.unwrap().status(), StatusCode::FORBIDDEN);
@@ -762,6 +790,8 @@ fn every_template_escapes_injected_values() {
         .collect();
     for (name, ctx) in cases {
         let out = env.get_template(name).unwrap().render(sv(&ctx)).unwrap_or_else(|e| panic!("{name}: {e:#}"));
+        // 登录页与关闭页各自那一段固定脚本是允许的（测试上下文里没有传入时为空标签）
+        let out = out.replacen("<script></script>", "", 1);
         for bad in ["<script>", "<svg/onload", "\"><script", "' onfocus", "\" onfocus", "x=\"javascript:", "href=\"javascript:"] {
             assert!(!out.contains(bad), "{name} 出现未转义的 {bad:?}");
         }
@@ -869,6 +899,20 @@ fn assets_are_offline_and_script_free() {
     assert!(files.iter().any(|(n, _)| *n == "/static/style.css") && files.iter().any(|(n, _)| *n == "/static/icon.svg"));
     for (name, src) in files {
         let l = src.to_ascii_lowercase();
+        // 唯一的例外：登录页的轮询脚本与关闭页的关闭脚本，各一处、内容来自代码里的常量（CSP 按哈希放行）。
+        let allowed = match name {
+            "login.html" => Some("<script>{{ poll_js }}</script>"),
+            "continued.html" => Some("<script>{{ close_js }}</script>"),
+            _ => None,
+        };
+        let l = match allowed {
+            Some(tag) => {
+                assert_eq!(l.matches("<script").count(), 1, "{name} 只能有一处脚本");
+                assert_eq!(l.matches(tag).count(), 1, "{name} 的脚本只能是 {tag}");
+                l.replacen(tag, "", 1)
+            }
+            None => l,
+        };
         // 独立 SVG 文件必需的命名空间声明只是标识符，不会被请求；只允许在 favicon 里出现这一处。
         let l = if name == "/static/icon.svg" {
             assert_eq!(l.matches("xmlns=").count(), 1);
@@ -958,8 +1002,19 @@ async fn favicon_is_same_origin_and_csp_is_unchanged() {
         assert!(!CSP.contains(bad), "{bad}");
     }
     let (st, _) = state();
+    let other = send(&st, Method::GET, "/l/no-such-link", None, None, &[]).await;
+    assert_eq!(other.headers.get("content-security-policy").unwrap(), CSP, "普通页面的 CSP 不变");
     let page = send(&st, Method::GET, "/login", None, None, &[]).await;
-    assert_eq!(page.headers.get("content-security-policy").unwrap(), CSP);
+    let csp = page.headers.get("content-security-policy").unwrap().to_str().unwrap().to_string();
+    let extra = csp.strip_prefix(CSP).unwrap();
+    assert_eq!(
+        extra,
+        format!("; script-src 'sha256-{}'; connect-src 'self'", {
+            use base64::Engine;
+            base64::engine::general_purpose::STANDARD.encode(pm_crypto::sha256(POLL_JS.as_bytes()))
+        }),
+        "登录页只按哈希放行那一段脚本"
+    );
     assert!(
         page.body.contains(&format!(
             r#"<link rel="icon" href="/static/icon.svg?v={}" type="image/svg+xml">"#,
@@ -1385,8 +1440,8 @@ async fn one_click_link_logs_in_on_get_only_once() {
     let r = send(&st, Method::GET, &format!("/l/{t}"), None, None, &[]).await;
     assert_eq!(r.status, StatusCode::OK);
     // 不是 302：Cookie 是 SameSite=Strict，要先回到本站的页面再跳转。
-    assert_eq!(r.headers.get(header::REFRESH).map(|v| v.to_str().unwrap().to_string()).as_deref(), Some("0; url=/"));
-    assert!(r.body.contains("href=\"/\""), "没有自动跳转时也能点进去：{}", r.body);
+    assert_eq!(r.headers.get(header::REFRESH).map(|v| v.to_str().unwrap().to_string()).as_deref(), Some("0; url=/continue"));
+    assert!(r.body.contains("href=\"/continue\""), "没有自动跳转时也能点进去：{}", r.body);
     let cookie = r.headers.get(header::SET_COOKIE).unwrap().to_str().unwrap().to_string();
     assert!(cookie.contains("HttpOnly") && cookie.contains("SameSite=Strict"), "{cookie}");
     let c = cookie.split(';').next().unwrap().split_once('=').unwrap().1.to_string();
@@ -1421,4 +1476,189 @@ async fn login_page_helps_when_not_logged_in() {
     );
     // 失效链接的说明指向一键登录。
     assert!(send(&st, Method::GET, "/l/nope", None, None, &[]).await.body.contains("一键登录"));
+}
+
+/// 批量输入框的解析：= 与 : 都可以，值里可以再有分隔符；空行与注释忽略；错误只说第几行，不含值。
+#[test]
+fn batch_lines() {
+    let ok = parse_batch("username=deploy\r\n\n# 注释\n base_url: https://api.example.com/v1?a=b \npassword = p=a:ss").unwrap();
+    assert_eq!(
+        ok,
+        vec![
+            ("username".to_string(), "deploy".to_string()),
+            ("base_url".to_string(), "https://api.example.com/v1?a=b".to_string()),
+            ("password".to_string(), "p=a:ss".to_string()),
+        ]
+    );
+    assert!(parse_batch("").unwrap().is_empty());
+    for (text, want) in [
+        ("only-a-name", "第 1 行没有 = 或 :"),
+        ("a=1\n=x", "第 2 行缺少字段名"),
+        ("a=1\nb=", "第 2 行（b）没有值"),
+        ("a=1\na=2", "第 2 行：字段 a 重复"),
+    ] {
+        let e = parse_batch(text).unwrap_err();
+        assert!(e.starts_with(want), "{text}: {e}");
+    }
+    let e = parse_batch("token=sk-SECRET-VALUE\ntoken=sk-SECRET-VALUE").unwrap_err();
+    assert!(!e.contains("SECRET"), "错误信息不含值：{e}");
+    let many: String = (0..65).map(|i| format!("f{i}=v\n")).collect();
+    assert!(parse_batch(&many).unwrap_err().contains("最多 64"));
+}
+
+/// 回到原来位置的路径只能是本站的普通页面；百分号编码只留非保留字符。
+#[test]
+fn next_paths_and_encoding() {
+    for ok in ["/entries", "/entries/gh/edit", "/pins?done=saved"] {
+        assert_eq!(valid_next(ok).as_deref(), Some(ok));
+    }
+    for bad in ["entries", "//evil.example", "/\\evil", "https://evil.example/", "/login", "/login?next=/x", "/l/tok", "/continue", "/a b"]
+    {
+        assert!(valid_next(bad).is_none(), "{bad}");
+    }
+    assert!(valid_next(&format!("/{}", "a".repeat(600))).is_none());
+    assert_eq!(urlenc("/entries/gh/edit?x=1"), "%2Fentries%2Fgh%2Fedit%3Fx%3D1");
+}
+
+/// 摘要与"显示"：列表和编辑页只有摘要；显示要 POST + CSRF，给出这个条目的全部值；GET 不行。
+#[tokio::test]
+async fn summaries_and_show_button() {
+    let (st, mock) = state();
+    let (cookie, csrf) = login(&st).await;
+    let form = format!("csrf={csrf}&name=gh&domains=api.example.com&kind=password&secret={}", enc(SECRET));
+    assert_eq!(send(&st, Method::POST, "/entries", Some(&cookie), Some(&form), &[]).await.status, StatusCode::SEE_OTHER);
+    let sum = fake_summary(SECRET);
+    let list = send(&st, Method::GET, "/entries", Some(&cookie), None, &[]).await;
+    assert!(list.body.contains(&sum) && !list.body.contains(SECRET), "列表只有摘要");
+    let edit = send(&st, Method::GET, "/entries/gh/edit", Some(&cookie), None, &[]).await;
+    assert!(edit.body.contains(&sum) && !edit.body.contains(SECRET) && edit.body.contains("/entries/gh/show"), "编辑页只有摘要与显示按钮");
+    // 没有 CSRF、GET、未登录：都拿不到
+    assert_eq!(send(&st, Method::POST, "/entries/gh/show", Some(&cookie), Some("csrf=nope"), &[]).await.status, StatusCode::FORBIDDEN);
+    assert_eq!(send(&st, Method::GET, "/entries/gh/show", Some(&cookie), None, &[]).await.status, StatusCode::METHOD_NOT_ALLOWED);
+    let anon = send(&st, Method::POST, "/entries/gh/show", None, Some(&format!("csrf={csrf}")), &[]).await;
+    assert!(anon.status == StatusCode::SEE_OTHER && !anon.body.contains(SECRET));
+    // 显示：完整的值在页面里，并有"隐藏"回到摘要；页面不缓存
+    let shown = send(&st, Method::POST, "/entries/gh/show", Some(&cookie), Some(&format!("csrf={csrf}")), &[]).await;
+    assert_eq!(shown.status, StatusCode::OK);
+    assert!(shown.body.contains(SECRET) && shown.body.contains("隐藏"), "显示后有完整的值");
+    assert_eq!(shown.headers.get(header::CACHE_CONTROL).unwrap(), "no-store");
+    // 多字段：批量输入新建；显示给出全部字段
+    let fields = format!(
+        "csrf={csrf}&name=mega&domains=mega.example.com&kind=fields&fields_batch={}",
+        enc("username=user@example.com\npassword: p=a:ss-1234567890")
+    );
+    assert_eq!(send(&st, Method::POST, "/entries", Some(&cookie), Some(&fields), &[]).await.status, StatusCode::SEE_OTHER);
+    assert_eq!(
+        mock.entries.lock().unwrap()[1].2,
+        vec![("username".to_string(), "user@example.com".to_string()), ("password".to_string(), "p=a:ss-1234567890".to_string())]
+    );
+    let edit = send(&st, Method::GET, "/entries/mega/edit", Some(&cookie), None, &[]).await;
+    assert!(edit.body.contains(&fake_summary("p=a:ss-1234567890")) && !edit.body.contains("p=a:ss-1234567890"));
+    assert!(edit.body.contains("name=\"fields_batch\""), "默认就有批量输入框");
+    let shown = send(&st, Method::POST, "/entries/mega/show", Some(&cookie), Some(&format!("csrf={csrf}")), &[]).await;
+    assert!(shown.body.contains("user@example.com") && shown.body.contains("p=a:ss-1234567890"));
+}
+
+/// 批量输入改已有条目：同名字段更新、新名字追加、勾选删除的去掉、没写的保持不变；格式错误时整批不保存，也不回填。
+#[tokio::test]
+async fn batch_box_updates_one_entry_at_once() {
+    let (st, mock) = state();
+    let (cookie, csrf) = login(&st).await;
+    let create =
+        format!("csrf={csrf}&name=db&domains=db.example.com&kind=fields&fields_batch={}", enc("user=app\npassword=old-pass\nhost=db1"));
+    assert_eq!(send(&st, Method::POST, "/entries", Some(&cookie), Some(&create), &[]).await.status, StatusCode::SEE_OTHER);
+    // 已有字段按行提交名称；password 用批量框改，host 勾选删除，再加两个新字段
+    let upd = format!(
+        "csrf={csrf}&name=db&domains=db.example.com&kind=fields&field_name_0=user&field_name_1=password&field_name_2=host&field_remove_2=1&fields_batch={}",
+        enc("password=new-pass\nport=5432\nsslmode: require")
+    );
+    assert_eq!(send(&st, Method::POST, "/entries/db", Some(&cookie), Some(&upd), &[]).await.status, StatusCode::SEE_OTHER);
+    let want: Vec<(String, String)> = [("user", "app"), ("password", "new-pass"), ("port", "5432"), ("sslmode", "require")]
+        .iter()
+        .map(|(a, b)| (a.to_string(), b.to_string()))
+        .collect();
+    assert_eq!(mock.entries.lock().unwrap()[0].2, want);
+    // 格式错误：400，指出第几行，什么都不保存，值不回填
+    let bad = format!(
+        "csrf={csrf}&name=db&domains=db.example.com&kind=fields&field_name_0=user&field_name_1=password&field_name_2=port&field_name_3=sslmode&fields_batch={}",
+        enc("password=SHOULD-NOT-SAVE\nbroken-line")
+    );
+    let r = send(&st, Method::POST, "/entries/db", Some(&cookie), Some(&bad), &[]).await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST);
+    assert!(r.body.contains("第 2 行") && !r.body.contains("SHOULD-NOT-SAVE"), "{}", r.body);
+    assert_eq!(mock.entries.lock().unwrap()[0].2, want, "整批不保存");
+}
+
+/// 登录后只留一个页面：过期页面记住原来的位置；旧页面轮询到登录后回到那里；新页面在旧页面还在时关闭自己。
+#[tokio::test]
+async fn login_returns_to_the_old_page_and_closes_the_new_one() {
+    let (st, _mock) = state();
+    // 会话失效时打开的页面：重定向到登录页，并带上原来的位置
+    let r = send(&st, Method::GET, "/entries/gh/edit", None, None, &[]).await;
+    assert_eq!(r.status, StatusCode::SEE_OTHER);
+    assert_eq!(r.headers.get(header::LOCATION).unwrap(), "/login?next=%2Fentries%2Fgh%2Fedit");
+    assert_eq!(
+        send(&st, Method::POST, "/entries", None, Some("csrf=x"), &[]).await.headers.get(header::LOCATION).unwrap(),
+        "/login",
+        "POST 不记位置"
+    );
+    assert_eq!(send(&st, Method::GET, "/", None, None, &[]).await.headers.get(header::LOCATION).unwrap(), "/login");
+    // 旧页面：登录页设置等待 Cookie，带轮询脚本，CSP 只按哈希放行这一段
+    let page = send(&st, Method::GET, "/login?next=%2Fentries%2Fgh%2Fedit", None, None, &[]).await;
+    let set = page.headers.get(header::SET_COOKIE).unwrap().to_str().unwrap().to_string();
+    assert!(
+        set.starts_with(&format!("{WAIT_COOKIE}="))
+            && set.contains("HttpOnly")
+            && set.contains("SameSite=Strict")
+            && set.contains("Secure")
+    );
+    let wait = set.split(';').next().unwrap().to_string();
+    let csp = page.headers.get(header::CONTENT_SECURITY_POLICY).unwrap().to_str().unwrap().to_string();
+    assert!(csp.starts_with(CSP) && csp.contains("script-src 'sha256-") && !csp.contains("unsafe"), "{csp}");
+    assert!(page.body.contains(&format!("<script>{POLL_JS}</script>")), "脚本原样输出（哈希才对得上）");
+    // 未登录时轮询回答空；带上等待 Cookie 也一样
+    let poll = |cookie: Option<String>| {
+        let st = st.clone();
+        let wait = wait.clone();
+        async move { send(&st, Method::GET, "/login/state", cookie.as_deref(), None, &[("cookie", wait.as_str())]).await.body }
+    };
+    assert_eq!(poll(None).await, "");
+    // 新页面登录（一键链接）→ /continue；旧页面还在轮询，新页面得到关闭页
+    let t = st.links.create_auto();
+    let r = send(&st, Method::GET, &format!("/l/{t}"), None, None, &[]).await;
+    assert_eq!(r.headers.get(header::REFRESH).unwrap(), "0; url=/continue");
+    let sc = r.headers.get(header::SET_COOKIE).unwrap().to_str().unwrap().to_string();
+    let session = sc.split(';').next().unwrap().strip_prefix(&format!("{COOKIE}=")).unwrap().to_string();
+    let cont = send(&st, Method::GET, "/continue", Some(&session), None, &[("cookie", wait.as_str())]).await;
+    assert_eq!(cont.status, StatusCode::OK);
+    assert!(cont.body.contains(&format!("<script>{CLOSE_JS}</script>")), "{}", cont.body);
+    assert!(cont.body.contains("href=\"&#x2f;entries&#x2f;gh&#x2f;edit\""), "{}", cont.body);
+    assert!(cont.headers.get(header::CONTENT_SECURITY_POLICY).unwrap().to_str().unwrap().contains("script-src 'sha256-"));
+    // 旧页面下一次轮询：已登录，回答原来的位置
+    assert_eq!(poll(Some(session.clone())).await, "/entries/gh/edit");
+    // 已登录时打开登录页：直接回到 next
+    let again = send(&st, Method::GET, "/login?next=%2Fpins", Some(&session), None, &[]).await;
+    assert_eq!(again.headers.get(header::LOCATION).unwrap(), "/pins");
+    // 没有旧页面（没有等待 Cookie）：新页面进入首页；未登录访问 /continue 要先登录
+    assert_eq!(send(&st, Method::GET, "/continue", Some(&session), None, &[]).await.headers.get(header::LOCATION).unwrap(), "/");
+    assert_eq!(send(&st, Method::GET, "/continue", None, None, &[]).await.headers.get(header::LOCATION).unwrap(), "/login");
+    // 普通链接（确认后 POST）同样先到 /continue
+    let t = st.links.create();
+    assert_eq!(send(&st, Method::POST, &format!("/l/{t}"), None, Some(""), &[]).await.headers.get(header::LOCATION).unwrap(), "/continue");
+}
+
+/// 旧页面不再轮询（已经关了）时：新页面自己回到旧页面记下的位置，不关闭。
+#[test]
+fn stale_waits_are_not_fresh() {
+    let w = Waits::default();
+    let t0 = Instant::now();
+    w.seen("browser-a", Some("/entries"), t0);
+    assert!(w.fresh("browser-a", t0 + Duration::from_secs(3)));
+    assert!(!w.fresh("browser-a", t0 + WAIT_FRESH + Duration::from_secs(1)));
+    w.seen("browser-a", None, t0 + Duration::from_secs(10));
+    assert_eq!(w.next("browser-a").as_deref(), Some("/entries"), "轮询不改记下的位置");
+    assert!(!w.fresh("browser-b", t0) && w.next("browser-b").is_none());
+    // 过期的记录在下一次写入时清掉
+    w.seen("browser-c", Some("/"), t0 + WAIT_KEEP + Duration::from_secs(20));
+    assert!(w.next("browser-a").is_none());
 }

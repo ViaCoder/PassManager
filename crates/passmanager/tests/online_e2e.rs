@@ -346,6 +346,13 @@ fn lan_server_end_to_end() {
         assert!(!r.body.contains(SECRET) && !r.body.contains("OnlineSecret"), "{p} 泄露了密钥");
     }
     assert!(https(&env, "GET", "/tokens", Some(&cookie), None).body.contains("laptop"));
+    // 编辑页只有摘要（服务端按规则算出）；"显示"要 POST + CSRF，之后才有完整的值
+    let edit = https(&env, "GET", "/entries/echo/edit", Some(&cookie), None);
+    assert!(edit.body.contains("ghp_On…4321（28 字符）") && !edit.body.contains(SECRET), "摘要");
+    assert_eq!(https(&env, "POST", "/entries/echo/show", Some(&cookie), Some("csrf=wrong")).status, 403);
+    let shown = https(&env, "POST", "/entries/echo/show", Some(&cookie), Some(&format!("csrf={csrf}")));
+    assert_eq!(shown.status, 200);
+    assert!(shown.body.contains(&SECRET.replace('/', "&#x2f;")) || shown.body.contains(SECRET), "显示后有完整的值");
 
     // ---- Agent：MCP lookup 与 http（经双层通道），结果脱敏 ----
     let echo = echo_server();

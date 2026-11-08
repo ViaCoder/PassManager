@@ -4,6 +4,28 @@ English | [简体中文](CHANGELOG.zh-CN.md)
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.3.11-rc.12] - 2026-11-08
+
+### Added
+
+- **Web UI: summaries and a Show button.** Stored values are shown as a short summary to tell them apart
+  (`sk-or-…a1b2（48 字符）`; values of 16–23 characters show only the last 4, shorter passwords and multi-line values only the
+  length; SSH keys keep their public key fingerprint). The edit page has a Show button that displays every value of that one
+  entry (POST with CSRF, web sessions only, not cached); the server logs each show with the entry name only. Agents, the local
+  TUI and the root CLI cannot show values.
+- **Web UI: batch box for multi-field entries.** One `name=value` (or `name: value`) per line, as many as needed in one save;
+  an existing name updates that field, new names are added, existing fields can be removed. A malformed line rejects the whole
+  batch, names the line and never echoes values back.
+- **One page after login.** A page whose session expired remembers where it was and polls once every 2 seconds; after the one-time
+  link logs this browser in, it returns there, and the newly opened login tab closes itself (it was opened only through refresh
+  redirects, so the browser lets it close; tested with Chrome 157). Without a waiting page the new tab goes back to the remembered
+  page or the dashboard.
+
+### Changed
+
+- The CSP is no longer the same on every page: the login page and the post-login page each allow their one fixed inline script by
+  its SHA-256 hash (the login page also `connect-src 'self'`). Every other page still has no script.
+
 ## [0.3.11-rc.11] - 2026-11-08
 
 ### Security

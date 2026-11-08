@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+{% block title %}已登录 · PassManager{% endblock %}
+{% block body %}
+<div class="auth">
+  <section class="card auth-card">
+    <div class="auth-icon">{{ icon("check") }}</div>
+    <h1>已在原来的页面继续</h1>
+    <p>原来的页面已经回到登录前的位置，这个标签页会自动关闭。</p>
+    <p class="hint">没有自动关闭时，直接关掉它即可，或者<a href="{{ back }}">在这里继续</a>。</p>
+  </section>
+</div>
+<script>{{ close_js }}</script>
+{% endblock %}

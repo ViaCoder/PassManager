@@ -133,6 +133,8 @@ mod tests {
             host_keys: vec![],
             ops: vec![],
             alias: String::new(),
+            summary: String::new(),
+            field_summaries: vec![],
         }];
         app
     }

@@ -203,6 +203,10 @@ pub enum Request {
         name: String,
         password: String,
     },
+    /// 网页管理的"显示"按钮：返回一个条目的全部值（单值或全部字段）。只有网页会话能用，每次都记日志（只记名称）。
+    ShowEntry {
+        name: String,
+    },
     Pins,
     PendingPins,
     TrustPins {
@@ -351,6 +355,19 @@ pub struct EntryView {
     /// URL 别名（没有时为空）。
     #[serde(default)]
     pub alias: String,
+    /// 单值条目的摘要（例如 `sk-or-…a1b2（48 字符）`，短值只有长度）；SSH 私钥与多字段条目为空。
+    #[serde(default)]
+    pub summary: String,
+    /// 多字段条目每个字段的摘要，顺序与 `fields` 相同。
+    #[serde(default)]
+    pub field_summaries: Vec<String>,
+}
+
+/// `ShowEntry` 的结果：单值条目的值，或多字段条目的全部字段（名称，值）。
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+pub struct ShownEntry {
+    pub secret: Option<String>,
+    pub fields: Vec<(String, String)>,
 }
 
 /// git 代理的响应头（经白名单过滤）。

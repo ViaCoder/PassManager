@@ -274,6 +274,8 @@ pub struct AppState {
     boot_limiter: RateLimiter,
     /// `/a/` 的无效注册码次数（每个来源）。
     boot_fail_limiter: RateLimiter,
+    /// 正在等待登录的旧页面（登录后只留一个页面，见 `Waits`）。
+    waits: Waits,
 }
 
 pub type St = Arc<AppState>;
@@ -292,6 +294,7 @@ impl AppState {
             bins: bootstrap::BinCache::default(),
             boot_limiter: RateLimiter::new(30, Duration::from_secs(600), Duration::from_secs(900)),
             boot_fail_limiter: RateLimiter::new(10, Duration::from_secs(600), Duration::from_secs(900)),
+            waits: Waits::default(),
         })
     }
 }
@@ -392,6 +395,7 @@ pub const TEMPLATES: &[(&str, &str)] = &[
     ("dashboard.html", include_str!("../templates/dashboard.html")),
     ("entries.html", include_str!("../templates/entries.html")),
     ("entering.html", include_str!("../templates/entering.html")),
+    ("continued.html", include_str!("../templates/continued.html")),
     ("entry_form.html", include_str!("../templates/entry_form.html")),
     ("tokens.html", include_str!("../templates/tokens.html")),
     ("pins.html", include_str!("../templates/pins.html")),
@@ -427,6 +431,8 @@ pub fn router(st: St) -> Router {
     r = r
         .route("/", get(dashboard))
         .route("/login", get(login_page))
+        .route("/login/state", get(login_state))
+        .route("/continue", get(continue_page))
         .route("/l/{token}", get(link_page).post(link_post))
         .route("/logout", post(logout))
         .route("/lock", post(lock))
@@ -436,6 +442,7 @@ pub fn router(st: St) -> Router {
         .route("/entries/{name}/edit", get(entry_edit))
         .route("/entries/{name}", post(entry_update))
         .route("/entries/{name}/delete", post(entry_delete))
+        .route("/entries/{name}/show", post(entry_show))
         .route("/tokens", get(tokens).post(token_create))
         .route("/tokens/{id}/revoke", post(token_revoke))
         .route("/enrollments/{id}/cancel", post(enroll_cancel))
@@ -456,6 +463,7 @@ pub fn router(st: St) -> Router {
     r.fallback(|| async { (StatusCode::NOT_FOUND, "not found") })
         .layer(axum::extract::DefaultBodyLimit::max(FORM_LIMIT))
         .layer(axum::middleware::from_fn_with_state(st.clone(), request_guard))
+        .layer(axum::middleware::from_fn(login_next))
         .layer(axum::middleware::from_fn(security_headers))
         .with_state(st)
 }
@@ -560,11 +568,113 @@ async fn security_headers(req: Request, next: axum::middleware::Next) -> Respons
 // ---------------- 会话辅助 ----------------
 
 fn cookie_token(h: &HeaderMap) -> Option<String> {
+    cookie_named(h, COOKIE)
+}
+
+/// 取出名为 `name` 的 Cookie 的值。
+fn cookie_named(h: &HeaderMap, name: &str) -> Option<String> {
     h.get_all(header::COOKIE)
         .iter()
         .filter_map(|v| v.to_str().ok())
         .flat_map(|v| v.split(';'))
-        .find_map(|kv| kv.trim().strip_prefix(&format!("{COOKIE}=")).map(|s| s.to_string()))
+        .find_map(|kv| kv.trim().strip_prefix(&format!("{name}=")).map(|s| s.to_string()))
+}
+
+// ---------------- 登录后只留一个页面 ----------------
+//
+// 旧页面（会话过期后的登录页）记住原来的位置，并且每 2 秒问一次"这个浏览器登录了没有"；登录后回到原来的位置。
+// 新页面（`passmanager web` 打开的那个）登录后先到 `/continue`：如果同一个浏览器里有旧页面还在等，新页面就关闭自己。
+// 新页面一路都是 Refresh 跳转，历史记录只有一条，浏览器允许脚本关闭它（Chrome 157 实测）；旧页面有历史记录，关不掉，
+// 所以由它留下来。"同一个浏览器"靠 `__Host-pm-wait` Cookie 认出：它不能登录，只决定新页面要不要关闭自己。
+
+/// 旧页面的轮询脚本：问 `/login/state`；回答是本站路径时就回到那里（不新增历史记录）。
+const POLL_JS: &str = "setInterval(function(){fetch('/login/state',{credentials:'same-origin',cache:'no-store'}).then(function(r){return r.text()}).then(function(t){if(t.charAt(0)==='/'&&t.charAt(1)!=='/')location.replace(t)}).catch(function(){})},2000);";
+/// 新页面的关闭脚本。
+const CLOSE_JS: &str = "window.close();";
+/// 认出同一个浏览器的 Cookie。
+const WAIT_COOKIE: &str = "__Host-pm-wait";
+/// 旧页面多久没有轮询就当作已经关闭（轮询间隔是 2 秒）。
+const WAIT_FRESH: Duration = Duration::from_secs(6);
+/// 等待记录最多保留多久、最多多少条。
+const WAIT_KEEP: Duration = Duration::from_secs(600);
+const MAX_WAITS: usize = 1024;
+
+/// 等待中的旧页面：Cookie 值的哈希 →（最近一次轮询的时间，要回到的路径）。只在内存里。
+#[derive(Default)]
+struct Waits {
+    m: Mutex<HashMap<[u8; 32], (Instant, String)>>,
+}
+
+impl Waits {
+    /// 旧页面出现或轮询了一次（`next` 为 None 时保留原来记下的路径）。
+    fn seen(&self, id: &str, next: Option<&str>, now: Instant) {
+        let mut m = self.m.lock().unwrap();
+        // 先清掉过期的；太多时不再新增（不影响登录，只是新页面不会自动关闭）
+        m.retain(|_, (t, _)| now.duration_since(*t) < WAIT_KEEP);
+        let key = token_hash(id);
+        if !m.contains_key(&key) && m.len() >= MAX_WAITS {
+            return;
+        }
+        let e = m.entry(key).or_insert((now, "/".to_string()));
+        e.0 = now;
+        if let Some(n) = next {
+            e.1 = n.to_string();
+        }
+    }
+
+    /// 旧页面是否还开着（最近 `WAIT_FRESH` 内轮询过）。
+    fn fresh(&self, id: &str, now: Instant) -> bool {
+        self.m.lock().unwrap().get(&token_hash(id)).is_some_and(|(t, _)| now.duration_since(*t) < WAIT_FRESH)
+    }
+
+    /// 旧页面要回到的路径。
+    fn next(&self, id: &str) -> Option<String> {
+        self.m.lock().unwrap().get(&token_hash(id)).map(|(_, n)| n.clone())
+    }
+}
+
+/// `next` 是否是本站内的一个页面路径（不是登录相关的页面，不能跳到别的站点）；否则 None。
+fn valid_next(s: &str) -> Option<String> {
+    let ok = s.starts_with('/')
+        && !s.starts_with("//")
+        && s.len() <= 512
+        && s.bytes().all(|b| b.is_ascii_graphic() && b != b'\\')
+        && !s.starts_with("/login")
+        && !s.starts_with("/l/")
+        && !s.starts_with("/continue");
+    ok.then(|| s.to_string())
+}
+
+/// 百分号编码：只保留 RFC 3986 的非保留字符。
+fn urlenc(s: &str) -> String {
+    s.bytes()
+        .map(|b| if b.is_ascii_alphanumeric() || b"-._~".contains(&b) { (b as char).to_string() } else { format!("%{b:02X}") })
+        .collect()
+}
+
+/// 允许一段内联脚本（按 SHA-256 哈希）的 CSP；其余与全站 CSP 相同。
+fn script_csp(js: &str) -> HeaderValue {
+    use base64::Engine;
+    let h = base64::engine::general_purpose::STANDARD.encode(pm_crypto::sha256(js.as_bytes()));
+    HeaderValue::from_str(&format!("{CSP}; script-src 'sha256-{h}'; connect-src 'self'")).unwrap()
+}
+
+/// 会话失效时打开的 GET 页面会被重定向到 `/login`：在那里记下原来的位置（`?next=`），登录后回到这里。
+async fn login_next(req: Request, next: axum::middleware::Next) -> Response {
+    let back = (req.method() == axum::http::Method::GET)
+        .then(|| req.uri().path_and_query().map(|p| p.as_str().to_string()))
+        .flatten()
+        .and_then(|p| valid_next(&p))
+        .filter(|p| p != "/");
+    let mut r = next.run(req).await;
+    if let Some(p) = back
+        && r.status() == StatusCode::SEE_OTHER
+        && r.headers().get(header::LOCATION).is_some_and(|l| l == "/login")
+        && let Ok(v) = HeaderValue::from_str(&format!("/login?next={}", urlenc(&p)))
+    {
+        r.headers_mut().insert(header::LOCATION, v);
+    }
+    r
 }
 
 fn session_cookie(token: &str, max_age: u64) -> HeaderValue {
@@ -676,13 +786,69 @@ fn ip_of(conn: &Option<Extension<ConnInfo>>) -> String {
 
 // ---------------- 登录 ----------------
 
-async fn login_page(State(st): State<St>, h: HeaderMap, conn: Option<Extension<ConnInfo>>) -> Response {
-    // 已登录时直接回到首页；带着失效的 Cookie 来，说明是会话过期了。
+/// `?next=`：登录后要回到的位置。
+#[derive(serde::Deserialize)]
+struct NextQ {
+    next: Option<String>,
+}
+
+async fn login_page(State(st): State<St>, h: HeaderMap, conn: Option<Extension<ConnInfo>>, Query(q): Query<NextQ>) -> Response {
+    let next = q.next.as_deref().and_then(valid_next).unwrap_or_else(|| "/".into());
+    // 已登录时直接回到原来的位置；带着失效的 Cookie 来，说明是会话过期了。
     let cookie = cookie_token(&h);
     if cookie.as_deref().is_some_and(|t| st.sessions.touch_at(t, Instant::now()).is_some()) {
-        return Redirect::to("/").into_response();
+        return Redirect::to(&next).into_response();
     }
-    render(&st, "login.html", context! { conn => sv(conn.map(|c| c.0)), expired => cookie.is_some(), domain => st.cfg.domain.clone() })
+    // 这个浏览器的等待 Cookie：没有（或形状不对）就新建一个；记下这个页面要回到的位置
+    let old = cookie_named(&h, WAIT_COOKIE)
+        .filter(|v| (32..=64).contains(&v.len()) && v.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_'));
+    let wid = old.clone().unwrap_or_else(new_token);
+    st.waits.seen(&wid, Some(&next), Instant::now());
+    let mut r = render(
+        &st,
+        "login.html",
+        context! { conn => sv(conn.map(|c| c.0)), expired => cookie.is_some(), domain => st.cfg.domain.clone(), poll_js => Value::from_safe_string(POLL_JS.into()) },
+    );
+    if old.is_none() {
+        let c = format!("{WAIT_COOKIE}={wid}; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age={}", WAIT_KEEP.as_secs());
+        r.headers_mut().insert(header::SET_COOKIE, HeaderValue::from_str(&c).unwrap());
+    }
+    r.headers_mut().insert(header::CONTENT_SECURITY_POLICY, script_csp(POLL_JS));
+    r
+}
+
+/// 旧页面的轮询：这个浏览器已经登录时回答要回到的路径，否则回答空。不需要会话；只回答本浏览器自己的事。
+async fn login_state(State(st): State<St>, h: HeaderMap) -> Response {
+    let Some(wid) = cookie_named(&h, WAIT_COOKIE) else {
+        return ([(header::CONTENT_TYPE, "text/plain; charset=utf-8")], "").into_response();
+    };
+    let now = Instant::now();
+    st.waits.seen(&wid, None, now);
+    let logged_in = cookie_token(&h).is_some_and(|t| st.sessions.touch_at(&t, now).is_some());
+    let body = if logged_in { st.waits.next(&wid).unwrap_or_else(|| "/".into()) } else { String::new() };
+    ([(header::CONTENT_TYPE, "text/plain; charset=utf-8")], body).into_response()
+}
+
+/// 登录之后的第一站：同一个浏览器里有旧页面还在等，就关闭这个新页面（旧页面会回到原来的位置）；
+/// 旧页面已经不在了，就在这里回到它记下的位置；都没有时进入首页。
+async fn continue_page(State(st): State<St>, h: HeaderMap, conn: Option<Extension<ConnInfo>>) -> Response {
+    if let Err(r) = require(&st, &h, &conn) {
+        return r;
+    }
+    let Some(wid) = cookie_named(&h, WAIT_COOKIE) else {
+        return Redirect::to("/").into_response();
+    };
+    let back = st.waits.next(&wid).unwrap_or_else(|| "/".into());
+    if !st.waits.fresh(&wid, Instant::now()) {
+        return Redirect::to(&back).into_response();
+    }
+    let mut r = render(
+        &st,
+        "continued.html",
+        context! { conn => sv(conn.map(|c| c.0)), back, close_js => Value::from_safe_string(CLOSE_JS.into()) },
+    );
+    r.headers_mut().insert(header::CONTENT_SECURITY_POLICY, script_csp(CLOSE_JS));
+    r
 }
 
 /// GET 只显示确认按钮，不消耗令牌（防止链接预览、预取把它用掉）。
@@ -704,7 +870,7 @@ async fn link_page(State(st): State<St>, Path(token): Path<String>, conn: Option
         // Cookie 是 SameSite=Strict：这次导航从本地文件发起，算跨站，紧接着的 302 不会带上它。先回到本站的页面，再跳转。
         let mut r = render(&st, "entering.html", context! { conn => sv(conn.map(|c| c.0)) });
         r.headers_mut().insert(header::SET_COOKIE, session_cookie(&tok, SESSION_ABSOLUTE.as_secs()));
-        r.headers_mut().insert(header::REFRESH, HeaderValue::from_static("0; url=/"));
+        r.headers_mut().insert(header::REFRESH, HeaderValue::from_static("0; url=/continue"));
         return r;
     }
     render(&st, "link.html", context! { token, conn => sv(conn.map(|c| c.0)) })
@@ -721,7 +887,7 @@ async fn link_post(State(st): State<St>, Path(token): Path<String>, conn: Option
     }
     let (tok, _csrf) = st.sessions.create_at(Instant::now());
     eprintln!("[PassManager] web login from {ip}");
-    let mut r = Redirect::to("/").into_response();
+    let mut r = Redirect::to("/continue").into_response();
     r.headers_mut().insert(header::SET_COOKIE, session_cookie(&tok, SESSION_ABSOLUTE.as_secs()));
     r
 }
@@ -789,9 +955,7 @@ async fn entries(State(st): State<St>, h: HeaderMap, conn: Option<Extension<Conn
     }
 }
 
-/// 新增字段的空行数。
-const NEW_FIELD_ROWS: usize = 3;
-/// 表单最多处理的字段行数。
+/// 表单最多处理的字段行数（已有字段与批量输入的行各自计算）。
 const MAX_FIELD_ROWS: usize = 64;
 
 #[derive(serde::Serialize, Default)]
@@ -803,9 +967,12 @@ struct EntryForm {
     auto_accept_host_key: bool,
     /// password / ssh-key / fields
     kind: String,
-    /// 已有字段名（值从不显示）。
+    /// 已有字段名（值只显示摘要；"显示"按钮才给出完整的值）。
     fields: Vec<String>,
-    new_rows: Vec<usize>,
+    /// 已有字段的摘要，顺序与 `fields` 相同。
+    field_summaries: Vec<String>,
+    /// 单值条目的摘要。
+    summary: String,
     /// SSH 私钥条目：允许 ssh-agent 桥签名的主机密钥指纹（每行一个）。
     host_keys: String,
     /// 限定的用途（`http` / `ssh` / `git`，至少一种）。
@@ -814,8 +981,39 @@ struct EntryForm {
     alias: String,
 }
 
-/// 解析表单：返回（表单回显，单值密钥，字段列表）。
-fn form_of(f: &HashMap<String, String>) -> (EntryForm, Option<String>, Option<Vec<FieldInput>>) {
+/// 批量输入框：每行一个 `字段名=值`（或 `字段名: 值`，以先出现的分隔符为准）。空行与以 `#` 开头的行忽略；
+/// 名称与值两端的空白去掉；同一个名称只能出现一次。错误信息只说第几行、什么问题，从不包含值。
+fn parse_batch(text: &str) -> Result<Vec<(String, String)>, String> {
+    let mut out: Vec<(String, String)> = Vec::new();
+    for (i, raw) in text.replace("\r\n", "\n").split('\n').enumerate() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        // 先出现的 = 或 : 是分隔符（值里可以再有 = 与 :，例如 URL）
+        let Some(at) = line.find(['=', ':']) else {
+            return Err(format!("第 {} 行没有 = 或 :，请写成 字段名=值", i + 1));
+        };
+        let (name, value) = (line[..at].trim(), line[at + 1..].trim());
+        if name.is_empty() {
+            return Err(format!("第 {} 行缺少字段名", i + 1));
+        }
+        if value.is_empty() {
+            return Err(format!("第 {} 行（{name}）没有值", i + 1));
+        }
+        if out.iter().any(|(n, _)| n == name) {
+            return Err(format!("第 {} 行：字段 {name} 重复", i + 1));
+        }
+        if out.len() >= MAX_FIELD_ROWS {
+            return Err(format!("一次最多 {MAX_FIELD_ROWS} 个字段"));
+        }
+        out.push((name.to_string(), value.to_string()));
+    }
+    Ok(out)
+}
+
+/// 解析表单：返回（表单回显，单值密钥，字段列表，批量输入的错误）。
+fn form_of(f: &HashMap<String, String>) -> (EntryForm, Option<String>, Option<Vec<FieldInput>>, Option<String>) {
     let g = |k: &str| f.get(k).map(|s| s.trim().to_string()).unwrap_or_default();
     let kind = match g("kind").as_str() {
         "ssh-key" => "ssh-key",
@@ -836,6 +1034,16 @@ fn form_of(f: &HashMap<String, String>) -> (EntryForm, Option<String>, Option<Ve
         names.push(name.clone());
         fields.push(FieldInput { name, value });
     }
+    // 批量输入：同名的已有字段更新值，其他的作为新字段追加
+    let batch = parse_batch(f.get("fields_batch").map(String::as_str).unwrap_or(""));
+    let batch_err = batch.as_ref().err().cloned();
+    for (name, value) in batch.unwrap_or_default() {
+        match fields.iter_mut().find(|x| x.name == name) {
+            Some(x) => x.value = Some(value),
+            // 新字段不放进回显：保存失败时批量输入框不回填（值是密钥），已有字段列表里也不出现它
+            None => fields.push(FieldInput { name, value: Some(value) }),
+        }
+    }
     let form = EntryForm {
         name: g("name"),
         domains: g("domains"),
@@ -844,25 +1052,21 @@ fn form_of(f: &HashMap<String, String>) -> (EntryForm, Option<String>, Option<Ve
         auto_accept_host_key: f.get("auto_accept_host_key").is_some_and(|v| v == "1"),
         kind: kind.clone(),
         fields: names,
-        new_rows: vec![],
+        field_summaries: vec![],
+        summary: String::new(),
         host_keys: g("host_keys"),
         ops: pm_vault_ops().iter().filter(|o| f.get(&format!("op_{o}")).is_some_and(|v| v == "1")).map(|o| o.to_string()).collect(),
         alias: g("alias"),
     };
+    let batch_err = if kind == "fields" { batch_err } else { None };
     let fields = (kind == "fields").then_some(fields);
     let secret = if kind == "fields" { None } else { secret };
-    (form, secret, fields)
+    (form, secret, fields, batch_err)
 }
 
 /// 可选的用途（与服务端 `pm_vault::OPS` 一致）。
 fn pm_vault_ops() -> [&'static str; 3] {
     ["http", "ssh", "git"]
-}
-
-fn with_rows(mut form: EntryForm) -> EntryForm {
-    let start = form.fields.len();
-    form.new_rows = (start..start + NEW_FIELD_ROWS).collect();
-    form
 }
 
 fn input_of(form: &EntryForm, secret: Option<String>, fields: Option<Vec<FieldInput>>) -> EntryInput {
@@ -896,7 +1100,7 @@ async fn entry_new(State(st): State<St>, h: HeaderMap, conn: Option<Extension<Co
         &st,
         &c,
         "entry_form.html",
-        context! { form => sv(with_rows(EntryForm { kind: "password".into(), ops: vec!["http".into()], ..Default::default() })) },
+        context! { form => sv(EntryForm { kind: "password".into(), ops: vec!["http".into()], ..Default::default() }) },
     )
 }
 
@@ -905,12 +1109,35 @@ async fn entry_edit(State(st): State<St>, h: HeaderMap, conn: Option<Extension<C
         Ok(c) => c,
         Err(r) => return r,
     };
-    let list = match call::<Vec<EntryView>>(&st, Req::Entries).await {
+    edit_page(&st, &c, &name, None).await
+}
+
+/// "显示"按钮：在编辑页上给出这个条目的全部值（POST + CSRF；只有网页会话能取到，服务器记一行日志）。
+async fn entry_show(
+    State(st): State<St>,
+    h: HeaderMap,
+    conn: Option<Extension<ConnInfo>>,
+    Path(name): Path<String>,
+    Form(f): Form<HashMap<String, String>>,
+) -> Response {
+    let c = match require_post(&st, &h, &conn, &f) {
+        Ok(c) => c,
+        Err(r) => return r,
+    };
+    match call::<pm_proto::ShownEntry>(&st, Req::ShowEntry { name: name.clone() }).await {
+        Ok(shown) => edit_page(&st, &c, &name, Some(shown)).await,
+        Err(e) => message(&st, Some(&c), StatusCode::BAD_REQUEST, "无法显示", &err_text(&e)),
+    }
+}
+
+/// 编辑页：`shown` 是"显示"按钮取到的完整值（没有时只显示摘要）。
+async fn edit_page(st: &AppState, c: &Ctx, name: &str, shown: Option<pm_proto::ShownEntry>) -> Response {
+    let list = match call::<Vec<EntryView>>(st, Req::Entries).await {
         Ok(l) => l,
-        Err(e) => return message(&st, Some(&c), StatusCode::BAD_REQUEST, "无法读取条目", &err_text(&e)),
+        Err(e) => return message(st, Some(c), StatusCode::BAD_REQUEST, "无法读取条目", &err_text(&e)),
     };
     let Some(e) = list.into_iter().find(|e| e.name == name) else {
-        return message(&st, Some(&c), StatusCode::NOT_FOUND, "条目不存在", "条目不存在或已被删除。");
+        return message(st, Some(c), StatusCode::NOT_FOUND, "条目不存在", "条目不存在或已被删除。");
     };
     let form = EntryForm {
         name: e.name.clone(),
@@ -920,18 +1147,19 @@ async fn entry_edit(State(st): State<St>, h: HeaderMap, conn: Option<Extension<C
         auto_accept_host_key: e.auto_accept_host_key,
         kind: if e.kind.is_empty() { "password".into() } else { e.kind.clone() },
         fields: e.fields.clone(),
-        new_rows: vec![],
+        field_summaries: e.field_summaries.clone(),
+        summary: e.summary.clone(),
         host_keys: e.host_keys.join("\n"),
         ops: e.ops.clone(),
         alias: e.alias.clone(),
     };
-    page(&st, &c, "entry_form.html", context! { form => sv(with_rows(form)), original => e.name, public_key => e.public_key })
+    page(st, c, "entry_form.html", context! { form => sv(form), original => e.name, public_key => e.public_key, shown => sv(shown) })
 }
 
 /// 校验失败时重新显示表单：保留其他字段，但**不回显密钥**（需要重新输入）。
 fn form_error(st: &AppState, c: &Ctx, form: EntryForm, original: Option<String>, e: &(String, String)) -> Response {
     let msg = format!("{}（为安全起见，密钥需要重新输入）", err_text(e));
-    let mut r = page(st, c, "entry_form.html", context! { form => sv(with_rows(form)), original, flash => msg, flash_kind => "err" });
+    let mut r = page(st, c, "entry_form.html", context! { form => sv(form), original, flash => msg, flash_kind => "err" });
     *r.status_mut() = StatusCode::BAD_REQUEST;
     r
 }
@@ -946,7 +1174,10 @@ async fn entry_create(
         Ok(c) => c,
         Err(r) => return r,
     };
-    let (form, secret, fields) = form_of(&f);
+    let (form, secret, fields, batch_err) = form_of(&f);
+    if let Some(m) = batch_err {
+        return form_error(&st, &c, form, None, &("BAD_REQUEST".into(), m));
+    }
     if secret.is_none() && fields.as_ref().is_none_or(|f| f.is_empty()) {
         return form_error(&st, &c, form, None, &("BAD_REQUEST".into(), "密钥不能为空".into()));
     }
@@ -967,7 +1198,10 @@ async fn entry_update(
         Ok(c) => c,
         Err(r) => return r,
     };
-    let (form, secret, fields) = form_of(&f);
+    let (form, secret, fields, batch_err) = form_of(&f);
+    if let Some(m) = batch_err {
+        return form_error(&st, &c, form, Some(name), &("BAD_REQUEST".into(), m));
+    }
     match call::<serde_json::Value>(&st, Req::UpdateEntry { original: name.clone(), entry: input_of(&form, secret, fields) }).await {
         Ok(_) => done("/entries", "saved"),
         Err(e) => form_error(&st, &c, form, Some(name), &e),

@@ -621,6 +621,9 @@ fn end_to_end() {
     assert!(e.message.contains("gh") && e.message.contains("gh2"));
     admin.call(&Request::DeleteEntry { name: "gh2".into() }).unwrap();
 
+    // "显示"只属于网页管理：Agent 与本机管理会话都拿不到。
+    assert_eq!(code(agent.call(&Request::ShowEntry { name: "gh".into() })), "FORBIDDEN");
+    assert_eq!(code(admin.call(&Request::ShowEntry { name: "gh".into() })), "FORBIDDEN");
     // 查看明文需要口令。
     assert_eq!(code(admin.call(&Request::Reveal { name: "gh".into(), password: "nope-nope".into() })), "WRONG_PASSWORD");
     let s = admin.call(&Request::Reveal { name: "gh".into(), password: PW.into() }).unwrap();

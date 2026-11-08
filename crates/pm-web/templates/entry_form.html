@@ -5,9 +5,36 @@
   <div>
     <p class="crumb"><a href="/entries">{{ icon("key") }}条目</a><span aria-hidden="true">/</span></p>
     <h1>{% if original %}{{ icon("edit") }}编辑条目 <code>{{ original }}</code>{% else %}{{ icon("plus") }}新增条目{% endif %}</h1>
-    <p class="lede">{{ icon("lock") }}密钥只能写入：保存后任何页面都不会再显示，编辑时也不会回填。</p>
+    <p class="lede">{{ icon("lock") }}保存后页面上只显示摘要，用来认出是哪一把；需要时在编辑页点"显示"查看这个条目的完整值。</p>
   </div>
 </div>
+{% if original %}
+<section class="card">
+  <h2 class="card-title">{{ icon("lock") }}当前保存的值</h2>
+  {% if shown %}
+    {% if shown.secret is not none %}
+    <div class="field"><label for="s-secret">密钥</label><textarea id="s-secret" readonly spellcheck="false">{{ shown.secret }}</textarea></div>
+    {% endif %}
+    {% for f in shown.fields %}
+    <div class="field"><label for="s{{ loop.index0 }}">{{ f[0] }}</label><input id="s{{ loop.index0 }}" readonly spellcheck="false" value="{{ f[1] }}"></div>
+    {% endfor %}
+    <p class="hint">{{ icon("warning") }}完整的值只出现在这一次显示的页面里，离开这个页面就恢复为摘要。服务器为每次显示记一行日志（只有条目名）。</p>
+    <a class="btn secondary" href="/entries/{{ original | urlencode }}/edit">{{ icon("lock") }}隐藏</a>
+  {% else %}
+    {% if form.kind == "fields" %}
+    <ul class="summaries">{% for name in form.fields %}<li><code class="strong">{{ name }}</code> <span class="muted">{{ (form.field_summaries | default([]))[loop.index0] | default("") }}</span></li>{% endfor %}</ul>
+    {% elif form.kind == "ssh-key" %}
+    <p>{% if public_key %}公钥指纹 <code>{{ public_key }}</code>{% else %}SSH 私钥{% endif %}</p>
+    {% else %}
+    <p><code>{{ form.summary }}</code></p>
+    {% endif %}
+    <form method="post" action="/entries/{{ original | urlencode }}/show">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <button class="secondary">{{ icon("unlock") }}显示</button>
+    </form>
+  {% endif %}
+</section>
+{% endif %}
 <form method="post" action="{% if original %}/entries/{{ original | urlencode }}{% else %}/entries{% endif %}" class="form" autocomplete="off">
   <input type="hidden" name="csrf" value="{{ csrf }}">
 
@@ -53,31 +80,32 @@
         <option value="fields" {% if form.kind == "fields" %}selected{% endif %}>多字段（例如 username / password）</option>
       </select>
     </div>
-    {% if public_key %}<p class="note">{{ icon("key") }}<span>公钥指纹：<code>{{ public_key }}</code></span></p>{% endif %}
     <fieldset class="k-single">
       <legend>单个值 <span class="opt">类型为口令或 SSH 私钥时使用</span></legend>
       <div class="field{% if flash_kind == "err" %} has-error{% endif %}">
-        <label for="f-secret">密钥{% if original %} <span class="opt">留空表示不修改</span>{% endif %}</label>
+        <label for="f-secret">{% if original %}新的值 <span class="opt">留空表示不修改</span>{% else %}密钥{% endif %}</label>
         <textarea id="f-secret" name="secret" spellcheck="false" autocomplete="off" aria-describedby="h-secret"></textarea>
-        {% if flash_kind == "err" %}<p class="hint err" id="h-secret">{{ icon("warning") }}提交失败后不会回填：如需设置密钥，请重新输入。</p>{% else %}<p class="hint" id="h-secret">{{ icon("lock") }}只能写入，提交后不会回显。</p>{% endif %}
+        {% if flash_kind == "err" %}<p class="hint err" id="h-secret">{{ icon("warning") }}提交失败后不会回填：如需设置密钥，请重新输入。</p>{% else %}<p class="hint" id="h-secret">{{ icon("lock") }}输入时完整可见；保存后只显示摘要。</p>{% endif %}
       </div>
     </fieldset>
     <fieldset class="k-fields">
       <legend>字段 <span class="opt">类型为多字段时使用</span></legend>
-      {% if flash_kind == "err" %}<p class="hint err">{{ icon("warning") }}提交失败后字段值不会回填：新字段的值需要重新输入。</p>{% else %}<p class="hint">值只能写入，留空表示保留原值。</p>{% endif %}
-      {% for name in form.fields %}
-      <div class="field-row">
-        <div class="field"><label for="fn{{ loop.index0 }}">字段名</label><input id="fn{{ loop.index0 }}" name="field_name_{{ loop.index0 }}" value="{{ name }}" maxlength="64" spellcheck="false"></div>
-        <div class="field"><label for="fv{{ loop.index0 }}">新值 <span class="opt">留空保留</span></label><input id="fv{{ loop.index0 }}" type="password" name="field_value_{{ loop.index0 }}" autocomplete="new-password"></div>
-        <label class="check danger-check"><input type="checkbox" name="field_remove_{{ loop.index0 }}" value="1">{{ icon("trash") }}删除</label>
+      {% if form.fields %}
+      <ul class="summaries">
+        {% for name in form.fields %}
+        <li class="field-row">
+          <input type="hidden" name="field_name_{{ loop.index0 }}" value="{{ name }}">
+          <code class="strong">{{ name }}</code> <span class="muted">{{ (form.field_summaries | default([]))[loop.index0] | default("") }}</span>
+          <label class="check danger-check"><input type="checkbox" name="field_remove_{{ loop.index0 }}" value="1">{{ icon("trash") }}删除</label>
+        </li>
+        {% endfor %}
+      </ul>
+      {% endif %}
+      <div class="field{% if flash_kind == "err" %} has-error{% endif %}">
+        <label for="f-batch">{% if form.fields %}添加或修改字段{% else %}字段{% endif %} <span class="opt">每行一个：字段名=值</span></label>
+        <textarea id="f-batch" name="fields_batch" rows="6" spellcheck="false" autocomplete="off" aria-describedby="h-batch" placeholder="username=deploy&#10;password=…&#10;base_url=…"></textarea>
+        {% if flash_kind == "err" %}<p class="hint err" id="h-batch">{{ icon("warning") }}提交失败后不会回填：请重新输入这些字段。</p>{% else %}<p class="hint" id="h-batch">一次写多少行都可以；和已有字段同名时更新它的值，也可以写 <code>字段名: 值</code>。输入时完整可见，保存后只显示摘要。</p>{% endif %}
       </div>
-      {% endfor %}
-      {% for i in form.new_rows %}
-      <div class="field-row">
-        <div class="field"><label for="fn{{ i }}">新字段名</label><input id="fn{{ i }}" name="field_name_{{ i }}" maxlength="64" spellcheck="false"></div>
-        <div class="field"><label for="fv{{ i }}">值</label><input id="fv{{ i }}" type="password" name="field_value_{{ i }}" autocomplete="new-password"></div>
-      </div>
-      {% endfor %}
     </fieldset>
     <fieldset class="k-ssh">
       <legend>SSH 主机密钥 <span class="opt">仅 SSH 私钥条目</span></legend>

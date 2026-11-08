@@ -264,9 +264,9 @@ CI 在 6 种 GitHub 原生运行器上执行：Linux（ubuntu-24.04、ubuntu-24.
 | N2 | 现在录下流量、将来用量子计算机破解 | 外层 TLS 1.3 只接受混合组 X25519MLKEM768 / SecP256r1MLKEM768 与 TLS_AES_256_GCM_SHA384，无 0-RTT；Agent 通道再加一层内层，由 ML-KEM-1024 **和** Classic McEliece 6688128（两个家族、两个库）共同决定密钥。 |
 | N3 | 用误签发的证书做主动中间人 | Agent 固定注册码里服务端内层静态公钥的 SHA-384 指纹（不是 TOFU）；内层的密钥确认绑定 TLS exporter，终止 TLS 后再转发内层字节必然失败。 |
 | N4 | 局域网设备探测 Agent 端口 | 网络上只接受 `Hello::Token` 与 `Hello::Enroll`；`Password`、`Setup`、`Root` 一律静默拒绝；所有失败都是同样的随机延迟后静默断开。 |
-| N5 | 针对网页的攻击（CSRF、XSS、DNS 重绑定、点击劫持） | 服务端渲染、没有 JavaScript、CSP `default-src 'none'`；Host 校验；Fetch Metadata 与 Origin 校验；每个 POST 校验 CSRF 令牌；`__Host-` cookie（HttpOnly、Secure、SameSite=Strict）；请求体上限 64 KiB；无效登录链接按来源限速；每个模板都有 XSS 注入测试。 |
+| N5 | 针对网页的攻击（CSRF、XSS、DNS 重绑定、点击劫持） | 服务端渲染；只有两段固定的内联脚本（登录页轮询"是否已登录"、登录后关闭新开的标签页），CSP 按 SHA-256 哈希逐页放行，其余页面没有任何脚本，CSP `default-src 'none'`；Host 校验；Fetch Metadata 与 Origin 校验；每个 POST 校验 CSRF 令牌；`__Host-` cookie（HttpOnly、Secure、SameSite=Strict）；请求体上限 64 KiB；无效登录链接按来源限速；每个模板都有 XSS 注入测试。 |
 | N6 | 网页登录凭据被盗 | 没有凭据：只能用 `passmanager login`（服务器上的 root，也就是持有 SSH 密钥的人）打印的一次性链接登录。链接 2 分钟有效，GET 只显示确认页，POST 才消耗；会话空闲 2 小时、登录满 12 小时失效，只保存在内存里。 |
-| N7 | 密钥经网页泄露 | 密钥只写不读：任何页面、任何响应都不包含密钥（有测试），表单从不回显，服务器模式拒绝 `Reveal`。 |
+| N7 | 密钥经网页泄露 | 默认只显示摘要（长值露出开头 6 个与最后 4 个字符，16–23 个字符只露最后 4 个，更短的口令与多行值只有长度）；表单从不回显。编辑页的"显示"按钮（POST + CSRF、只限网页会话、页面不缓存）给出这一个条目的全部值，服务器为每次显示记一行日志（只有条目名）。Agent、本机 TUI 与 root 命令行都不能显示；服务器模式仍然拒绝 `Reveal`。风险：拿到网页会话的人可以逐个查看条目。 |
 | N8 | Agent 令牌被盗 | 只能**使用**凭据（看不到明文），且只能从局域网使用；在网页或用 `passmanager token revoke` 吊销立即生效。令牌只在注册时经双层加密通道送达一次，在 Agent 上存为 0600 文件（不写进任何 MCP 配置）。 |
 
 ### 10.2 Agent 通道的构造
