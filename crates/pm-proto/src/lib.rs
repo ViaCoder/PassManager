@@ -280,6 +280,11 @@ pub enum Request {
 }
 
 impl Request {
+    /// 等待回复时不设读超时：上游 HTTP 请求不限时（Agent 断开时服务器取消它）。
+    pub fn waits_unbounded(&self) -> bool {
+        matches!(self, Request::Http { .. })
+    }
+
     /// 是否允许令牌会话（Agent）执行。
     pub fn is_usage(&self) -> bool {
         matches!(
@@ -648,8 +653,12 @@ impl ApiError {
 trait Rw: Read + Write + Send {}
 impl<T: Read + Write + Send> Rw for T {}
 
+/// 调整连接读超时的开关：`true` 时不设读超时，`false` 时恢复默认（只有网络连接有）。
+pub type LongWait = Box<dyn Fn(bool) -> std::io::Result<()> + Send>;
+
 pub struct Client {
     stream: Box<dyn Rw>,
+    long_wait: Option<LongWait>,
 }
 
 /// 注册握手的回复。
@@ -723,7 +732,7 @@ impl Client {
         let hello_bytes = serde_json::to_vec(hello).map_err(|e| ApiError::new("INTERNAL", e.to_string()))?;
         let ack = write_frame(&mut stream, &hello_bytes).and_then(|_| read_frame(&mut stream));
         match ack {
-            Ok(_) => Ok(Self { stream }),
+            Ok(_) => Ok(Self { stream, long_wait: None }),
             Err(_) => Err(match hello {
                 Hello::Token { .. } => ApiError::new(
                     "AUTH_FAILED",
@@ -743,7 +752,28 @@ impl Client {
         }
     }
 
+    /// 设置读超时开关（网络连接）：之后不限时的请求（见 [`Request::waits_unbounded`]）等待回复时不设读超时。
+    pub fn with_long_wait(mut self, f: LongWait) -> Self {
+        self.long_wait = Some(f);
+        self
+    }
+
     pub fn call(&mut self, req: &Request) -> Result<Value, ApiError> {
+        let long = req.waits_unbounded();
+        // 不限时的请求：等待期间去掉读超时（设置失败时保留原来的超时，请求照常发出）
+        if long && let Some(f) = &self.long_wait {
+            let _ = f(true);
+        }
+        let out = self.exchange(req);
+        // 无论成功与否都恢复读超时，后面的请求仍有上限
+        if long && let Some(f) = &self.long_wait {
+            let _ = f(false);
+        }
+        out
+    }
+
+    /// 发送一个请求并读取它的回复。
+    fn exchange(&mut self, req: &Request) -> Result<Value, ApiError> {
         let bytes = serde_json::to_vec(req).map_err(|e| ApiError::new("INTERNAL", e.to_string()))?;
         write_frame(&mut self.stream, &bytes).map_err(|e| ApiError::new("DISCONNECTED", e.to_string()))?;
         let resp = read_frame(&mut self.stream).map_err(|e| ApiError::new("DISCONNECTED", e.to_string()))?;
@@ -984,5 +1014,41 @@ mod tests {
         let mut c = Client::connect_stream(Pipe { input: std::io::Cursor::new(v), output: vec![] }, &Hello::Root { v: 1 }).unwrap();
         assert_eq!(c.relay(&req, &mut &b""[..], &mut |_| Ok(()), &mut Vec::new(), &|| false).unwrap_err().code, "FORBIDDEN");
         assert!(req.is_usage() && Request::RelayClose { run: "r".into() }.is_usage() && !Request::RelayPolicies.is_usage());
+    }
+
+    #[test]
+    fn only_http_waits_unbounded() {
+        let http = Request::Http { method: "GET".into(), url: "https://example.com/".into(), headers: vec![], body: None };
+        assert!(http.waits_unbounded());
+        assert!(!Request::Ssh { target: "root@example.com".into(), command: "true".into() }.waits_unbounded());
+        assert!(!Request::Status.waits_unbounded());
+    }
+
+    #[test]
+    fn call_lifts_the_read_timeout_only_for_http() {
+        use std::sync::{Arc, Mutex};
+        // 服务端脚本：握手确认，然后三个回复（成功、成功、错误）
+        let mut v = framed(r#"{"ok":true}"#);
+        v.extend(framed(r#"{"ok":true,"data":1}"#));
+        v.extend(framed(r#"{"ok":true,"data":2}"#));
+        v.extend(framed(r#"{"ok":false,"code":"UPSTREAM_ERROR","message":"x"}"#));
+        let pipe = Pipe { input: std::io::Cursor::new(v), output: vec![] };
+        // 记录开关的每次调用
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let rec = seen.clone();
+        let mut c = Client::connect_stream(pipe, &Hello::Root { v: 1 }).unwrap().with_long_wait(Box::new(move |on| {
+            rec.lock().unwrap().push(on);
+            Ok(())
+        }));
+        let http = Request::Http { method: "GET".into(), url: "https://example.com/".into(), headers: vec![], body: None };
+        // Http：先去掉读超时，回复后恢复
+        assert_eq!(c.call(&http).unwrap(), serde_json::json!(1));
+        assert_eq!(*seen.lock().unwrap(), vec![true, false]);
+        // 其他请求：不碰读超时
+        assert_eq!(c.call(&Request::Status).unwrap(), serde_json::json!(2));
+        assert_eq!(*seen.lock().unwrap(), vec![true, false]);
+        // 出错的 Http 也要恢复
+        assert_eq!(c.call(&http).unwrap_err().code, "UPSTREAM_ERROR");
+        assert_eq!(*seen.lock().unwrap(), vec![true, false, true, false]);
     }
 }

@@ -7,7 +7,7 @@ use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use base64::Engine;
@@ -103,6 +103,12 @@ fn code(r: Result<Value, ApiError>) -> String {
 struct Tls {
     port: u16,
     stop: Arc<AtomicBool>,
+    /// 收到的 `/hang` 请求数（永不回复）。只有 unix 上的断开测试用到。
+    #[cfg_attr(not(unix), allow(dead_code))]
+    hung: Arc<AtomicUsize>,
+    /// 其中被 PassManager 关闭了连接的个数。
+    #[cfg_attr(not(unix), allow(dead_code))]
+    freed: Arc<AtomicUsize>,
 }
 
 impl Drop for Tls {
@@ -122,6 +128,8 @@ fn tls_server(port: u16) -> Tls {
     let port = listener.local_addr().unwrap().port();
     let stop = Arc::new(AtomicBool::new(false));
     let stop2 = stop.clone();
+    let (hung, freed) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+    let (hung2, freed2) = (hung.clone(), freed.clone());
     std::thread::spawn(move || {
         for s in listener.incoming() {
             if stop2.load(Ordering::SeqCst) {
@@ -129,6 +137,7 @@ fn tls_server(port: u16) -> Tls {
             }
             let Ok(s) = s else { continue };
             let cfg = cfg.clone();
+            let (hung, freed) = (hung2.clone(), freed2.clone());
             std::thread::spawn(move || {
                 let conn = rustls::ServerConnection::new(cfg).unwrap();
                 let mut tls = rustls::StreamOwned::new(conn, s);
@@ -152,6 +161,18 @@ fn tls_server(port: u16) -> Tls {
                 let _ = reader.read_exact(&mut body);
                 let req = format!("{head}{}", String::from_utf8_lossy(&body));
                 let path = head.split_whitespace().nth(1).unwrap_or("/").to_string();
+                if path.starts_with("/hang") {
+                    // 永不回复，一直读到对方关闭连接
+                    hung.fetch_add(1, Ordering::SeqCst);
+                    let mut b = [0u8; 64];
+                    while reader.read(&mut b).is_ok_and(|n| n > 0) {}
+                    freed.fetch_add(1, Ordering::SeqCst);
+                    return;
+                }
+                if let Some(secs) = path.strip_prefix("/slow/") {
+                    // 过这么多秒再回复（慢的上游）
+                    std::thread::sleep(Duration::from_secs(secs.parse().unwrap_or(0)));
+                }
                 let resp = if path.starts_with("/redirect") {
                     "HTTP/1.1 302 Found\r\nLocation: https://example.invalid/steal\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
                         .to_string()
@@ -177,7 +198,20 @@ fn tls_server(port: u16) -> Tls {
             });
         }
     });
-    Tls { port, stop }
+    Tls { port, stop, hung, freed }
+}
+
+/// 等到条件成立（最多 `max`）。只有 unix 上的断开测试用到。
+#[cfg_attr(not(unix), allow(dead_code))]
+fn wait_until(max: Duration, f: impl Fn() -> bool) -> bool {
+    let t0 = Instant::now();
+    while t0.elapsed() < max {
+        if f() {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    f()
 }
 
 fn hex_of(b: &[u8]) -> String {
@@ -518,6 +552,40 @@ fn end_to_end() {
     assert_eq!(lens.len(), 2, "both lines are used");
     admin.call(&Request::DeleteEntry { name: "multi".into() }).unwrap();
 
+    // 上游 HTTP 不限时；Agent 断开时服务器丢弃请求，关闭到上游的连接（不留下没人等的请求）。
+    #[cfg(unix)]
+    {
+        let us = std::os::unix::net::UnixStream::connect(svc.socket()).unwrap();
+        let ctl = us.try_clone().unwrap();
+        let mut waiting = Client::connect_stream(us, &Hello::Token { v: PROTO_V, token: tok.token.clone() }).unwrap();
+        let url = format!("https://127.0.0.1:{}/hang", tls.port);
+        let call = std::thread::spawn(move || {
+            let headers = vec![("Authorization".into(), "Bearer {{secret}}".into())];
+            waiting.call(&Request::Http { method: "GET".into(), url, headers, body: None }).map(|_| ())
+        });
+        assert!(wait_until(Duration::from_secs(10), || tls.hung.load(Ordering::SeqCst) == 1), "request reached the upstream");
+        // 上游不回复时请求一直等着，服务器不会自己放弃
+        std::thread::sleep(Duration::from_secs(1));
+        assert_eq!(tls.freed.load(Ordering::SeqCst), 0, "still waiting for the upstream");
+        // Agent 断开 → 服务器关闭到上游的连接
+        ctl.shutdown(std::net::Shutdown::Both).unwrap();
+        assert!(wait_until(Duration::from_secs(10), || tls.freed.load(Ordering::SeqCst) == 1), "upstream connection closed");
+        assert_eq!(call.join().unwrap().unwrap_err().code, "DISCONNECTED");
+        // 服务照常工作
+        assert_eq!(
+            agent
+                .call_as::<HttpResult>(&Request::Http {
+                    method: "GET".into(),
+                    url: format!("https://127.0.0.1:{}/echo", tls.port),
+                    headers: vec![("Authorization".into(), "Bearer {{secret}}".into())],
+                    body: None,
+                })
+                .unwrap()
+                .status,
+            200
+        );
+    }
+
     // 首次连接后记录了证书指纹。
     let pins: Vec<PinView> = admin.call_as(&Request::Pins).unwrap();
     assert!(pins.iter().any(|p| p.kind == "https" && p.host_port == format!("127.0.0.1:{}", tls.port)));
@@ -750,4 +818,49 @@ fn end_to_end() {
         .unwrap();
     assert!(!out.status.success());
     drop(svc);
+}
+
+/// 很慢的上游（默认 200 秒，超过以前 180 秒的上限）：请求一直等到回复。耗时长，手动运行：
+/// `PM_SLOW_SECS=200 cargo test -p passmanager --test e2e slow_upstream -- --ignored`
+#[test]
+#[ignore]
+fn slow_upstream_is_not_cut_off() {
+    // 上游等多少秒再回复
+    let secs: u64 = std::env::var("PM_SLOW_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(200);
+    // 独立的服务目录（Unix socket 路径有长度上限，Unix 上用 /tmp）
+    let base = if cfg!(windows) { std::env::temp_dir() } else { PathBuf::from("/tmp") };
+    let home = base.join(format!("pm-e2e-slow-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&home);
+    std::fs::create_dir_all(&home).unwrap();
+    let svc = Service::start(&home);
+    // 初始化、管理员登录、给 Agent 发令牌
+    Client::connect_at(&svc.socket(), &Hello::Setup { v: PROTO_V, password: PW.into() }).expect("setup");
+    let mut admin = svc.admin();
+    let tok: NewToken = admin.call_as(&Request::CreateToken { label: "slow-agent".into() }).unwrap();
+    // 绑定到本地自签名 HTTPS 服务的条目
+    let entry = EntryInput {
+        name: "gh".into(),
+        secret: Some(GH_SECRET.into()),
+        domains: vec!["127.0.0.1".into()],
+        self_signed: true,
+        ops: Some(vec!["http".into()]),
+        ..Default::default()
+    };
+    admin.call(&Request::AddEntry { entry }).unwrap();
+    let mut agent = svc.agent(&tok.token).unwrap();
+    let tls = tls_server(0);
+    // 发出请求并计时
+    let t0 = Instant::now();
+    let r: HttpResult = agent
+        .call_as(&Request::Http {
+            method: "GET".into(),
+            url: format!("https://127.0.0.1:{}/slow/{secs}", tls.port),
+            headers: vec![("Authorization".into(), "Bearer {{gh}}".into())],
+            body: None,
+        })
+        .unwrap();
+    // 等满了时间，并且拿到了正常的回复（密钥已脱敏）
+    assert_eq!(r.status, 200);
+    assert!(t0.elapsed() >= Duration::from_secs(secs), "{:?}", t0.elapsed());
+    assert!(r.body.contains("[REDACTED:gh]") && !r.body.contains(GH_SECRET));
 }

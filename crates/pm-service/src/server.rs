@@ -129,6 +129,17 @@ pub(crate) async fn handle_conn<S: AsyncRead + AsyncWrite + Unpin + Send + 'stat
                     Response::err(&e.code, red.redact_str(&e.message))
                 }
             },
+            // 上游 HTTP 不限时：等待期间同时读这条连接。Agent 断开（或按一问一答本不该来的新帧）时
+            // 丢弃这个请求，上游连接随之关闭，服务器上不会留下没人等的请求。
+            Ok(req) if req.waits_unbounded() => {
+                tokio::select! {
+                    r = shared.dispatch(&session, req) => r,
+                    _ = read_frame(&mut s, MAX_FRAME) => {
+                        log("http request cancelled: the agent disconnected");
+                        return;
+                    }
+                }
+            }
             Ok(req) => shared.dispatch(&session, req).await,
             Err(e) => Response::err("BAD_REQUEST", format!("invalid request: {e}")),
         };

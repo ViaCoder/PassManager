@@ -100,6 +100,29 @@ fn double_layer_roundtrip_and_key_fetch() {
     assert_eq!(split_echo(&got), big);
 }
 
+#[test]
+fn long_wait_lifts_and_restores_the_read_timeout() {
+    let s = start_server();
+    let mut c = client::connect(&target(&s), &public()).unwrap();
+    let sock = |c: &inner::InnerStream<client::TlsStream>| c.get_ref().sock.try_clone().unwrap();
+    // 新连接：读超时 600 秒，keepalive 已打开
+    assert_eq!(sock(&c).read_timeout().unwrap(), Some(client::IO_TIMEOUT));
+    assert!(socket2::SockRef::from(&sock(&c)).keepalive().unwrap());
+    let long = client::read_timeout_control(&c).unwrap();
+    // 上游 HTTP 请求期间：不设读超时
+    long(true).unwrap();
+    assert_eq!(sock(&c).read_timeout().unwrap(), None);
+    // 请求结束：恢复 600 秒
+    long(false).unwrap();
+    assert_eq!(sock(&c).read_timeout().unwrap(), Some(client::IO_TIMEOUT));
+    // 连接照常可用
+    c.write_all(b"ping").unwrap();
+    c.flush().unwrap();
+    let mut b = [0u8; 9];
+    c.read_exact(&mut b).unwrap();
+    assert_eq!(&b, b"echo:ping");
+}
+
 fn split_echo(data: &[u8]) -> Vec<u8> {
     let mut out = Vec::new();
     let mut i = 0;

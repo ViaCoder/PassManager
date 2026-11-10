@@ -900,7 +900,10 @@ pub async fn execute(p: Prepared, expected_pin: Option<String>, redactor: &Redac
         .https_only(true)
         .no_proxy()
         .connect_timeout(Duration::from_secs(20))
-        .timeout(Duration::from_secs(180))
+        // 不设整体超时：慢的上游（例如长时间生成的模型 API）可以一直等到回复；
+        // Agent 断开时服务器丢弃这个请求（见 server.rs），上游宕机或断网由 keepalive 发现。
+        .tcp_keepalive(pm_net::KEEPALIVE_TIME)
+        .tcp_keepalive_interval(pm_net::KEEPALIVE_INTERVAL)
         .user_agent(concat!("PassManager/", env!("CARGO_PKG_VERSION")));
     let observed = Arc::new(Mutex::new(None));
     if p.self_signed {

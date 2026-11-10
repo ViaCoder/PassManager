@@ -4,6 +4,16 @@ English | [简体中文](CHANGELOG.zh-CN.md)
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.3.11-rc.19] - 2026-11-10
+
+### Changed
+
+- **HTTP requests have no time limit.** The 180-second limit for a whole upstream HTTPS request is gone, so slow APIs (for
+  example a long model response) are no longer cut off. Connecting still times out after 20 seconds. While a request waits,
+  the agent client has no read timeout (other requests keep their 600 seconds), and both ends use TCP keepalive to notice a
+  dead peer or network. When the agent disconnects or is cancelled, the server drops the request and closes the upstream
+  connection, so nothing is left waiting on the server.
+
 ## [0.3.11-rc.18] - 2026-11-09
 
 ### Changed

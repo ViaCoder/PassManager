@@ -15,7 +15,7 @@ use crate::tls;
 pub type TlsStream = StreamOwned<ClientConnection, TcpStream>;
 
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
-/// 单次请求的最长等待（SSH 命令、慢速 HTTPS 目标）。
+/// 单次请求的最长等待（SSH 命令等）；上游 HTTP 请求不受这个限制，见 [`read_timeout_control`]。
 pub const IO_TIMEOUT: Duration = Duration::from_secs(600);
 
 /// 连接目标。`connect_addr` 用于测试（SNI 仍是 `host`）。
@@ -62,6 +62,8 @@ pub fn tls_connect(t: &Target) -> io::Result<TlsStream> {
     tcp.set_read_timeout(Some(IO_TIMEOUT))?;
     tcp.set_write_timeout(Some(IO_TIMEOUT))?;
     let _ = tcp.set_nodelay(true);
+    // 不限时的请求靠 keepalive 发现服务器宕机或断网（设置失败不影响连接本身）
+    let _ = crate::keepalive(&tcp);
     let cfg = tls::client_config(t.extra_ca_pem.as_deref()).map_err(io_err)?;
     let name = ServerName::try_from(t.host.clone()).map_err(io_err)?;
     let conn = ClientConnection::new(Arc::clone(&cfg), name).map_err(io_err)?;
@@ -93,6 +95,14 @@ pub fn connect(t: &Target, server: &ServerPublic) -> Result<InnerStream<TlsStrea
     let s = tls_connect(t)?;
     let e = exporter(&s)?;
     InnerStream::connect(s, server, &e)
+}
+
+/// 返回一个开关，调整这条会话流的读超时：`true` 时不设读超时（上游 HTTP 请求不限时，
+/// 服务器宕机或断网由 keepalive 发现），`false` 时恢复为 [`IO_TIMEOUT`]。
+pub fn read_timeout_control(s: &InnerStream<TlsStream>) -> io::Result<Box<dyn Fn(bool) -> io::Result<()> + Send>> {
+    // 复制一个指向同一个 socket 的句柄：读超时属于 socket 本身，改它就是改这条连接
+    let tcp = s.get_ref().sock.try_clone()?;
+    Ok(Box::new(move |long| tcp.set_read_timeout(if long { None } else { Some(IO_TIMEOUT) })))
 }
 
 /// 编译期断言：会话流可以当作 `Read + Write + Send` 使用（pm-proto 客户端要求）。

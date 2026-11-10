@@ -163,7 +163,7 @@ SealedPayload = { ct_mlkem, ct_mce, nonce_a, nonce_b, c2 }
 | MCP 工具 | CLI | 行为 |
 |---|---|---|
 | `lookup(target, use?)` | `PassManager lookup 目标 [--use http\|ssh\|scp\|git]` | 按需查询：对一个 URL、`user@host` 或主机（基础地址本身是秘密时用 `{{名称}}`），只返回引用名、字段名与照抄即可的写法（`how`），选择规则与真正执行请求时完全相同。不返回其他条目、该条目的其他域名、备注或用途清单 |
-| `http(method, url, headers?, body?)` | `PassManager http [METHOD] URL [-X] [-H 'K: V'] [-d BODY \| -d @file \| --json BODY]` | `{{secret}}` 只能写在凭据的位置（凭据类请求头、key / token / password 参数或字段的完整值、路径第一段），按 URL 主机自动选择密钥；管理密钥与令牌的路径不调用；只支持 HTTPS；不跟随跨主机重定向；删除 `Set-Cookie` 与认证类响应头；正文与响应头脱敏 |
+| `http(method, url, headers?, body?)` | `PassManager http [METHOD] URL [-X] [-H 'K: V'] [-d BODY \| -d @file \| --json BODY]` | `{{secret}}` 只能写在凭据的位置（凭据类请求头、key / token / password 参数或字段的完整值、路径第一段），按 URL 主机自动选择密钥；管理密钥与令牌的路径不调用；只支持 HTTPS；不跟随跨主机重定向；删除 `Set-Cookie` 与认证类响应头；正文与响应头脱敏；不限总时长（连接 20 秒、TCP keepalive；Agent 断开时丢弃请求） |
 | `ssh(target, command)` | `PassManager ssh [-p 端口] [-l 用户] user@host[:port] 命令…` | 内置 russh；password 失败时尝试 keyboard-interactive；命令以 `sudo ` 开头时，口令只经 stdin 交给 `sudo -k -S -v`，命令再以 `sudo -n` 执行（stdin 是 /dev/null，读不到口令）；命令里从不代入凭据；输出脱敏 |
 | `scp(source, destination)` | `PassManager scp [-P 端口] 源 目标` | 远程一侧写成 `user@host:/path`；SFTP 上传（创建/截断）或下载（内容脱敏，上限 64 MiB）；本地文件由客户端以当前用户身份读写 |
 

@@ -323,6 +323,8 @@ pub(crate) async fn serve_agents(shared: Arc<Shared>, listener: TcpListener) {
         let (shared, acceptor, keys, active) = (shared.clone(), acceptor.clone(), on.keys.clone(), active.clone());
         tokio::spawn(async move {
             let _ = tcp.set_nodelay(true);
+            // Agent 机器宕掉或断网时，keepalive 让等待中的读报错，不限时的请求随之取消
+            let _ = pm_net::keepalive(&tcp);
             if let Ok(Ok(tls)) = tokio::time::timeout(Duration::from_secs(15), acceptor.accept(tcp)).await
                 && let Ok(Some(stream)) = pm_net::inner::server::accept_tls(tls, &keys).await
             {

@@ -116,7 +116,13 @@ pub fn connect_in(d: &Path, cfg: &RemoteConfig) -> Result<Client, ApiError> {
             ),
         )
     })?;
-    Client::connect_stream(stream, &Hello::Token { v: PROTO_V, token: token.to_string() })
+    // 上游 HTTP 请求等待回复时不设读超时（拿不到开关时保留 600 秒的读超时，连接照常可用）
+    let long = pm_net::client::read_timeout_control(&stream).ok();
+    let c = Client::connect_stream(stream, &Hello::Token { v: PROTO_V, token: token.to_string() })?;
+    Ok(match long {
+        Some(f) => c.with_long_wait(f),
+        None => c,
+    })
 }
 
 /// MCP / CLI 的连接入口：设置了 `PASSMANAGER_HOME`（测试）或没有远程配置时返回 None（走本地 socket）。
