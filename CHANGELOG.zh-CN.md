@@ -4,6 +4,23 @@
 
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.3.11-rc.20] - 2026-11-14
+
+### 安全
+
+- **russh 0.64.1 → 0.65.1**，修复 RUSTSEC-2026-0495，从 2026-11-12 起每天的公告检查因为它失败。这条公告说的是 russh 的 SSH agent
+  服务端不理会 confirm 约束，PassManager 没有用这个服务端。这次升级同时修复了 PassManager 实际使用的 SSH 客户端的几个问题：服务器可以
+  用 EXT_INFO 包让客户端内存无限增长，或者宣告最大包长为 0 让通道卡住；`kex_done` 在主机密钥验证之前就被调用。
+- **rsa 0.10.0-rc.18 → 0.10.0**，修复 RUSTSEC-2023-0071（Marvin 计时侧信道）。它涉及用保存的 RSA 私钥签名。rsa 0.10.0 用常数时间
+  运算，并对每次私钥运算加盲。russh 0.65.1 仍钉在候选版本上，所以 russh 暂时取自上游改用 rsa 0.10 的提交（`b541663a`，
+  `Cargo.toml` 与 `Cargo.lock` 里都固定了完整的提交号），等 russh 发布包含它的版本后改回 crates.io。这条公告不再被忽略，
+  `deny.toml` 不忽略任何公告。
+- **RSA 私钥不再用 SHA-1 签名。** 服务器没有宣告 `server-sig-algs` 时，保存的 RSA 私钥原来用 SHA-1 的 `ssh-rsa` 登录；现在用
+  `rsa-sha2-512`，服务器只宣告 `rsa-sha2-256` 时用它。只接受 `ssh-rsa` 的服务器（OpenSSH 7.2 之前）会拒绝这把私钥，同一条目里
+  的口令仍会尝试。
+- **rustix 1.1.5 → 1.1.6**，修复 RUSTSEC-2026-0486（xattr 函数，PassManager 不调用）。
+- Rust 最低版本改为 1.89，russh 0.65 需要它。
+
 ## [0.3.11-rc.19] - 2026-11-10
 
 ### 变更

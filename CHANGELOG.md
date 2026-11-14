@@ -4,6 +4,25 @@ English | [简体中文](CHANGELOG.zh-CN.md)
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.3.11-rc.20] - 2026-11-14
+
+### Security
+
+- **russh 0.64.1 → 0.65.1** for RUSTSEC-2026-0495, which made the daily advisory check fail from 2026-11-12. That advisory is
+  about russh's SSH agent server ignoring the confirm constraint; PassManager does not use that server. The update also fixes
+  issues in the SSH client PassManager does use: a server could grow the client's memory without bound with EXT_INFO packets
+  or stall a channel by declaring a maximum packet size of zero, and `kex_done` ran before the host key was verified.
+- **rsa 0.10.0-rc.18 → 0.10.0** for RUSTSEC-2023-0071 (Marvin timing side channel). It applies to signing with a stored RSA
+  private key. rsa 0.10.0 uses constant-time arithmetic and blinds every private-key operation. russh 0.65.1 still pins the
+  release candidate, so russh is taken from the upstream commit that moves it to rsa 0.10 (`b541663a`, pinned by its full
+  hash in `Cargo.toml` and `Cargo.lock`) until russh publishes a release with it. The advisory is no longer ignored:
+  `deny.toml` ignores nothing.
+- **RSA keys never sign with SHA-1.** When a server did not announce `server-sig-algs`, a stored RSA key logged in with SHA-1
+  `ssh-rsa`. It now uses `rsa-sha2-512` unless the server asks for `rsa-sha2-256`. Servers that accept only `ssh-rsa`
+  (OpenSSH before 7.2) reject the key; a password in the same entry is still tried.
+- **rustix 1.1.5 → 1.1.6** for RUSTSEC-2026-0486 (xattr functions; PassManager does not call them).
+- The minimum Rust version is now 1.89, which russh 0.65 needs.
+
 ## [0.3.11-rc.19] - 2026-11-10
 
 ### Changed

@@ -206,8 +206,9 @@ pub async fn connect_on(t: &Target, expected_pin: Option<String>, via: Option<(&
     if let Some(pem) = &t.key {
         let key = russh::keys::decode_secret_key(pem, None)
             .map_err(|_| err("BAD_CREDENTIAL", "the stored private key could not be parsed (encrypted keys are not supported)"))?;
-        let hash = handle.best_supported_rsa_hash().await.ok().flatten().flatten();
-        match handle.authenticate_publickey(t.user.clone(), PrivateKeyWithHashAlg::new(Arc::new(key), hash)).await {
+        // RSA 签名的哈希：照服务器宣告的选，但从不用 SHA-1（见 rsa_hash）。其他类型的密钥忽略这个值。
+        let hash = rsa_hash(handle.best_supported_rsa_hash().await.ok().flatten());
+        match handle.authenticate_publickey(t.user.clone(), PrivateKeyWithHashAlg::new(Arc::new(key), Some(hash))).await {
             Ok(client::AuthResult::Success) => authed = true,
             Ok(client::AuthResult::Failure { remaining_methods, .. }) => {
                 password_offered =
@@ -226,6 +227,19 @@ pub async fn connect_on(t: &Target, expected_pin: Option<String>, via: Option<(&
     }
     let obs = observed.lock().unwrap().clone();
     Ok(Connected::Session { handle, observed: obs })
+}
+
+/// RSA 私钥登录用的签名哈希。`advertised` 是 russh 从服务器的 server-sig-algs 里选出的结果：
+/// `Some(Some(h))` 表示服务器宣告了 rsa-sha2-512 或 rsa-sha2-256，照它选；
+/// `Some(None)`（只宣告了 SHA-1 的 ssh-rsa）和 `None`（没有宣告）都改用 rsa-sha2-512（RFC 8332，OpenSSH 7.2 起支持），
+/// 不签 SHA-1：SHA-1 已能构造选择前缀碰撞，OpenSSH 8.8 起默认拒绝 ssh-rsa。
+fn rsa_hash(advertised: Option<Option<HashAlg>>) -> HashAlg {
+    match advertised {
+        // 服务器明确宣告的 SHA-2 算法。
+        Some(Some(h)) => h,
+        // 其余情况一律 SHA-512。
+        _ => HashAlg::Sha512,
+    }
 }
 
 /// 客户端算法偏好（见模块说明）。
@@ -387,6 +401,15 @@ pub async fn disconnect(handle: Handle<Checker>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// RSA 签名哈希：服务器宣告什么 SHA-2 就用什么；只宣告 ssh-rsa 或什么都没宣告时用 SHA-512，从不返回 SHA-1。
+    #[test]
+    fn rsa_hash_never_sha1() {
+        assert_eq!(rsa_hash(Some(Some(HashAlg::Sha512))), HashAlg::Sha512);
+        assert_eq!(rsa_hash(Some(Some(HashAlg::Sha256))), HashAlg::Sha256);
+        assert_eq!(rsa_hash(Some(None)), HashAlg::Sha512, "只宣告 ssh-rsa");
+        assert_eq!(rsa_hash(None), HashAlg::Sha512, "没有 server-sig-algs");
+    }
 
     /// 口令条目有多行时，一次连接取其中一行（登录与 sudo 共用）；私钥整个保留。
     #[test]

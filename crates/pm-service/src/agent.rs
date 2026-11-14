@@ -223,6 +223,35 @@ mod tests {
         assert!(sign("not a key", &data, 0).is_err());
     }
 
+    /// RSA 私钥签名（rsa 0.10：常数时间运算并默认加盲，修复 Marvin 计时侧信道）：
+    /// 按 flags 选 rsa-sha2-256 / rsa-sha2-512，签名都能被公钥验证，且算法名与 flags 一致。
+    #[test]
+    fn rsa_signing_follows_flags() {
+        // 运行时生成一次性的 2048 位 RSA 密钥（仓库里不放任何私钥）。
+        let kp = ssh_key::private::RsaKeypair::random(&mut rand::rng(), 2048).unwrap();
+        // 包装成带注释的 SSH 私钥，导出为 OpenSSH PEM，和服务器上保存的格式相同。
+        let key = russh::keys::PrivateKey::new(ssh_key::private::KeypairData::Rsa(kp), "test").unwrap();
+        let pem = key.to_openssh(ssh_key::LineEnding::LF).unwrap();
+        // 待签数据：针对这个公钥的一次 publickey 认证请求。
+        let data = userauth(b"sess", &key.public_key().to_bytes().unwrap(), None);
+        // 三种 flags：0 默认 SHA-512，256 标志选 SHA-256，512 标志选 SHA-512。
+        for (flags, want) in [(0, HashAlg::Sha512), (FLAG_RSA_SHA2_256, HashAlg::Sha256), (FLAG_RSA_SHA2_512, HashAlg::Sha512)] {
+            // 签名并解析回 SSH 签名结构。
+            let out = sign(&pem, &data, flags).unwrap();
+            let sig = ssh_key::Signature::try_from(out.as_slice()).unwrap();
+            // 签名算法必须是 rsa-sha2-256 / rsa-sha2-512，绝不能退回 SHA-1 的 ssh-rsa。
+            assert_eq!(sig.algorithm(), ssh_key::Algorithm::Rsa { hash: Some(want) }, "flags {flags}");
+            // 公钥能验证这个签名。
+            Verifier::verify(key.public_key(), &data, &sig).unwrap();
+            // 改动一个字节的数据就验证不过。
+            let mut other = data.clone();
+            other[0] ^= 1;
+            assert!(Verifier::verify(key.public_key(), &other, &sig).is_err(), "flags {flags}");
+        }
+        // 公钥导出与私钥一致。
+        assert_eq!(public_blob(&pem).unwrap(), key.public_key().to_bytes().unwrap());
+    }
+
     #[test]
     fn host_key_inputs() {
         let k = test_key(9);

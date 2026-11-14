@@ -99,7 +99,8 @@ What else 0.2.0 adds on top of `http` / `ssh` / `scp`:
   single-value entry. `sudo` uses the `password` field. Agents only ever see field *names*.
 - **SSH keys**: `--kind ssh-key` stores an unencrypted OpenSSH/PEM private key (ECDSA P-384, Ed25519, RSA). Only the public
   fingerprint is shown. Public-key login is used for key entries and works with hardened sshd profiles
-  (`mlkem768x25519-sha256` / `ecdh-sha2-nistp384`, `aes256-gcm@openssh.com`, `hmac-sha2-512-etm@openssh.com`, `AuthenticationMethods publickey`).
+  (`mlkem768x25519-sha256` / `ecdh-sha2-nistp384`, `aes256-gcm@openssh.com`, `hmac-sha2-512-etm@openssh.com`, `AuthenticationMethods publickey`). RSA keys sign with `rsa-sha2-512` (or `rsa-sha2-256` when the server
+  asks for it), never with SHA-1 `ssh-rsa`.
 - **`PassManager ssh-agent`** (agent machine): an OpenSSH agent socket so plain `ssh`, `scp` and `git` can use keys stored on the
   server. Keys never leave the server; it only signs `publickey` userauth requests bound (OpenSSH ≥ 8.9 `session-bind`) to a host key
   that belongs to the entry, rate-limited and audited.

@@ -2,6 +2,7 @@
 name = "pm-net"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 publish.workspace = true
 license-file.workspace = true
 description = "PassManager network layer: post-quantum TLS policy, ACME (DNS-01 via Cloudflare), the inner ML-KEM + McEliece agent channel"

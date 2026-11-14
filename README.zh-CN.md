@@ -94,7 +94,8 @@ passmanager show --label laptop                                            # 打
   `sudo` 使用 `password` 字段。Agent 只能看到字段**名称**。
 - **SSH 私钥**：`--kind ssh-key` 保存未加密的 OpenSSH/PEM 私钥（ECDSA P-384、Ed25519、RSA），只显示公钥指纹。私钥条目用公钥登录，
   兼容加固的 sshd 配置（`mlkem768x25519-sha256` / `ecdh-sha2-nistp384`、`aes256-gcm@openssh.com`、
-  `hmac-sha2-512-etm@openssh.com`、`AuthenticationMethods publickey`）。
+  `hmac-sha2-512-etm@openssh.com`、`AuthenticationMethods publickey`）。RSA 私钥用 `rsa-sha2-512` 签名（服务器只宣告
+  `rsa-sha2-256` 时用它），从不用 SHA-1 的 `ssh-rsa`。
 - **`PassManager ssh-agent`**（Agent 机器）：OpenSSH agent 套接字，让普通的 `ssh`、`scp`、`git` 使用服务器上的私钥。
   私钥不离开服务器；服务器只为绑定到条目主机密钥（OpenSSH ≥ 8.9 的 `session-bind`）的 `publickey` 认证请求签名，限速并记审计。
 - **`PassManager git-proxy`**（Agent 机器）：只监听回环地址的 git smart-HTTP 代理。注册时装成用户服务，并为每个 git 条目的主机写入

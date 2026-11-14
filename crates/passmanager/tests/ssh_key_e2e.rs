@@ -18,12 +18,13 @@ use std::time::{Duration, Instant};
 use common::*;
 
 fn keygen(dir: &Path, name: &str, passphrase: &str) -> (PathBuf, String) {
+    keygen_typed(dir, name, passphrase, &["-t", "ecdsa", "-b", "384"])
+}
+
+/// 用 ssh-keygen 生成指定类型的一次性测试密钥（type_args 例如 `-t rsa -b 3072`），返回路径与 SHA256 指纹。
+fn keygen_typed(dir: &Path, name: &str, passphrase: &str, type_args: &[&str]) -> (PathBuf, String) {
     let p = dir.join(name);
-    let o = Command::new("ssh-keygen")
-        .args(["-q", "-t", "ecdsa", "-b", "384", "-N", passphrase, "-C", "pm-test", "-f"])
-        .arg(&p)
-        .output()
-        .unwrap();
+    let o = Command::new("ssh-keygen").arg("-q").args(type_args).args(["-N", passphrase, "-C", "pm-test", "-f"]).arg(&p).output().unwrap();
     assert!(o.status.success(), "ssh-keygen: {}", String::from_utf8_lossy(&o.stderr));
     let fp = String::from_utf8_lossy(&Command::new("ssh-keygen").arg("-lf").arg(&p).output().unwrap().stdout)
         .split_whitespace()
@@ -110,21 +111,31 @@ struct H {
     leak: String,
     /// 认证尝试的记录（方法名），用于检查先私钥、后口令的顺序。
     attempts: Arc<Mutex<Vec<String>>>,
+    /// 验证通过的公钥签名所用的算法（例如 rsa-sha2-512），用于检查 RSA 不会退回 SHA-1。
+    verified: Arc<Mutex<Vec<String>>>,
 }
 
 impl russh::server::Handler for H {
     type Error = russh::Error;
 
-    async fn auth_publickey_offered(&mut self, _u: &str, k: &russh::keys::PublicKey) -> Result<russh::server::Auth, Self::Error> {
+    // russh 0.65 起传入的是 PublicKeyOffer，公钥在 public_key 字段里。
+    async fn auth_publickey_offered(
+        &mut self,
+        _u: &str,
+        offer: russh::server::PublicKeyOffer<'_>,
+    ) -> Result<russh::server::Auth, Self::Error> {
         self.attempts.lock().unwrap().push("publickey".into());
-        Ok(if self.allowed.as_ref().is_some_and(|a| a.key_data() == k.key_data()) {
+        Ok(if self.allowed.as_ref().is_some_and(|a| a.key_data() == offer.public_key.key_data()) {
             russh::server::Auth::Accept
         } else {
             russh::server::Auth::reject()
         })
     }
-    async fn auth_publickey(&mut self, _u: &str, k: &russh::keys::PublicKey) -> Result<russh::server::Auth, Self::Error> {
-        Ok(if self.allowed.as_ref().is_some_and(|a| a.key_data() == k.key_data()) {
+    // russh 0.65 起传入的是已验证签名的 VerifiedPublicKey，公钥同样在 public_key 字段里。
+    async fn auth_publickey(&mut self, _u: &str, key: russh::server::VerifiedPublicKey<'_>) -> Result<russh::server::Auth, Self::Error> {
+        Ok(if self.allowed.as_ref().is_some_and(|a| a.key_data() == key.public_key.key_data()) {
+            // 记下这次已验证签名的算法名。
+            self.verified.lock().unwrap().push(key.algorithm.as_str().to_string());
             russh::server::Auth::Accept
         } else {
             russh::server::Auth::reject()
@@ -269,6 +280,7 @@ fn ssh_key_auth_end_to_end() {
             password: None,
             leak: leak.clone(),
             attempts: Default::default(),
+            verified: Default::default(),
         }
     };
     // A：只提供 mlkem768x25519-sha256；B：只提供 ecdh-sha2-nistp384（旧主机的回退）；C：口令认证。
@@ -283,6 +295,7 @@ fn ssh_key_auth_end_to_end() {
             password: Some("PwEntry-123!".into()),
             leak: "PwEntry-123!".into(),
             attempts: Default::default(),
+            verified: Default::default(),
         })
     };
     let mut outputs = String::new();
@@ -388,6 +401,63 @@ fn ssh_key_auth_end_to_end() {
 /// 同一主机同时匹配私钥条目与"初始口令"条目（通配符 / 网段绑定、只允许 ssh）：
 /// 先用私钥；私钥被拒且服务器提供口令方式时回退到口令；服务器只允许公钥时不发送口令；
 /// 只允许 ssh 的口令不能代入 HTTP 请求；sudo 使用口令条目的口令。
+/// RSA 私钥登录（rsa 0.10：常数时间运算、默认加盲）：导入 ssh-keygen 生成的 RSA-3072 私钥，
+/// 经 PassManager 登录测试服务器执行命令；签名算法必须是 rsa-sha2-512/256，不能是 SHA-1 的 ssh-rsa。
+#[test]
+fn rsa_key_login_end_to_end() {
+    if !have("ssh-keygen") {
+        eprintln!("跳过：没有 ssh-keygen");
+        return;
+    }
+    let env = Env::setup("sshrsa");
+    let kd = env.base.join("keys");
+    std::fs::create_dir_all(&kd).unwrap();
+    // 主机密钥仍是 P-384；客户端密钥是 RSA-3072。
+    let (host1, _) = keygen(&kd, "host1", "");
+    let (client, client_fp) = keygen_typed(&kd, "client-rsa", "", &["-t", "rsa", "-b", "3072"]);
+    let client_pem = std::fs::read_to_string(&client).unwrap();
+    let client_pub = russh::keys::decode_secret_key(&client_pem, None).unwrap().public_key().clone();
+    // 服务器只认这把 RSA 公钥，并把已验证的签名算法记下来。
+    let verified: Arc<Mutex<Vec<String>>> = Default::default();
+    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+    let mk = {
+        let (client_pub, verified) = (client_pub.clone(), verified.clone());
+        move || H {
+            files: Default::default(),
+            channels: HashMap::new(),
+            allowed: Some(client_pub.clone()),
+            password: None,
+            leak: "nothing-secret".into(),
+            attempts: Default::default(),
+            verified: verified.clone(),
+        }
+    };
+    let a = serve_with(&rt, 0, &host1, vec![russh::kex::MLKEM768X25519_SHA256], &[russh::MethodKind::PublicKey], mk);
+
+    // 导入：只打印公钥指纹。
+    let o = env
+        .run_stdin(&["import", "--ops", "ssh", "--name", "rsa-key", "--kind", "ssh-key", "--domain", "127.0.0.1"], client_pem.as_bytes());
+    assert!(o.status.success(), "{}", stderr(&o));
+    assert!(stdout(&o).contains(&client_fp), "{}", stdout(&o));
+    let mut outputs = stdout(&o) + &stderr(&o);
+
+    // 用 RSA 私钥登录并执行命令。
+    let (ok, v, out) = ssh(&env, &format!("deploy@127.0.0.1:{}", a.port), "uptime");
+    assert!(ok, "{out}");
+    assert!(v["stdout"].as_str().unwrap().contains("ran: uptime"), "{out}");
+    outputs += &out;
+    // 服务器验证过一次签名，算法是 rsa-sha2-512 或 rsa-sha2-256。
+    let algs = verified.lock().unwrap().clone();
+    assert_eq!(algs.len(), 1, "{algs:?}");
+    assert!(algs[0] == "rsa-sha2-512" || algs[0] == "rsa-sha2-256", "{algs:?}");
+
+    // 私钥的任何一行都不会出现在输出里。
+    for line in client_pem.lines().filter(|l| !l.starts_with("-----")) {
+        assert!(!outputs.contains(line), "输出里出现了私钥内容");
+    }
+    a.task.abort();
+}
+
 #[test]
 fn key_first_then_password_fallback() {
     if !have("ssh-keygen") {
@@ -414,6 +484,7 @@ fn key_first_then_password_fallback() {
             password: Some(INIT.into()),
             leak: INIT.into(),
             attempts: attempts.clone(),
+            verified: Default::default(),
         }
     };
     let both = [russh::MethodKind::PublicKey, russh::MethodKind::Password];
@@ -486,7 +557,11 @@ fn hardened_openssh_server() {
     std::fs::create_dir_all(&kd).unwrap();
     let (host, _) = keygen(&kd, "host_ecdsa", "");
     let (client, _) = keygen(&kd, "client", "");
-    std::fs::copy(client.with_extension("pub"), kd.join("authorized_keys")).unwrap();
+    // 第二把客户端密钥是 RSA-3072；两把公钥都写进 authorized_keys。
+    let (client_rsa, _) = keygen_typed(&kd, "client_rsa", "", &["-t", "rsa", "-b", "3072"]);
+    let mut authorized = std::fs::read_to_string(client.with_extension("pub")).unwrap();
+    authorized += &std::fs::read_to_string(client_rsa.with_extension("pub")).unwrap();
+    std::fs::write(kd.join("authorized_keys"), authorized).unwrap();
     let kex_supported = String::from_utf8_lossy(&Command::new("ssh").args(["-Q", "kex"]).output().unwrap().stdout).to_string();
     let pq = if kex_supported.lines().any(|l| l == "mlkem768x25519-sha256") {
         "mlkem768x25519-sha256"
@@ -499,7 +574,7 @@ fn hardened_openssh_server() {
         &cfg,
         format!(
             "ListenAddress 127.0.0.1:{port}\nHostKey {}\nPidFile none\nUsePAM no\nStrictModes no\nAuthorizedKeysFile {}\n\
-             KexAlgorithms {pq},ecdh-sha2-nistp384\nHostKeyAlgorithms ecdsa-sha2-nistp384\nPubkeyAcceptedAlgorithms ecdsa-sha2-nistp384\n\
+             KexAlgorithms {pq},ecdh-sha2-nistp384\nHostKeyAlgorithms ecdsa-sha2-nistp384\nPubkeyAcceptedAlgorithms ecdsa-sha2-nistp384,rsa-sha2-512,rsa-sha2-256\n\
              Ciphers aes256-gcm@openssh.com\nMACs hmac-sha2-512-etm@openssh.com\nAuthenticationMethods publickey\nPasswordAuthentication no\n\
              KbdInteractiveAuthentication no\nMaxAuthTries 3\nLogLevel ERROR\n",
             host.display(),
@@ -526,9 +601,20 @@ fn hardened_openssh_server() {
     );
     assert!(o.status.success(), "{}", stderr(&o));
     let (ok, v, out) = ssh(&env, &format!("{user}@localhost:{port}"), "echo pm-ok-$((40+2))");
+    // RSA 条目：sshd 只接受 rsa-sha2-512/256、不接受 SHA-1 的 ssh-rsa，按引用名只用这个条目登录。
+    let o = env.run_stdin(
+        &["import", "--ops", "ssh", "--name", "rsakey", "--kind", "ssh-key", "--domain", &format!("localhost:{port}")],
+        &std::fs::read(&client_rsa).unwrap(),
+    );
+    let rsa_import = (o.status.success(), stderr(&o));
+    let (rsa_ok, rsa_v, rsa_out) = ssh(&env, &format!("rsakey/{user}@localhost:{port}"), "echo pm-rsa-$((40+2))");
     let _ = sshd.kill();
     let _ = sshd.wait();
     assert!(ok, "{out}");
     assert_eq!(v["exit_code"], 0, "{out}");
     assert!(v["stdout"].as_str().unwrap().contains("pm-ok-42"), "{out}");
+    assert!(rsa_import.0, "{}", rsa_import.1);
+    assert!(rsa_ok, "{rsa_out}");
+    assert_eq!(rsa_v["exit_code"], 0, "{rsa_out}");
+    assert!(rsa_v["stdout"].as_str().unwrap().contains("pm-rsa-42"), "{rsa_out}");
 }

@@ -47,3 +47,4 @@ entropy	crates/passmanager/tests/relay_e2e.rs	d37933396b2488f1	run --http 端到
 entropy	crates/passmanager/tests/relay_e2e.rs	67017656c345198c	run --http 端到端测试的响应体标记（证明日志里没有响应体）
 pem	crates/pm-service/src/ssh.rs	03d104c669e3c7b6	测试：多行口令每次取一行，私钥整个保留（内容是 AAAA）
 pem	crates/pm-vault/src/model.rs	03d104c669e3c7b6	测试：PEM 私钥不按行拆开（内容是 AAAA / BBBB）
+entropy	Cargo.toml	00ee4c4f3f547e1e	临时固定的 russh 上游 git 提交号（公开的提交哈希，不是机密），russh 发版后与 patch 一起删除

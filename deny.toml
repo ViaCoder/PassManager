@@ -6,12 +6,8 @@ all-features = false
 [advisories]
 version = 2
 yanked = "deny"
-ignore = [
-    # Marvin 计时侧信道只影响 RSA 私钥运算。PassManager 只在用户保存了 RSA 私钥的 SSH 条目上，
-    # 对每次连接（且只连向条目绑定的主机）做一次签名；主机 RSA 公钥验证不受影响。
-    # 为保留对 RSA 密钥的兼容性而接受该风险，文档建议使用 Ed25519 密钥。
-    { id = "RUSTSEC-2023-0071", reason = "only RSA private-key ops; one signature per SSH connection to a bound host; ed25519 recommended" },
-]
+# 不忽略任何公告：有新公告时 CI 失败，修复之后才能发布。
+ignore = []
 
 [licenses]
 version = 2
@@ -42,3 +38,5 @@ allow-wildcard-paths = true
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+# 只允许这一个 git 来源：Cargo.toml 里临时固定的 russh 提交（rsa 0.10 的修复），russh 发版后删除。
+allow-git = ["https://github.com/Eugeny/russh"]

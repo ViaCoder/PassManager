@@ -59,12 +59,14 @@ impl russh::server::Handler for S {
         self.log.push(format!("{} password {u}", self.name));
         Ok(if self.password.as_deref() == Some(p) { Auth::Accept } else { Auth::reject() })
     }
-    async fn auth_publickey_offered(&mut self, u: &str, k: &russh::keys::PublicKey) -> Result<Auth, Self::Error> {
+    // russh 0.65 起传入的是 PublicKeyOffer，公钥在 public_key 字段里。
+    async fn auth_publickey_offered(&mut self, u: &str, offer: russh::server::PublicKeyOffer<'_>) -> Result<Auth, Self::Error> {
         self.log.push(format!("{} publickey {u}", self.name));
-        Ok(self.key_ok(k))
+        Ok(self.key_ok(offer.public_key))
     }
-    async fn auth_publickey(&mut self, _u: &str, k: &russh::keys::PublicKey) -> Result<Auth, Self::Error> {
-        Ok(self.key_ok(k))
+    // russh 0.65 起传入的是已验证签名的 VerifiedPublicKey，公钥同样在 public_key 字段里。
+    async fn auth_publickey(&mut self, _u: &str, key: russh::server::VerifiedPublicKey<'_>) -> Result<Auth, Self::Error> {
+        Ok(self.key_ok(key.public_key))
     }
     async fn channel_open_session(&mut self, channel: Channel<Msg>, reply: ChannelOpenHandle, _s: &mut Session) -> Result<(), Self::Error> {
         self.channels.insert(channel.id(), channel);
