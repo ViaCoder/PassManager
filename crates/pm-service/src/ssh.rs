@@ -293,7 +293,7 @@ async fn keyboard_interactive(handle: &mut Handle<Checker>, user: &str, secret: 
     false
 }
 
-fn shell_quote(s: &str) -> String {
+pub(crate) fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
 }
 
@@ -368,6 +368,37 @@ pub async fn upload(handle: &Handle<Checker>, remote_path: &str, data: &[u8]) ->
     f.shutdown().await.map_err(|x| err("UPSTREAM_ERROR", format!("upload {remote_path}: {x}")))?;
     let _ = s.close().await;
     Ok(())
+}
+
+/// 上传并指定权限（托管证书的私钥用 0600）：创建时就带上权限，不会先以默认权限落盘。
+pub async fn upload_mode(handle: &Handle<Checker>, remote_path: &str, data: &[u8], mode: u32) -> Result<(), ApiErr> {
+    use russh_sftp::protocol::{FileAttributes, OpenFlags};
+    use tokio::io::AsyncWriteExt;
+    let s = sftp(handle).await?;
+    let e = |x: russh_sftp::client::error::Error| err("UPSTREAM_ERROR", format!("upload {remote_path}: {x}"));
+    let attrs = FileAttributes { permissions: Some(mode), ..FileAttributes::empty() };
+    let mut f = s
+        .open_with_flags_and_attributes(remote_path, OpenFlags::CREATE | OpenFlags::TRUNCATE | OpenFlags::WRITE, attrs)
+        .await
+        .map_err(e)?;
+    f.write_all(data).await.map_err(|x| err("UPSTREAM_ERROR", format!("upload {remote_path}: {x}")))?;
+    f.shutdown().await.map_err(|x| err("UPSTREAM_ERROR", format!("upload {remote_path}: {x}")))?;
+    // 已存在的文件不会因 CREATE 改权限：再设一次，保证结果是 mode
+    let _ = s.set_metadata(remote_path, FileAttributes { permissions: Some(mode), ..FileAttributes::empty() }).await;
+    let _ = s.close().await;
+    Ok(())
+}
+
+/// 删除远端文件（不存在也算成功）。
+pub async fn remove(handle: &Handle<Checker>, remote_path: &str) -> Result<(), ApiErr> {
+    let s = sftp(handle).await?;
+    let r = match s.remove_file(remote_path).await {
+        Ok(()) => Ok(()),
+        Err(russh_sftp::client::error::Error::Status(st)) if st.status_code == russh_sftp::protocol::StatusCode::NoSuchFile => Ok(()),
+        Err(e) => Err(err("UPSTREAM_ERROR", format!("remove {remote_path}: {e}"))),
+    };
+    let _ = s.close().await;
+    r
 }
 
 pub async fn download(handle: &Handle<Checker>, remote_path: &str) -> Result<Vec<u8>, ApiErr> {

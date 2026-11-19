@@ -84,6 +84,26 @@ passmanager init --admin-allow any                             # 取消限制
 其他来源（包括服务器本机）只会得到 404：请从列表里的地址打开登录链接。Agent、`/tang/` 和 `/a/` 不受影响。重新运行安装脚本不会改变这项设置。
 空列表是配置错误，绝不表示“所有人”。
 
+### 1.3 给别的主机签证书（托管证书）
+
+服务器为自己的证书已经有 Let's Encrypt 账号和封存的 Cloudflare 令牌。它可以用同一个账号与令牌给别的主机签证书，
+再用库里的凭据经 SSH 装上去。那台主机拿不到 Cloudflare 令牌，也不需要 PassManager 客户端。服务器上的 root：
+
+```sh
+passmanager cert add --domain lab.example.com --target root@198.51.100.23 --dir /root/pm-cert \
+    --after 'pvenode cert set /root/pm-cert/lab.example.com.pem /root/pm-cert/lab.example.com.key --force --restart && systemctl reload caddy'
+passmanager cert list
+passmanager cert renew lab.example.com --wait     # 立即签发并投递，等待结果（最多 5 分钟）
+passmanager cert remove lab.example.com
+```
+
+- 该域名的 DNS-01 记录用服务器的 Cloudflare 令牌写入和删除；私钥（P-384）用设备密钥封存在 `tls/managed/<域名>/`；
+  续期与服务器自己的证书在同一个循环里（每 6 小时检查，到期前 30 天续期，失败后指数退避）。
+- 投递：服务器用库里绑定该主机的条目打开 SSH 会话（与 `ssh` 工具相同的查找，支持 `跳板>目标`），建 `--dir`（0700），
+  上传 `<域名>.pem` 与 `<域名>.key`（0600），执行 `--after` 命令，无论成败都删掉两个文件。命令退出码不为 0 时
+  `cert list` 与 `passmanager status` 会显示原因，之后每 10 分钟重试投递直到成功。
+- 没有凭据的目标 `cert add` 直接拒绝。配置存在加密库里（载荷 v5；旧程序打不开含托管证书的库，与别名相同）。
+
 ## 2. 网页管理
 
 在你自己已注册的电脑上，一条命令就能打开（没有密码，也不用复制链接）：

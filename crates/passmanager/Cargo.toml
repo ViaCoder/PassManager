@@ -41,6 +41,7 @@ windows-service = "0.8"
 
 [dev-dependencies]
 pm-platform = { path = "../pm-platform", features = ["test-hooks"] }
+pm-net = { path = "../pm-net", features = ["test-hooks"] }
 tempfile = "3"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time", "sync"] }
 russh = "0.65"

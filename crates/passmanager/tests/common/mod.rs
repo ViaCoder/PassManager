@@ -102,6 +102,15 @@ impl Env {
 
     /// `single`：单端口模式（网页与 Agent 通道共用一个端口，按 ALPN 分流）。
     pub fn setup_with(tag: &str, single: bool) -> Self {
+        Self::setup_full(tag, single, None)
+    }
+
+    /// 带 ACME（Pebble）的服务器：`acme` = (目录 URL, 根证书路径, challtestsrv 地址)。服务自己的证书仍先导入自签的。
+    pub fn setup_acme(tag: &str, directory: &str, root_pem: &std::path::Path, challtest: &str) -> Self {
+        Self::setup_full(tag, false, Some((directory.to_string(), root_pem.to_path_buf(), challtest.to_string())))
+    }
+
+    fn setup_full(tag: &str, single: bool, acme: Option<(String, PathBuf, String)>) -> Self {
         let base = PathBuf::from("/tmp").join(format!("pm-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         std::fs::create_dir_all(&base).unwrap();
@@ -130,7 +139,16 @@ impl Env {
         } else {
             args.extend(["--web-port", w.as_str(), "--agent-port", a.as_str()]);
         }
-        args.extend(["--acme-directory", ""]);
+        let (dir_s, root_s, dns_s);
+        match &acme {
+            Some((d, r, c)) => {
+                dir_s = d.clone();
+                root_s = r.display().to_string();
+                dns_s = format!("challtest:{c}");
+                args.extend(["--acme-directory", dir_s.as_str(), "--acme-root-pem", root_s.as_str(), "--dns", dns_s.as_str()]);
+            }
+            None => args.extend(["--acme-directory", ""]),
+        }
         let o = env.run(&args);
         assert!(o.status.success(), "init: {}{}", stdout(&o), stderr(&o));
         let o = env.run(&["import-cert", env.ca.to_str().unwrap(), env.base.join("key.pem").to_str().unwrap()]);
@@ -353,7 +371,7 @@ pub fn start_sshd(dir: &std::path::Path, authorized_pub: &std::path::Path) -> Ss
             "ListenAddress 127.0.0.1:{port}\nHostKey {}\nPidFile none\nUsePAM no\nStrictModes no\nAuthorizedKeysFile {}\n\
              KexAlgorithms {pq},ecdh-sha2-nistp384\nHostKeyAlgorithms ecdsa-sha2-nistp384\nPubkeyAcceptedAlgorithms ecdsa-sha2-nistp384\n\
              Ciphers aes256-gcm@openssh.com\nMACs hmac-sha2-512-etm@openssh.com\nAuthenticationMethods publickey\nPasswordAuthentication no\n\
-             KbdInteractiveAuthentication no\nMaxAuthTries 3\nLogLevel ERROR\n",
+             KbdInteractiveAuthentication no\nMaxAuthTries 3\nLogLevel ERROR\nSubsystem sftp internal-sftp\n",
             host.display(),
             dir.join("authorized_keys").display()
         ),

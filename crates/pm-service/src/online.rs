@@ -236,19 +236,9 @@ pub async fn renew_if_needed(
     if !force && st.failures > 0 && now() - st.last_attempt < pm_net::acme::backoff_secs(st.failures - 1) as i64 {
         return Err(format!("上次申请失败，{} 秒后重试", pm_net::acme::backoff_secs(st.failures - 1) as i64 - (now() - st.last_attempt)));
     }
-    let dns = if let Some(api) = cfg.dns.strip_prefix("challtest:") {
-        pm_net::acme::Dns::ChallTest { api: api.to_string() }
-    } else {
-        let token =
-            sf::load_cf_token(layout, dk)?.ok_or("没有 Cloudflare token（安装时经 stdin 传入：passmanager init --cf-token-stdin）")?;
-        pm_net::acme::Dns::cloudflare(token)
-    };
-    let acme_cfg = pm_net::acme::AcmeCfg {
-        directory: cfg.acme_directory.clone(),
-        root_pem: cfg.acme_root_pem.clone(),
-        domain: cfg.domain.clone(),
-        propagation: if cfg.dns == "cloudflare" { Duration::from_secs(20) } else { Duration::ZERO },
-    };
+    // DNS 方式与 ACME 参数与托管证书共用同一套函数
+    let dns = crate::managed::dns_for(layout, cfg, dk)?;
+    let acme_cfg = crate::managed::acme_cfg(cfg, &cfg.domain);
     st.last_attempt = now();
     let saved = sf::load_acme_account(layout, dk);
     match pm_net::acme::issue(&acme_cfg, &dns, saved.as_deref().map(|s| s.as_str())).await {
@@ -271,9 +261,11 @@ pub async fn renew_if_needed(
 }
 
 /// 后台续期：每 6 小时检查一次；失败按退避重试，不影响服务运行（已保存的证书在有效期内继续使用）。
+/// 同一轮里接着处理托管证书；`passmanager cert renew` 经 `managed.wake` 立即唤醒。
 pub(crate) async fn cert_loop(shared: Arc<Shared>) {
     let Some(on) = shared.online.as_ref() else { return };
     loop {
+        let mut managed_failed = false;
         if let Ok(dk) = shared.device_key() {
             match renew_if_needed(&shared.layout, &on.cfg, dk, &on.certs, false).await {
                 Ok(true) => {
@@ -288,9 +280,18 @@ pub(crate) async fn cert_loop(shared: Arc<Shared>) {
                 }
             }
         }
+        if shared.device_key().is_ok() {
+            managed_failed = crate::managed::tick(&shared).await;
+        }
         let st = sf::load_acme_state(&shared.layout);
-        let wait = if st.failures > 0 { pm_net::acme::backoff_secs(st.failures - 1) } else { 6 * 3600 };
-        tokio::time::sleep(Duration::from_secs(wait.clamp(60, 6 * 3600))).await;
+        let mut wait = if st.failures > 0 { pm_net::acme::backoff_secs(st.failures - 1) } else { 6 * 3600 };
+        if managed_failed {
+            wait = wait.min(600); // 托管证书有失败：10 分钟后再试（签发本身仍按退避）
+        }
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_secs(wait.clamp(60, 6 * 3600))) => {}
+            _ = shared.managed.wake.notified() => {}
+        }
     }
 }
 

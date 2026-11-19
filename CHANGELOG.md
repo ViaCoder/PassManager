@@ -4,6 +4,25 @@ English | [简体中文](CHANGELOG.zh-CN.md)
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.3.11-rc.21] - 2026-11-19
+
+### Added
+
+- **Managed certificates** (`passmanager cert add|list|remove|renew`, server root). The server issues Let's Encrypt
+  certificates for other hosts with its own ACME account and sealed Cloudflare token (DNS-01), seals each private key with
+  the device key under `tls/managed/<domain>/`, and renews them in the same loop as its own certificate (every 6 hours,
+  30 days before expiry, exponential backoff). Delivery goes over the server's SSH session with the vault credential bound
+  to the target (`user@host[:port]`, `jump>target` allowed): the directory is created with mode 700, `<domain>.pem` and
+  `<domain>.key` are uploaded with mode 600, the `--after` command runs, and both files are removed whether it succeeded or
+  not. The target never sees the Cloudflare token and needs no PassManager client. `cert renew --wait` waits for the
+  result; `cert list` and `passmanager status` show expiry, delivery state and the last error. `cert add` refuses a target
+  without a vault credential. Vault payload v5 (written only when a managed certificate exists).
+### Changed
+
+- `deny.toml` ignores RUSTSEC-2026-0543 (chrono unmaintained, an informational advisory, not a vulnerability): chrono is pulled
+  in only by russh-sftp (file attribute timestamps), every russh-sftp release up to 3.0.1 depends on it, and PassManager's own
+  code does not use chrono. The entry goes away when russh-sftp drops chrono.
+
 ## [0.3.11-rc.20] - 2026-11-14
 
 ### Security

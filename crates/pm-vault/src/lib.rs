@@ -2,6 +2,7 @@
 
 pub mod domain;
 pub mod format;
+pub mod managed_cert;
 pub mod model;
 pub mod relay;
 pub mod store;
@@ -14,6 +15,7 @@ use pm_crypto::kdf::KdfParams;
 use thiserror::Error;
 
 pub use crate::format::{Header, VaultMode};
+pub use crate::managed_cert::ManagedCert;
 pub use crate::model::*;
 pub use crate::relay::{BodyRule, RelayPolicy};
 
@@ -482,7 +484,32 @@ mod tests {
         assert_eq!(&v4[4..9], format::PAYLOAD_V4_MAGIC);
         let back = format::decode_payload(&v4).unwrap();
         assert_eq!((back.relay.clone(), back.aliases.len(), back.relay("x").map(|r| r.max_bytes_day)), (p.relay.clone(), 1, Some(4)));
-        // 策略删除后回到 v3，再删别名回到 v2。
+        // v4 的字节与 rc.10～rc.20 写出的完全相同（当时直接序列化五个字段的 Payload）。
+        let old4 = PayloadV4 {
+            entries: p.entries.clone(),
+            pins: vec![],
+            settings: p.settings.clone(),
+            aliases: p.aliases.clone(),
+            relay: p.relay.clone(),
+        };
+        assert_eq!(&v4[9..9 + postcard::to_allocvec(&old4).unwrap().len()], postcard::to_allocvec(&old4).unwrap().as_slice());
+        // 有托管证书：写 v5，读回全部字段。
+        p.managed_certs.push(ManagedCert {
+            domain: "lab.example.com".into(),
+            target: "root@198.51.100.23".into(),
+            dir: "/root/pm-cert".into(),
+            after: "true".into(),
+        });
+        let v5 = format::encode_payload(&p).unwrap();
+        assert_eq!(&v5[4..9], format::PAYLOAD_V5_MAGIC);
+        let back = format::decode_payload(&v5).unwrap();
+        assert_eq!(
+            (back.managed_certs.clone(), back.relay.len(), back.managed_cert("lab.example.com").map(|c| c.dir.as_str())),
+            (p.managed_certs.clone(), 1, Some("/root/pm-cert"))
+        );
+        // 托管证书删除后回到 v4，策略删除后回到 v3，再删别名回到 v2。
+        p.managed_certs.clear();
+        assert_eq!(&format::encode_payload(&p).unwrap()[4..9], format::PAYLOAD_V4_MAGIC);
         p.relay.clear();
         assert_eq!(&format::encode_payload(&p).unwrap()[4..9], format::PAYLOAD_V3_MAGIC);
         p.aliases.clear();

@@ -116,6 +116,9 @@ What else 0.2.0 adds on top of `http` / `ssh` / `scp`:
 - **`PassManager run --http <origin>`** (agent machine, Unix): local programs (OpenAI-compatible SDKs, CLIs, curl) call an HTTPS
   API through a loopback relay; the server checks each request against the credential's relay policy (`passmanager relay set`),
   adds the credential and streams back a redacted answer. See [docs/DEPLOY-LAN.md](docs/DEPLOY-LAN.md) §3.1.2.
+- **Managed certificates** (server, root): `passmanager cert add` issues a Let's Encrypt certificate for another host with the
+  server's ACME account and Cloudflare token, installs it over SSH with a vault credential (files 0600, deleted after the install
+  command) and renews it with the server's own certificate. The host never sees the token. See §1.3 of the deployment guide.
 
 - **Single-port mode and IP allowlist**: `install-server.sh --port 8121` serves the web UI and the agent channel on one port
   (split by TLS ALPN), and `--allow "203.0.113.7 2001:db8::/32"` lets extra addresses reach that port (but not SSH); the firewall

@@ -110,6 +110,9 @@ passmanager show --label laptop                                            # 打
 - **`PassManager run --http <origin>`**（Agent 机器，Unix）：本机程序（OpenAI 兼容的 SDK、CLI、curl）经本机中继调用 HTTPS API；
   服务器按凭据的中继策略（`passmanager relay set`）检查每个请求、加上凭据，把脱敏后的回答流式送回。见
   [docs/DEPLOY-LAN.zh-CN.md](docs/DEPLOY-LAN.zh-CN.md) §3.1.2。
+- **托管证书**（服务器，root）：`passmanager cert add` 用服务器的 ACME 账号与 Cloudflare 令牌给别的主机签 Let's Encrypt
+  证书，用库里的凭据经 SSH 装上去（文件 0600，安装命令结束后删除），并与服务器自己的证书一起续期。那台主机拿不到令牌。
+  见部署说明 §1.3。
 
 - **单端口模式与 IP 允许列表**：`install-server.sh --port 8121` 在一个端口上同时提供网页与 Agent 通道（按 TLS ALPN 分流），
   `--allow "203.0.113.7 2001:db8::/32"` 让额外的地址访问这个端口（但不能访问 SSH）；防火墙与服务使用同一份列表。

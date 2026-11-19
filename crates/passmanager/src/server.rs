@@ -478,6 +478,111 @@ pub fn relay_remove(name: String) -> ExitCode {
     }
 }
 
+/// 一张托管证书的显示文本（不含任何密钥）。
+fn cert_text(c: &pm_proto::ManagedCertView) -> String {
+    let mut s = format!("{}\n  目标：{}\n  目录：{}\n  命令：{}\n", c.domain, c.target, c.dir, c.after);
+    match c.not_after {
+        Some(t) => s.push_str(&format!("  证书：到期 {}", fmt_ts(t))),
+        None => s.push_str("  证书：还没有签出"),
+    }
+    match (c.not_after, c.delivered_not_after) {
+        (Some(a), Some(b)) if a == b => s.push_str("，已投递\n"),
+        (Some(_), _) => s.push_str("，未投递\n"),
+        _ => s.push('\n'),
+    }
+    if c.last_attempt > 0 {
+        s.push_str(&format!("  上次尝试：{}（连续失败 {} 次）\n", fmt_ts(c.last_attempt), c.failures));
+    }
+    if c.pending {
+        s.push_str("  已排队立即续期\n");
+    }
+    if let Some(e) = &c.last_error {
+        s.push_str(&format!("  {YELLOW}{e}{RESET}\n"));
+    }
+    s
+}
+
+/// `passmanager cert add`：保存配置，服务随即签发并投递。
+pub fn cert_add(cert: pm_proto::ManagedCertView) -> ExitCode {
+    if let Err(e) = need_root(&layout()) {
+        return fail(e);
+    }
+    match root_call::<pm_proto::ManagedCertView>(Request::PutManagedCert { cert }) {
+        Ok(c) => {
+            print!("已保存，正在签发并投递（passmanager cert renew {} --wait 可等待结果）：\n{}", c.domain, cert_text(&c));
+            ExitCode::SUCCESS
+        }
+        Err(e) => fail(e),
+    }
+}
+
+/// `passmanager cert list`
+pub fn cert_list() -> ExitCode {
+    if let Err(e) = need_root(&layout()) {
+        return fail(e);
+    }
+    match root_call::<Vec<pm_proto::ManagedCertView>>(Request::ManagedCerts) {
+        Ok(list) => {
+            for c in &list {
+                print!("{}", cert_text(c));
+            }
+            println!("共 {} 张托管证书", list.len());
+            ExitCode::SUCCESS
+        }
+        Err(e) => fail(e),
+    }
+}
+
+/// `passmanager cert remove`
+pub fn cert_remove(domain: String) -> ExitCode {
+    if let Err(e) = need_root(&layout()) {
+        return fail(e);
+    }
+    match root_call::<serde_json::Value>(Request::DeleteManagedCert { domain: domain.clone() }) {
+        Ok(_) => {
+            println!("已删除 {domain} 的托管证书配置与服务器上的证书文件");
+            ExitCode::SUCCESS
+        }
+        Err(e) => fail(e),
+    }
+}
+
+/// `passmanager cert renew`：排队立即续期；`--wait` 时每 3 秒查一次，直到这次处理结束（最多 5 分钟）。
+pub fn cert_renew(domain: String, wait: bool) -> ExitCode {
+    if let Err(e) = need_root(&layout()) {
+        return fail(e);
+    }
+    let find = |list: Vec<pm_proto::ManagedCertView>| list.into_iter().find(|c| c.domain == domain.trim().to_ascii_lowercase());
+    let before = match root_call::<Vec<pm_proto::ManagedCertView>>(Request::ManagedCerts).map(find) {
+        Ok(Some(c)) => c.attempts,
+        Ok(None) => return fail(format!("没有 {domain} 的托管证书")),
+        Err(e) => return fail(e),
+    };
+    if let Err(e) = root_call::<serde_json::Value>(Request::RenewManagedCert { domain: domain.clone() }) {
+        return fail(e);
+    }
+    if !wait {
+        println!("已排队：{domain}（结果：passmanager cert list）");
+        return ExitCode::SUCCESS;
+    }
+    let deadline = std::time::Instant::now() + Duration::from_secs(300);
+    loop {
+        std::thread::sleep(Duration::from_secs(3));
+        match root_call::<Vec<pm_proto::ManagedCertView>>(Request::ManagedCerts).map(find) {
+            Ok(Some(c)) if !c.pending && c.attempts > before => {
+                print!("{}", cert_text(&c));
+                return if c.last_error.is_none() { ExitCode::SUCCESS } else { ExitCode::from(1) };
+            }
+            Ok(Some(_)) => {}
+            Ok(None) => return fail(format!("{domain} 的托管证书已被删除")),
+            Err(e) => return fail(e),
+        }
+        if std::time::Instant::now() >= deadline {
+            return fail("5 分钟内没有完成，稍后用 passmanager cert list 查看");
+        }
+    }
+}
+
 pub fn update(o: crate::import::UpdateOpts) -> ExitCode {
     let l = layout();
     if let Err(e) = need_root(&l) {
@@ -636,6 +741,17 @@ fn print_status(s: &ServerStatusView) {
     }
     if let Some(e) = &s.cert_error {
         println!("               {YELLOW}{e}{RESET}");
+    }
+    for c in &s.managed_certs {
+        let state = match (c.not_after, c.delivered_not_after) {
+            (Some(a), Some(b)) if a == b => format!("到期 {}，已投递", fmt_ts(a)),
+            (Some(a), _) => format!("到期 {}，{RED}未投递{RESET}", fmt_ts(a)),
+            (None, _) => format!("{RED}还没有签出{RESET}"),
+        };
+        println!("托管证书       {} → {}：{}", c.domain, c.target, state);
+        if let Some(e) = &c.last_error {
+            println!("               {YELLOW}{e}{RESET}");
+        }
     }
     println!("Agent 令牌     {}（未使用的注册码 {}）", s.tokens, s.pending_enrollments);
     println!("内层公钥指纹   {}", s.server_key_fingerprint);

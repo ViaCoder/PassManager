@@ -9,6 +9,9 @@
 //! | `acme-account.sealed` | Let's Encrypt 账号凭据 | 设备密钥封存（`acme-account`） |
 //! | `cf-token.sealed` | Cloudflare API token（安装时经 stdin 传入） | 设备密钥封存（`cloudflare-token`） |
 //! | `acme-state.json` | 连续失败次数、上次尝试时间（退避用） | — |
+//! | `tls/managed/<域名>/cert.pem` | 托管证书的证书链 | 公开 |
+//! | `tls/managed/<域名>/key.sealed` | 托管证书的私钥（P-384） | 设备密钥封存（`managed-tls-key`） |
+//! | `managed-certs-state.json` | 每张托管证书的失败次数、上次尝试、已投递的到期时间、最近错误 | — |
 
 use std::path::{Path, PathBuf};
 
@@ -21,6 +24,7 @@ pub const LABEL_SERVER_KEYS: &str = "inner-server-keys";
 pub const LABEL_TLS_KEY: &str = "tls-key";
 pub const LABEL_ACME: &str = "acme-account";
 pub const LABEL_CF: &str = "cloudflare-token";
+pub const LABEL_MANAGED_KEY: &str = "managed-tls-key";
 
 pub fn server_pub_path(l: &Layout) -> PathBuf {
     l.data_dir.join("server-keys.pub")
@@ -43,6 +47,19 @@ pub fn cf_token_path(l: &Layout) -> PathBuf {
 pub fn acme_state_path(l: &Layout) -> PathBuf {
     l.data_dir.join("acme-state.json")
 }
+/// 托管证书的根目录（每个域名一个子目录；域名已经过校验，只含字母数字、`-` 和 `.`）。
+pub fn managed_dir(l: &Layout) -> PathBuf {
+    l.tls_dir().join("managed")
+}
+pub fn managed_cert_path(l: &Layout, domain: &str) -> PathBuf {
+    managed_dir(l).join(domain).join("cert.pem")
+}
+pub fn managed_key_path(l: &Layout, domain: &str) -> PathBuf {
+    managed_dir(l).join(domain).join("key.sealed")
+}
+pub fn managed_state_path(l: &Layout) -> PathBuf {
+    l.data_dir.join("managed-certs-state.json")
+}
 
 /// 所有由服务账户读写的服务器文件（`init` 以 root 创建后要改属主）。
 pub fn owned_paths(l: &Layout) -> Vec<PathBuf> {
@@ -55,6 +72,8 @@ pub fn owned_paths(l: &Layout) -> Vec<PathBuf> {
         acme_account_path(l),
         cf_token_path(l),
         acme_state_path(l),
+        managed_dir(l),
+        managed_state_path(l),
         l.vault_path(),
         pm_vault::store::backup_path(&l.vault_path()),
         l.data_dir.join("tokens.json"),
@@ -144,6 +163,63 @@ pub fn load_acme_account(l: &Layout, dk: &[u8; 32]) -> Option<Zeroizing<String>>
     sealed_read(&acme_account_path(l), dk, LABEL_ACME).ok().flatten().map(|v| Zeroizing::new(String::from_utf8_lossy(&v).into_owned()))
 }
 
+/// 托管证书：先写私钥再写证书（与服务器自己的证书相同的顺序）。
+pub fn store_managed_cert(l: &Layout, dk: &[u8; 32], domain: &str, chain_pem: &str, key_pem: &str) -> Result<(), String> {
+    sealed_write(&managed_key_path(l, domain), dk, LABEL_MANAGED_KEY, key_pem.as_bytes())?;
+    write(&managed_cert_path(l, domain), chain_pem.as_bytes()).map_err(|e| e.to_string())
+}
+
+/// 读取托管证书；没有时返回 None。
+pub fn load_managed_cert(l: &Layout, dk: &[u8; 32], domain: &str) -> Result<Option<(String, Zeroizing<String>)>, String> {
+    let chain = match std::fs::read_to_string(managed_cert_path(l, domain)) {
+        Ok(c) => c,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e.to_string()),
+    };
+    let Some(key) = sealed_read(&managed_key_path(l, domain), dk, LABEL_MANAGED_KEY)? else { return Ok(None) };
+    Ok(Some((chain, Zeroizing::new(String::from_utf8_lossy(&key).into_owned()))))
+}
+
+/// 只读证书链（不需要设备密钥）：状态显示用。
+pub fn managed_chain(l: &Layout, domain: &str) -> Option<String> {
+    std::fs::read_to_string(managed_cert_path(l, domain)).ok()
+}
+
+/// 删除一张托管证书的全部文件（配置删除时调用；不存在也算成功）。
+pub fn remove_managed_cert(l: &Layout, domain: &str) {
+    let _ = std::fs::remove_dir_all(managed_dir(l).join(domain));
+}
+
+/// 一张托管证书的运行状态。
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ManagedState {
+    /// 连续失败次数（签发按它退避）。
+    pub failures: u32,
+    /// 上次尝试（签发或投递）的时间。
+    pub last_attempt: i64,
+    /// 尝试（签发或投递）的累计次数（`cert renew --wait` 据此判断这次处理结束）。
+    #[serde(default)]
+    pub attempts: u64,
+    /// 最近一次成功投递的证书的到期时间。
+    #[serde(default)]
+    pub delivered_not_after: Option<i64>,
+    /// 最近一次失败的原因。
+    #[serde(default)]
+    pub last_error: Option<String>,
+}
+
+pub type ManagedStates = std::collections::BTreeMap<String, ManagedState>;
+
+pub fn load_managed_states(l: &Layout) -> ManagedStates {
+    std::fs::read(managed_state_path(l)).ok().and_then(|d| serde_json::from_slice(&d).ok()).unwrap_or_default()
+}
+
+pub fn store_managed_states(l: &Layout, s: &ManagedStates) {
+    if let Ok(d) = serde_json::to_vec(s) {
+        let _ = write(&managed_state_path(l), &d);
+    }
+}
+
 /// 证书申请的退避状态。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct AcmeState {
@@ -217,6 +293,25 @@ mod tests {
         assert!(load_acme_account(&l, &dk).is_none());
         store_acme_account(&l, &dk, "{}").unwrap();
         assert_eq!(load_acme_account(&l, &dk).unwrap().as_str(), "{}");
+        // 托管证书：存取、别的设备密钥解不开、删除、状态文件。
+        assert!(load_managed_cert(&l, &dk, "lab.example.com").unwrap().is_none());
+        store_managed_cert(&l, &dk, "lab.example.com", &c, &k).unwrap();
+        let (c3, k3) = load_managed_cert(&l, &dk, "lab.example.com").unwrap().unwrap();
+        assert_eq!((c3.as_str(), k3.as_str()), (c.as_str(), k.as_str()));
+        assert_eq!(managed_chain(&l, "lab.example.com").as_deref(), Some(c.as_str()));
+        assert!(!std::fs::read(managed_key_path(&l, "lab.example.com")).unwrap().windows(11).any(|w| w == b"PRIVATE KEY"));
+        assert!(load_managed_cert(&l, &[6u8; 32], "lab.example.com").is_err());
+        assert!(load_managed_cert(&l, &dk, "other.example.com").unwrap().is_none(), "别的域名互不影响");
+        let mut st = ManagedStates::new();
+        st.insert(
+            "lab.example.com".into(),
+            ManagedState { failures: 1, last_attempt: 5, attempts: 2, delivered_not_after: Some(9), last_error: Some("x".into()) },
+        );
+        store_managed_states(&l, &st);
+        assert_eq!(load_managed_states(&l), st);
+        remove_managed_cert(&l, "lab.example.com");
+        assert!(load_managed_cert(&l, &dk, "lab.example.com").unwrap().is_none() && managed_chain(&l, "lab.example.com").is_none());
+        remove_managed_cert(&l, "lab.example.com");
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;

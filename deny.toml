@@ -6,8 +6,12 @@ all-features = false
 [advisories]
 version = 2
 yanked = "deny"
-# 不忽略任何公告：有新公告时 CI 失败，修复之后才能发布。
-ignore = []
+# 有新公告时 CI 失败，修复之后才能发布。唯一的例外在下面列出，并写明原因。
+ignore = [
+    # RUSTSEC-2026-0543：chrono 不再维护（信息类公告，不是漏洞）。chrono 只经 russh-sftp 进来（sftp 文件属性的时间戳），
+    # russh-sftp 到 3.0.1 为止的所有版本都依赖它，没有可换的版本；本项目自己的代码不用 chrono。russh-sftp 换掉 chrono 后删除这一条。
+    { id = "RUSTSEC-2026-0543", reason = "chrono only via russh-sftp (no chrono-free release); informational advisory" },
+]
 
 [licenses]
 version = 2

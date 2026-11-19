@@ -4,6 +4,7 @@ pub mod agent;
 pub mod git;
 pub mod http;
 pub mod lookup;
+pub(crate) mod managed;
 pub mod online;
 pub mod redact;
 pub mod relay;
@@ -104,6 +105,8 @@ pub struct Shared {
     sign_limiter: std::sync::Mutex<agent::SignLimiter>,
     /// `passmanager run --http` 的运行与每个凭据的用量。
     relay_runs: Arc<std::sync::Mutex<relay::Runs>>,
+    /// 托管证书的立即续期请求与唤醒。
+    pub(crate) managed: managed::Control,
 }
 
 /// 会话类型。
@@ -204,6 +207,7 @@ impl Shared {
             recovered: std::sync::atomic::AtomicBool::new(false),
             sign_limiter: std::sync::Mutex::new(agent::SignLimiter::new(30, Duration::from_secs(60))),
             relay_runs: Arc::new(std::sync::Mutex::new(relay::Runs::default())),
+            managed: managed::Control::default(),
         })
     }
 
@@ -340,6 +344,7 @@ impl Shared {
             vault_recovered_from_backup: self.recovered.load(std::sync::atomic::Ordering::SeqCst),
             ready,
             issues,
+            managed_certs: Vec::new(),
         }
     }
 
@@ -589,6 +594,10 @@ impl Shared {
                         | Request::LoginLink
                         | Request::AutoLoginLink
                         | Request::Unlock
+                        | Request::ManagedCerts
+                        | Request::PutManagedCert { .. }
+                        | Request::DeleteManagedCert { .. }
+                        | Request::RenewManagedCert { .. }
                 ) =>
             {
                 Err(err("BAD_REQUEST", "only available in server mode"))
@@ -832,6 +841,59 @@ impl Shared {
                 .await?;
                 log(&format!("relay policy deleted: {entry}"));
                 ok("deleted")
+            }
+            Request::ManagedCerts => ok(managed::views(self).await),
+            Request::PutManagedCert { cert } => {
+                let mut c = pm_vault::ManagedCert { domain: cert.domain, target: cert.target, dir: cert.dir, after: cert.after };
+                pm_vault::managed_cert::validate_managed_cert(&mut c).map_err(|m| err("BAD_REQUEST", m))?;
+                // 目标必须能解析成 SSH 目标，且库里要有能登录它的凭据（现在就检查，不等到夜里续期才发现）
+                let (_, dest) = ssh::parse_route(&c.target)?;
+                {
+                    let inner = self.inner.lock().await;
+                    let v = inner.vault.as_ref().ok_or_else(|| self.locked_err())?;
+                    http::ssh_credentials(&v.payload, dest.name.as_deref(), &dest.host, dest.port)?;
+                }
+                let saved = c.clone();
+                self.mutate(|v| {
+                    v.payload.managed_certs.retain(|x| x.domain != c.domain);
+                    v.payload.managed_certs.push(c);
+                    Ok(())
+                })
+                .await?;
+                log(&format!("managed cert saved: {} -> {}", saved.domain, saved.target));
+                self.managed.request(&saved.domain);
+                ok(managed::view(self, &saved, None))
+            }
+            Request::DeleteManagedCert { domain } => {
+                let domain = domain.trim().to_ascii_lowercase();
+                self.mutate(|v| {
+                    let before = v.payload.managed_certs.len();
+                    v.payload.managed_certs.retain(|x| x.domain != domain);
+                    if v.payload.managed_certs.len() == before {
+                        return Err(err("UNKNOWN_CREDENTIAL", format!("没有 {domain} 的托管证书")));
+                    }
+                    Ok(())
+                })
+                .await?;
+                server_files::remove_managed_cert(&self.layout, &domain);
+                let mut st = server_files::load_managed_states(&self.layout);
+                st.remove(&domain);
+                server_files::store_managed_states(&self.layout, &st);
+                log(&format!("managed cert deleted: {domain}"));
+                ok("deleted")
+            }
+            Request::RenewManagedCert { domain } => {
+                let domain = domain.trim().to_ascii_lowercase();
+                {
+                    let inner = self.inner.lock().await;
+                    let v = inner.vault.as_ref().ok_or_else(|| self.locked_err())?;
+                    if v.payload.managed_cert(&domain).is_none() {
+                        return Err(err("UNKNOWN_CREDENTIAL", format!("没有 {domain} 的托管证书")));
+                    }
+                }
+                self.managed.request(&domain);
+                log(&format!("managed cert renewal requested: {domain}"));
+                ok("requested")
             }
             Request::Ssh { target, command } => {
                 let (_, dest) = ssh::parse_route(&target)?;
@@ -1186,7 +1248,9 @@ impl Shared {
             }
             Request::ServerStatus => {
                 let locked = self.inner.lock().await.vault.is_none();
-                ok(self.server_status(locked))
+                let mut v = self.server_status(locked);
+                v.managed_certs = managed::views(self).await;
+                ok(v)
             }
             Request::ChangePassword { old, new } => {
                 if new.chars().count() < 8 {

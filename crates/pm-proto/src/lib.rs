@@ -194,6 +194,20 @@ pub enum Request {
     DeleteRelayPolicy {
         entry: String,
     },
+    /// 托管证书（root）：服务器为别的主机签发证书并经 SSH 投递，返回 `Vec<ManagedCertView>`。
+    ManagedCerts,
+    /// 新增或替换一张托管证书的配置（按域名唯一），返回保存后的 [`ManagedCertView`]。
+    PutManagedCert {
+        cert: ManagedCertView,
+    },
+    /// 删除一张托管证书的配置与已保存的证书文件。
+    DeleteManagedCert {
+        domain: String,
+    },
+    /// 立即为该域名重新签发并投递（不等退避与续期窗口）；请求只是排队，结果用 `ManagedCerts` 查看。
+    RenewManagedCert {
+        domain: String,
+    },
     /// URL 别名（只给管理员：Agent 看不到真实地址，也不能列出别名）。
     Aliases,
     /// 新增或替换别名。
@@ -418,6 +432,36 @@ pub struct RelayPolicyView {
     pub max_bytes_day: u64,
 }
 
+/// 托管证书的配置与状态（root 查看与设置）。配置四项来自 `passmanager cert add`，其余由服务填写。
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq)]
+pub struct ManagedCertView {
+    pub domain: String,
+    pub target: String,
+    pub dir: String,
+    pub after: String,
+    /// 已签发并保存在服务器上的证书的到期时间（Unix 秒）；None 表示还没有签出。
+    #[serde(default)]
+    pub not_after: Option<i64>,
+    /// 最近一次成功投递到远端的证书的到期时间；与 `not_after` 相同表示当前证书已装好。
+    #[serde(default)]
+    pub delivered_not_after: Option<i64>,
+    /// 最近一次尝试（签发或投递）的时间，0 表示还没有尝试。
+    #[serde(default)]
+    pub last_attempt: i64,
+    /// 尝试的累计次数。
+    #[serde(default)]
+    pub attempts: u64,
+    /// 连续失败次数（签发按它退避）。
+    #[serde(default)]
+    pub failures: u32,
+    /// 最近一次失败的原因；成功后清空。
+    #[serde(default)]
+    pub last_error: Option<String>,
+    /// 已排队的立即续期请求还没有被处理。
+    #[serde(default)]
+    pub pending: bool,
+}
+
 /// 打开的中继：运行编号（只在这次运行有效），以及给日志用的 origin 写法（别名时是 `alias://名称`）。
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct RelayRunView {
@@ -605,6 +649,9 @@ pub struct ServerStatusView {
     /// 未通过的检查项与运行时问题（部署时排查用）。
     #[serde(default)]
     pub issues: Vec<String>,
+    /// 托管证书（为别的主机签发并投递）的配置与状态。
+    #[serde(default)]
+    pub managed_certs: Vec<ManagedCertView>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]

@@ -414,7 +414,7 @@ pub struct PayloadV2 {
 
 impl From<PayloadV2> for Payload {
     fn from(p: PayloadV2) -> Self {
-        Self { entries: p.entries, pins: p.pins, settings: p.settings, aliases: Vec::new(), relay: Vec::new() }
+        Self { entries: p.entries, pins: p.pins, settings: p.settings, aliases: Vec::new(), relay: Vec::new(), managed_certs: Vec::new() }
     }
 }
 
@@ -429,7 +429,23 @@ pub struct PayloadV3 {
 
 impl From<PayloadV3> for Payload {
     fn from(p: PayloadV3) -> Self {
-        Self { entries: p.entries, pins: p.pins, settings: p.settings, aliases: p.aliases, relay: Vec::new() }
+        Self { entries: p.entries, pins: p.pins, settings: p.settings, aliases: p.aliases, relay: Vec::new(), managed_certs: Vec::new() }
+    }
+}
+
+/// v4 载荷（0.3.11-rc.10 起，有中继策略时写入），只用于读取：比 v3 多了中继策略。
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct PayloadV4 {
+    pub entries: Vec<Entry>,
+    pub pins: Vec<Pin>,
+    pub settings: Settings,
+    pub aliases: Vec<Alias>,
+    pub relay: Vec<crate::relay::RelayPolicy>,
+}
+
+impl From<PayloadV4> for Payload {
+    fn from(p: PayloadV4) -> Self {
+        Self { entries: p.entries, pins: p.pins, settings: p.settings, aliases: p.aliases, relay: p.relay, managed_certs: Vec::new() }
     }
 }
 
@@ -455,6 +471,7 @@ impl From<PayloadV1> for Payload {
             settings: p.settings,
             aliases: Vec::new(),
             relay: Vec::new(),
+            managed_certs: Vec::new(),
         }
     }
 }
@@ -468,12 +485,19 @@ pub struct Payload {
     pub aliases: Vec<Alias>,
     /// `passmanager run --http` 的凭据策略（每个条目最多一份）。v4 新增。
     pub relay: Vec<crate::relay::RelayPolicy>,
+    /// 托管证书（为别的主机签发并经 SSH 投递；按域名唯一）。v5 新增。
+    pub managed_certs: Vec<crate::managed_cert::ManagedCert>,
 }
 
 impl Payload {
     /// 条目的中继策略。
     pub fn relay(&self, entry: &str) -> Option<&crate::relay::RelayPolicy> {
         self.relay.iter().find(|p| p.entry == entry)
+    }
+
+    /// 某域名的托管证书配置。
+    pub fn managed_cert(&self, domain: &str) -> Option<&crate::managed_cert::ManagedCert> {
+        self.managed_certs.iter().find(|c| c.domain == domain)
     }
 
     pub fn entry(&self, name: &str) -> Option<&Entry> {

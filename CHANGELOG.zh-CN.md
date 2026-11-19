@@ -4,6 +4,21 @@
 
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.3.11-rc.21] - 2026-11-19
+
+### 新增
+
+- **托管证书**（`passmanager cert add|list|remove|renew`，服务器 root）。服务器用自己的 ACME 账号与封存的 Cloudflare 令牌
+  （DNS-01）给别的主机签 Let's Encrypt 证书，私钥用设备密钥封存在 `tls/managed/<域名>/`，与自己的证书在同一个循环里续期
+  （每 6 小时检查，到期前 30 天，失败指数退避）。投递经服务器的 SSH 会话，用库里绑定目标的凭据（`user@host[:port]`，
+  可写 `跳板>目标`）：建目录（0700），上传 `<域名>.pem` 与 `<域名>.key`（0600），执行 `--after` 命令，无论成败都删掉两个
+  文件。目标主机拿不到 Cloudflare 令牌，也不需要 PassManager 客户端。`cert renew --wait` 等待结果；`cert list` 与
+  `passmanager status` 显示到期、投递状态与最近错误。没有凭据的目标 `cert add` 直接拒绝。加密库载荷升到 v5（只在有托管证书时写入）。
+### 变更
+
+- `deny.toml` 忽略 RUSTSEC-2026-0543（chrono 不再维护，信息类公告，不是漏洞）：chrono 只经 russh-sftp 进来（文件属性的时间戳），
+  russh-sftp 到 3.0.1 为止的所有版本都依赖它，PassManager 自己的代码不用 chrono。russh-sftp 换掉 chrono 后删除这一条。
+
 ## [0.3.11-rc.20] - 2026-11-14
 
 ### 安全

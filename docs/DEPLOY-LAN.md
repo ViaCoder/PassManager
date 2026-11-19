@@ -72,6 +72,30 @@ Other sources get a plain 404, including the server itself: open the login link 
 `/a/` are not affected. The setting survives a re-run of the installer. An empty list is a configuration error, never
 "everyone".
 
+### 1.3 Certificates for other hosts (managed certificates)
+
+The server already holds a Let's Encrypt account and a sealed Cloudflare token for its own certificate. It can issue
+certificates for other hosts with the same account and token, and install them over SSH with a credential from the vault.
+The other host never sees the Cloudflare token and needs no PassManager client. Root on the server:
+
+```sh
+passmanager cert add --domain lab.example.com --target root@198.51.100.23 --dir /root/pm-cert \
+    --after 'pvenode cert set /root/pm-cert/lab.example.com.pem /root/pm-cert/lab.example.com.key --force --restart && systemctl reload caddy'
+passmanager cert list
+passmanager cert renew lab.example.com --wait     # issue and deliver now, wait for the result (5 minutes at most)
+passmanager cert remove lab.example.com
+```
+
+- The domain's own DNS-01 challenge is written and removed with the server's Cloudflare token; the private key (P-384) is
+  sealed with the device key under `tls/managed/<domain>/`; renewal happens in the same loop as the server's certificate
+  (checked every 6 hours, renewed 30 days before expiry, exponential backoff after a failure).
+- Delivery: the server opens an SSH session to `--target` with the vault entry bound to that host (same lookup as the `ssh`
+  tool, including `jump>target`), creates `--dir` (mode 700), uploads `<domain>.pem` and `<domain>.key` (mode 600), runs the
+  `--after` command, and deletes both files whether the command succeeded or not. A non-zero exit code is reported in
+  `cert list` and `passmanager status`, and delivery is retried every 10 minutes until it succeeds.
+- `cert add` refuses a target without a vault credential. The configuration lives in the encrypted vault (payload v5; older
+  programs refuse to open a vault with managed certificates, as with aliases).
+
 ## 2. Web admin
 
 From your own enrolled computer, one command opens it (no password, no copying a link):

@@ -341,6 +341,9 @@ enum Cmd {
     /// [服务器 root] 中继策略：本机程序经 passmanager run --http 使用凭据时，服务器只放行策略之内的请求
     #[command(subcommand)]
     Relay(RelayCmd),
+    /// [服务器 root] 托管证书：用服务器的 ACME 账号与 Cloudflare 令牌为别的主机签发证书，经 SSH 推送并执行安装命令
+    #[command(subcommand)]
+    Cert(CertCmd),
     /// 显示 Agent 接入说明；服务器上的 root 加 --label 时附带一次性注册码（10 分钟有效，只能使用一次）
     #[command(after_help = "\
 服务器上的 root 加 --label：生成一次性注册码，打印给 AI Agent 的完整接入说明——一行安装命令（安装客户端、注册、
@@ -546,6 +549,57 @@ enroll 已把它装成开机 / 登录时自动启动的用户服务（Linux：sy
 }
 
 #[derive(Subcommand)]
+enum CertCmd {
+    /// 新增或替换一张托管证书（按域名唯一），保存后立即签发并投递
+    #[command(after_help = "\
+示例（Proxmox VE 主机，证书装进 pveproxy 并让 Caddy 重载）：
+  passmanager cert add --domain lab.example.com --target root@198.51.100.23 --dir /root/pm-cert \\
+      --after 'pvenode cert set /root/pm-cert/lab.example.com.pem /root/pm-cert/lab.example.com.key --force --restart && systemctl reload caddy'
+
+服务器用自己的 ACME 账号与 Cloudflare 令牌签发（DNS-01），私钥用设备密钥封存在本机；到期前 30 天自动续期。
+投递经服务器的 SSH 会话（库里绑定该主机、用途含 ssh 的凭据）：建目录（0700）→ 上传 <域名>.pem 与 <域名>.key（0600）
+→ 执行 --after 命令 → 删掉两个文件。远端主机拿不到 Cloudflare 令牌，也不需要 PassManager 客户端。")]
+    Add(CertAddOpts),
+    /// 列出托管证书的配置与状态（到期、是否已投递、最近错误）
+    List,
+    /// 删除一张托管证书的配置与服务器上保存的证书文件（远端已装好的证书不动）
+    Remove {
+        /// 域名
+        domain: String,
+    },
+    /// 立即重新签发并投递（不等续期窗口与退避）
+    Renew {
+        /// 域名
+        domain: String,
+        /// 等待处理完成并打印结果（最多 5 分钟）
+        #[arg(long)]
+        wait: bool,
+    },
+}
+
+#[derive(clap::Args)]
+struct CertAddOpts {
+    /// 证书域名（单个 FQDN）
+    #[arg(long)]
+    domain: String,
+    /// SSH 目标：user@host[:port]，可写 跳板>目标
+    #[arg(long)]
+    target: String,
+    /// 远端临时目录（绝对路径），文件 <域名>.pem / <域名>.key 放在这里，命令结束后删除
+    #[arg(long, default_value = "/root/pm-cert")]
+    dir: String,
+    /// 上传后在远端执行的安装命令（退出码 0 表示成功）
+    #[arg(long)]
+    after: String,
+}
+
+impl CertAddOpts {
+    fn into_view(self) -> pm_proto::ManagedCertView {
+        pm_proto::ManagedCertView { domain: self.domain, target: self.target, dir: self.dir, after: self.after, ..Default::default() }
+    }
+}
+
+#[derive(Subcommand)]
 enum RelayCmd {
     /// 列出全部中继策略（不含任何密钥）
     List,
@@ -729,6 +783,10 @@ fn run_cli() -> ExitCode {
         Some(Cmd::Relay(RelayCmd::List)) => server::relay_list(),
         Some(Cmd::Relay(RelayCmd::Set(o))) => server::relay_set(o.into_view()),
         Some(Cmd::Relay(RelayCmd::Remove { name })) => server::relay_remove(name),
+        Some(Cmd::Cert(CertCmd::Add(o))) => server::cert_add(o.into_view()),
+        Some(Cmd::Cert(CertCmd::List)) => server::cert_list(),
+        Some(Cmd::Cert(CertCmd::Remove { domain })) => server::cert_remove(domain),
+        Some(Cmd::Cert(CertCmd::Renew { domain, wait })) => server::cert_renew(domain, wait),
         Some(Cmd::Token(TokenCmd::List)) => server::token_list(),
         Some(Cmd::Token(TokenCmd::Revoke { id })) => server::token_revoke(&id),
         Some(Cmd::Status) => server::status(),

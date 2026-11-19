@@ -42,6 +42,18 @@ pub fn alias_add(_: String, _: String, _: String) -> ExitCode {
 pub fn alias_remove(_: String) -> ExitCode {
     linux_only()
 }
+pub fn cert_add(_: pm_proto::ManagedCertView) -> ExitCode {
+    linux_only()
+}
+pub fn cert_list() -> ExitCode {
+    linux_only()
+}
+pub fn cert_remove(_: String) -> ExitCode {
+    linux_only()
+}
+pub fn cert_renew(_: String, _: bool) -> ExitCode {
+    linux_only()
+}
 pub fn relay_list() -> ExitCode {
     linux_only()
 }
