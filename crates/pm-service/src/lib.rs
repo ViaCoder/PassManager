@@ -6,6 +6,7 @@ pub mod http;
 pub mod lookup;
 pub(crate) mod managed;
 pub mod online;
+pub mod qr_child;
 pub mod redact;
 pub mod relay;
 mod server;
@@ -577,6 +578,8 @@ impl Shared {
             _ if matches!(req, Request::ShowEntry { .. }) && !matches!(session, Session::Web) => {
                 Err(err("FORBIDDEN", "showing a stored value is only available in the web UI"))
             }
+            // 两步验证同样只属于网页管理：Agent、本机 TUI 与 root 命令行都拿不到验证码，也不能导入或删除。
+            _ if req.is_otp() && !otp_session_ok(session) => Err(err("FORBIDDEN", "two-factor accounts are only available in the web UI")),
             // 服务器模式：密钥只写不读；没有口令；令牌只能通过注册码经双层加密通道发放。
             _ if server && matches!(req, Request::Reveal { .. }) => Err(err("FORBIDDEN", "secrets are write-only in server mode")),
             _ if server && matches!(req, Request::ChangePassword { .. }) => Err(err("BAD_REQUEST", "server mode has no password")),
@@ -1124,6 +1127,60 @@ impl Shared {
                     secret: e.fields.is_empty().then(|| e.secret.to_string()),
                     fields: e.fields.iter().map(|f| (f.name.clone(), f.value.to_string())).collect(),
                 })
+            }
+            Request::OtpList => {
+                let inner = self.inner.lock().await;
+                let v = inner.vault.as_ref().ok_or_else(|| self.locked_err())?;
+                ok(v.payload.otp.iter().map(otp_view).collect::<Vec<_>>())
+            }
+            Request::OtpDetail { name, reveal } => {
+                let inner = self.inner.lock().await;
+                let v = inner.vault.as_ref().ok_or_else(|| self.locked_err())?;
+                let a = v.payload.otp.iter().find(|a| a.name == name).ok_or_else(|| err("UNKNOWN_CREDENTIAL", "账户不存在"))?;
+                // 每次都留一行日志（只有名称，从不记验证码或种子），事后能查到什么时候看过哪个账户、是否显示了密钥
+                log(&format!("web: otp {} name={}", if reveal { "reveal" } else { "code" }, a.name));
+                ok(otp_detail(a, pm_vault::now(), reveal))
+            }
+            Request::OtpImport { texts, twofas, password } => {
+                // 先在锁外解析（2FAS 的 PBKDF2 要几毫秒），解析失败的项直接进报告
+                let parsed = otp_parse(&texts, twofas.as_ref(), password.as_ref());
+                let mut report = OtpImportReport {
+                    skipped: parsed.skipped.iter().map(|s| (s.label.clone(), s.reason.clone())).collect(),
+                    ..Default::default()
+                };
+                if !parsed.accounts.is_empty() {
+                    let now = pm_vault::now();
+                    self.mutate(|v| {
+                        for a in parsed.accounts {
+                            otp_import_one(&mut v.payload.otp, a, now, &mut report);
+                        }
+                        Ok(())
+                    })
+                    .await?;
+                }
+                // 只记数量
+                log(&format!(
+                    "web: otp import added={} duplicates={} skipped={}",
+                    report.added.len(),
+                    report.duplicates.len(),
+                    report.skipped.len()
+                ));
+                ok(report)
+            }
+            Request::OtpRename { name, new_name } => {
+                self.mutate(|v| pm_vault::otp::rename(&mut v.payload.otp, &name, &new_name).map_err(|m| err("BAD_REQUEST", m))).await?;
+                log(&format!("web: otp rename name={name}"));
+                ok("renamed")
+            }
+            Request::OtpDelete { name } => {
+                self.mutate(|v| {
+                    let n = v.payload.otp.len();
+                    v.payload.otp.retain(|a| a.name != name);
+                    if v.payload.otp.len() == n { Err(err("UNKNOWN_CREDENTIAL", "账户不存在")) } else { Ok(()) }
+                })
+                .await?;
+                log(&format!("web: otp delete name={name}"));
+                ok("deleted")
             }
             Request::Reveal { name, password } => {
                 self.verify_password(password).await?;
@@ -1931,6 +1988,67 @@ fn nix_user(name: &str) -> Result<u32, ()> {
 #[cfg(target_os = "macos")]
 pub static ROOT_PHASE_KEY: std::sync::Mutex<Option<Zeroizing<[u8; 32]>>> = std::sync::Mutex::new(None);
 
+// ---------------- 两步验证 ----------------
+
+/// 只有网页会话（root 一次性链接登录）能用两步验证。
+fn otp_session_ok(session: &Session) -> bool {
+    matches!(session, Session::Web)
+}
+
+/// 账户的公开信息（没有种子）。
+fn otp_view(a: &pm_vault::OtpAccount) -> OtpView {
+    OtpView {
+        name: a.name.clone(),
+        issuer: a.issuer.clone(),
+        account: a.account.clone(),
+        kind: match a.params.kind {
+            pm_otp::Kind::Totp => "TOTP".into(),
+            pm_otp::Kind::Steam => "Steam".into(),
+        },
+        alg: a.params.alg.name().into(),
+        digits: a.params.digits,
+        period: a.params.period,
+        created: a.created,
+    }
+}
+
+/// 一个账户在 `now`（Unix 秒）时的详情与验证码；`reveal` 时另外带上种子（Base32 与 otpauth 链接）。
+fn otp_detail(a: &pm_vault::OtpAccount, now: u64, reveal: bool) -> OtpDetailView {
+    OtpDetailView {
+        view: otp_view(a),
+        code: pm_otp::code::at(&a.secret, &a.params, now).to_string(),
+        remaining: pm_otp::code::remaining(&a.params, now),
+        now,
+        secret: reveal.then(|| pm_otp::uri::base32(&a.secret).to_string()),
+        uri: reveal.then(|| pm_otp::uri::build(&a.issuer, &a.account, &a.secret, &a.params).to_string()),
+    }
+}
+
+/// 解析导入的内容：每段文本里的链接，以及可选的 2FAS 备份。整份备份读不了时记一项跳过。
+fn otp_parse(texts: &[Sensitive], twofas: Option<&Sensitive>, password: Option<&Sensitive>) -> pm_otp::Parsed {
+    let mut parsed = pm_otp::Parsed::default();
+    for t in texts {
+        parsed.extend(pm_otp::parse_text(t.as_str()));
+    }
+    if let Some(f) = twofas {
+        match pm_otp::twofas::parse(f.as_str().as_bytes(), password.map(Sensitive::as_str)) {
+            Ok(p) => parsed.extend(p),
+            Err(reason) => parsed.skipped.push(pm_otp::Skipped::new("2FAS 备份", reason)),
+        }
+    }
+    parsed
+}
+
+/// 把一个账户加进库里的列表，结果记进报告。
+fn otp_import_one(list: &mut Vec<pm_vault::OtpAccount>, a: pm_otp::Account, now: u64, report: &mut OtpImportReport) {
+    let label = a.label();
+    match pm_vault::otp::add(list, a, now) {
+        pm_vault::otp::Added::New(n) => report.added.push(n),
+        pm_vault::otp::Added::Duplicate(n) => report.duplicates.push(n),
+        pm_vault::otp::Added::Full => report.skipped.push((label, format!("账户数已到上限（{} 个）", pm_vault::otp::MAX_ACCOUNTS))),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     /// 按行编辑：删除与追加在服务端完成；行数对不上、删光、与整值同时提供都拒绝；什么都不改时原值逐字节不变。
@@ -2049,5 +2167,113 @@ mod tests {
             std::os::unix::fs::symlink(t.path().join("elsewhere"), dir.join("SHA256SUMS")).unwrap();
             assert!(release_sums(&l).is_empty());
         }
+    }
+}
+
+#[cfg(test)]
+mod otp_tests {
+    use super::*;
+
+    /// RFC 4226 测试种子的 otpauth 链接。
+    const LINK: &str = "otpauth://totp/Example:alice?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ&issuer=Example";
+
+    #[test]
+    fn otp_session_ok_only_for_web() {
+        assert!(otp_session_ok(&Session::Web));
+        for s in [Session::Agent, Session::Admin { ready: true }, Session::Root] {
+            assert!(!otp_session_ok(&s));
+        }
+        // 每个两步验证请求都是 is_otp，且都不是使用类（Agent 在第一道检查就被拒）
+        let reqs = [
+            Request::OtpList,
+            Request::OtpDetail { name: "a".into(), reveal: true },
+            Request::OtpImport { texts: vec![], twofas: None, password: None },
+            Request::OtpRename { name: "a".into(), new_name: "b".into() },
+            Request::OtpDelete { name: "a".into() },
+        ];
+        for r in &reqs {
+            assert!(r.is_otp() && !r.is_usage(), "{r:?}");
+        }
+        assert!(!Request::ShowEntry { name: "a".into() }.is_otp());
+    }
+
+    #[test]
+    fn otp_parse_collects_links_and_twofas_errors() {
+        // 两段文本（第二段两行，其中一行不是链接）+ 一份口令错误的加密 2FAS 备份
+        let texts = vec![Sensitive::new(LINK), Sensitive::new(format!("{LINK}\nhello"))];
+        let bad = Sensitive::new(r#"{"reference": "a:b:c", "servicesEncrypted": "a:b:c"}"#);
+        let p = otp_parse(&texts, Some(&bad), None);
+        assert_eq!(p.accounts.len(), 2);
+        let labels: Vec<&str> = p.skipped.iter().map(|s| s.label.as_str()).collect();
+        assert_eq!(labels, ["（一行文本）", "2FAS 备份"]);
+        assert!(p.skipped[1].reason.contains("口令"));
+    }
+
+    #[test]
+    fn otp_import_one_reports_added_duplicates_and_full() {
+        let mut list = Vec::new();
+        let mut rep = OtpImportReport::default();
+        for a in otp_parse(&[Sensitive::new(format!("{LINK}\n{LINK}"))], None, None).accounts {
+            otp_import_one(&mut list, a, 7, &mut rep);
+        }
+        assert_eq!((rep.added.clone(), rep.duplicates.clone()), (vec!["Example:alice".to_string()], vec!["Example:alice".to_string()]));
+        // 到上限：记进 skipped
+        for i in 0..pm_vault::otp::MAX_ACCOUNTS {
+            let a = pm_otp::Account {
+                issuer: "E".into(),
+                account: i.to_string(),
+                secret: Zeroizing::new(format!("seed-{i:08}").into_bytes()),
+                params: pm_otp::Params::default(),
+            };
+            pm_vault::otp::add(&mut list, a, 0);
+        }
+        let extra = pm_otp::Account {
+            issuer: "E".into(),
+            account: "x".into(),
+            secret: Zeroizing::new(b"seed-extra-123".to_vec()),
+            params: pm_otp::Params::default(),
+        };
+        otp_import_one(&mut list, extra, 0, &mut rep);
+        assert_eq!(rep.skipped.len(), 1);
+        assert!(rep.skipped[0].1.contains("上限"));
+    }
+
+    #[test]
+    fn otp_detail_carries_the_seed_only_when_revealed() {
+        let mut list = Vec::new();
+        let mut rep = OtpImportReport::default();
+        for a in otp_parse(&[Sensitive::new(LINK)], None, None).accounts {
+            otp_import_one(&mut list, a, 7, &mut rep);
+        }
+        let v = otp_view(&list[0]);
+        assert_eq!(
+            v,
+            OtpView {
+                name: "Example:alice".into(),
+                issuer: "Example".into(),
+                account: "alice".into(),
+                kind: "TOTP".into(),
+                alg: "SHA1".into(),
+                digits: 6,
+                period: 30,
+                created: 7
+            }
+        );
+        // t = 59：计数器 1，RFC 4226 附录 D 的 287082；剩余 1 秒
+        let d = otp_detail(&list[0], 59, false);
+        assert_eq!((d.code.as_str(), d.remaining, d.now, &d.view), ("287082", 1, 59, &v));
+        assert_eq!((d.secret.clone(), d.uri.clone()), (None, None));
+        // 不显示密钥时，序列化出去的 JSON 里没有种子（Base32 与原文都没有），Debug 里也没有验证码
+        let json = serde_json::to_string(&(&v, &d)).unwrap();
+        assert!(!json.contains("GEZDGNBV") && !json.contains("1234567890"), "{json}");
+        assert!(!format!("{d:?}").contains("287082"));
+        // 显示密钥：Base32 与能导回去的完整链接
+        let r = otp_detail(&list[0], 59, true);
+        assert_eq!(r.secret.as_deref(), Some("GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ"));
+        let back = pm_otp::uri::parse(r.uri.as_deref().unwrap()).unwrap();
+        assert_eq!(
+            (back.label(), back.params, back.secret.to_vec()),
+            ("Example:alice".to_string(), list[0].params, list[0].secret.to_vec())
+        );
     }
 }

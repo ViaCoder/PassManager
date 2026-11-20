@@ -16,6 +16,22 @@ pub fn harden_process() {
     }
 }
 
+/// 解析不可信输入的子进程（例如二维码图片解码）：在 [`harden_process`] 之外，限制地址空间（`mem_bytes`）、
+/// CPU 时间（`cpu_secs` 秒，超时由内核发 SIGXCPU/SIGKILL 结束），并禁止写文件（RLIMIT_FSIZE = 0）。
+/// 设置失败的上限会被忽略（不影响解码结果，父进程另有超时）。
+pub fn limit_child(mem_bytes: u64, cpu_secs: u64) {
+    harden_process();
+    #[cfg(unix)]
+    {
+        use nix::sys::resource::{Resource, setrlimit};
+        let _ = setrlimit(Resource::RLIMIT_AS, mem_bytes, mem_bytes);
+        let _ = setrlimit(Resource::RLIMIT_CPU, cpu_secs, cpu_secs);
+        let _ = setrlimit(Resource::RLIMIT_FSIZE, 0, 0);
+    }
+    #[cfg(not(unix))]
+    let _ = (mem_bytes, cpu_secs);
+}
+
 /// 立即、不可逆地降权到指定用户（macOS 服务在 root 阶段读取设备密钥后调用）。
 #[cfg(unix)]
 pub fn drop_privileges(user: &str) -> io::Result<()> {

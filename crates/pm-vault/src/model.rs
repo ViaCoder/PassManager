@@ -414,7 +414,15 @@ pub struct PayloadV2 {
 
 impl From<PayloadV2> for Payload {
     fn from(p: PayloadV2) -> Self {
-        Self { entries: p.entries, pins: p.pins, settings: p.settings, aliases: Vec::new(), relay: Vec::new(), managed_certs: Vec::new() }
+        Self {
+            entries: p.entries,
+            pins: p.pins,
+            settings: p.settings,
+            aliases: Vec::new(),
+            relay: Vec::new(),
+            managed_certs: Vec::new(),
+            otp: Vec::new(),
+        }
     }
 }
 
@@ -429,7 +437,15 @@ pub struct PayloadV3 {
 
 impl From<PayloadV3> for Payload {
     fn from(p: PayloadV3) -> Self {
-        Self { entries: p.entries, pins: p.pins, settings: p.settings, aliases: p.aliases, relay: Vec::new(), managed_certs: Vec::new() }
+        Self {
+            entries: p.entries,
+            pins: p.pins,
+            settings: p.settings,
+            aliases: p.aliases,
+            relay: Vec::new(),
+            managed_certs: Vec::new(),
+            otp: Vec::new(),
+        }
     }
 }
 
@@ -445,7 +461,40 @@ pub struct PayloadV4 {
 
 impl From<PayloadV4> for Payload {
     fn from(p: PayloadV4) -> Self {
-        Self { entries: p.entries, pins: p.pins, settings: p.settings, aliases: p.aliases, relay: p.relay, managed_certs: Vec::new() }
+        Self {
+            entries: p.entries,
+            pins: p.pins,
+            settings: p.settings,
+            aliases: p.aliases,
+            relay: p.relay,
+            managed_certs: Vec::new(),
+            otp: Vec::new(),
+        }
+    }
+}
+
+/// v5 载荷（0.3.11-rc.21 起，有托管证书时写入），只用于读取：比 v4 多了托管证书。
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct PayloadV5 {
+    pub entries: Vec<Entry>,
+    pub pins: Vec<Pin>,
+    pub settings: Settings,
+    pub aliases: Vec<Alias>,
+    pub relay: Vec<crate::relay::RelayPolicy>,
+    pub managed_certs: Vec<crate::managed_cert::ManagedCert>,
+}
+
+impl From<PayloadV5> for Payload {
+    fn from(p: PayloadV5) -> Self {
+        Self {
+            entries: p.entries,
+            pins: p.pins,
+            settings: p.settings,
+            aliases: p.aliases,
+            relay: p.relay,
+            managed_certs: p.managed_certs,
+            otp: Vec::new(),
+        }
     }
 }
 
@@ -472,6 +521,7 @@ impl From<PayloadV1> for Payload {
             aliases: Vec::new(),
             relay: Vec::new(),
             managed_certs: Vec::new(),
+            otp: Vec::new(),
         }
     }
 }
@@ -487,6 +537,8 @@ pub struct Payload {
     pub relay: Vec<crate::relay::RelayPolicy>,
     /// 托管证书（为别的主机签发并经 SSH 投递；按域名唯一）。v5 新增。
     pub managed_certs: Vec<crate::managed_cert::ManagedCert>,
+    /// 两步验证账户（种子平时不出库，只有网页点"显示密钥"时返回）。v6 新增。
+    pub otp: Vec<crate::otp::OtpAccount>,
 }
 
 impl Payload {

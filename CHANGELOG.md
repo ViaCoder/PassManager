@@ -4,6 +4,32 @@ English | [简体中文](CHANGELOG.zh-CN.md)
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.3.11-rc.22] - 2026-11-20
+
+### Added
+
+- **Two-factor codes in the web UI** (new "Two-factor" tab). The list shows each account with its issuer initial; clicking one
+  opens its page with the current code in large type, a countdown, click-to-copy, an automatic refresh at the end of each
+  period while the tab is visible (at most 10 times, about 5 minutes, then the code is masked), and a warning when the browser
+  clock is more than 5 seconds off the server. The account page also shows the details (issuer, account, type, algorithm,
+  digits, period, import time) and lets you rename or delete the account.
+- **Import** TOTP and Steam accounts from QR code images (PNG or JPEG, up to 10 per upload; pick them, drag them into the drop
+  zone or paste a screenshot with Ctrl+V; Google Authenticator export codes that span several images can go in together),
+  pasted `otpauth://` or `otpauth-migration://` links, and 2FAS Auth backups (schema 4 and older, plain or password-encrypted:
+  PBKDF2-HMAC-SHA256 with 10,000 iterations and AES-256-GCM, as in the 2FAS source). Duplicates (same seed and parameters) are
+  not imported twice; HOTP and MD5 accounts are listed as skipped.
+- **Seeds stay hidden** until "Show secret" on the account page (a POST with the CSRF token), which shows the Base32 secret,
+  the `otpauth://` link and a QR code to move the account to another authenticator; the next automatic refresh hides it again.
+  Every code view and every secret view is logged with the account name only. Seeds live in the encrypted vault (payload v6,
+  written only when two-factor accounts exist). Only the web session can use the two-factor requests; agents, the TUI and
+  root's command line get `FORBIDDEN`.
+- QR images are decoded in a child process (`PassManager qr-decode`, address space 1 GiB, 10 s CPU, no file writes, no core
+  dumps, not traceable) so a decoder crash cannot take the server down (the server is built with `panic = abort`). Uploads stay
+  in memory and are zeroed after use; the import page accepts 4 MiB, every other page still 64 KiB.
+- New dependencies: `rqrr` (QR decoding, without the `image` crate), `png`, `zune-jpeg` (without SIMD code), `qrcode` (QR
+  drawing as inline SVG, without image features), and `multer` through axum's `multipart` feature. HMAC, PBKDF2 and AES-GCM come
+  from aws-lc-rs as before.
+
 ## [0.3.11-rc.21] - 2026-11-19
 
 ### Added

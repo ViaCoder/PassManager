@@ -80,8 +80,15 @@ impl Online {
     }
 
     pub fn web_origin(&self) -> String {
-        pm_web::WebConfig { domain: self.cfg.domain.clone(), port: self.cfg.web_port, agent_bin_dir: None, tang: None, admin_allow: None }
-            .origin()
+        pm_web::WebConfig {
+            domain: self.cfg.domain.clone(),
+            port: self.cfg.web_port,
+            agent_bin_dir: None,
+            tang: None,
+            admin_allow: None,
+            qr: None,
+        }
+        .origin()
     }
 
     /// 应用层来源检查（与防火墙使用同一份列表：局域网网段 + 允许列表；本机回环总是允许）。
@@ -369,6 +376,8 @@ async fn serve_web_with(shared: Arc<Shared>, listener: TcpListener, single: bool
                 let allow: pm_web::front::Allow = Arc::new(move |ip| pm_platform::paths::net_allowed(ip, &list));
                 allow
             }),
+            // 二维码图片在子进程里解码（服务进程不解析不可信的图片）
+            qr: Some(Arc::new(|img| Box::pin(crate::qr_child::decode(crate::qr_child::exe(), img)))),
         },
     );
     let scfg = on.cfg.clone();

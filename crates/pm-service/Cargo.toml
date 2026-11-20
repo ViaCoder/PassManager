@@ -11,6 +11,7 @@ pm-crypto = { path = "../pm-crypto" }
 pm-vault = { path = "../pm-vault" }
 pm-platform = { path = "../pm-platform" }
 pm-proto = { path = "../pm-proto" }
+pm-otp = { path = "../pm-otp" }
 pm-net = { path = "../pm-net" }
 pm-web = { path = "../pm-web" }
 serde.workspace = true
@@ -19,7 +20,7 @@ zeroize.workspace = true
 thiserror.workspace = true
 hex.workspace = true
 base64.workspace = true
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time", "sync", "signal"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time", "sync", "signal", "process"] }
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "http2", "charset"] }
 rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std", "tls12"] }
 russh = "0.65"

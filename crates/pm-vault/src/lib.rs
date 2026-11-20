@@ -4,6 +4,7 @@ pub mod domain;
 pub mod format;
 pub mod managed_cert;
 pub mod model;
+pub mod otp;
 pub mod relay;
 pub mod store;
 
@@ -17,6 +18,7 @@ use thiserror::Error;
 pub use crate::format::{Header, VaultMode};
 pub use crate::managed_cert::ManagedCert;
 pub use crate::model::*;
+pub use crate::otp::OtpAccount;
 pub use crate::relay::{BodyRule, RelayPolicy};
 
 #[derive(Debug, Error)]
@@ -507,6 +509,36 @@ mod tests {
             (back.managed_certs.clone(), back.relay.len(), back.managed_cert("lab.example.com").map(|c| c.dir.as_str())),
             (p.managed_certs.clone(), 1, Some("/root/pm-cert"))
         );
+        // v5 的字节与 rc.21 写出的完全相同（当时直接序列化六个字段的 Payload）。
+        let old5 = PayloadV5 {
+            entries: p.entries.clone(),
+            pins: vec![],
+            settings: p.settings.clone(),
+            aliases: p.aliases.clone(),
+            relay: p.relay.clone(),
+            managed_certs: p.managed_certs.clone(),
+        };
+        assert_eq!(&v5[9..9 + postcard::to_allocvec(&old5).unwrap().len()], postcard::to_allocvec(&old5).unwrap().as_slice());
+        // 有两步验证账户：写 v6，读回账户（包括种子与参数）和其余字段。
+        let added = otp::add(
+            &mut p.otp,
+            pm_otp::Account {
+                issuer: "Example".into(),
+                account: "alice".into(),
+                secret: zeroize::Zeroizing::new(b"12345678901234567890".to_vec()),
+                params: pm_otp::Params { kind: pm_otp::Kind::Steam, alg: pm_otp::Alg::Sha256, digits: 5, period: 60 },
+            },
+            9,
+        );
+        assert_eq!(added, otp::Added::New("Example:alice".into()));
+        let v6 = format::encode_payload(&p).unwrap();
+        assert_eq!(&v6[4..9], format::PAYLOAD_V6_MAGIC);
+        let back = format::decode_payload(&v6).unwrap();
+        assert_eq!(back.otp, p.otp);
+        assert_eq!((back.managed_certs.len(), back.relay.len(), back.aliases.len()), (1, 1, 1));
+        // 账户删除后回到 v5。
+        p.otp.clear();
+        assert_eq!(&format::encode_payload(&p).unwrap()[4..9], format::PAYLOAD_V5_MAGIC);
         // 托管证书删除后回到 v4，策略删除后回到 v3，再删别名回到 v2。
         p.managed_certs.clear();
         assert_eq!(&format::encode_payload(&p).unwrap()[4..9], format::PAYLOAD_V4_MAGIC);
@@ -723,6 +755,52 @@ mod tests {
         let p2 = dir.path().join("v2.pmv");
         Vault::create_device_only(&p2, &dk, 2).unwrap().save().unwrap();
         assert!(matches!(Vault::open_device_only(&p2, &[1u8; 32], 2), Err(VaultError::WrongDeviceKey)));
+    }
+
+    /// 两步验证账户存进库文件后：文件里找不到种子（原始字节与 Base32 都没有），重新打开后种子不变。
+    #[test]
+    fn otp_seed_is_not_in_vault_file() {
+        test_mode();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vault.pmv");
+        let dk = [5u8; 32];
+        let mut v = Vault::create_device_only(&path, &dk, 2).unwrap();
+        let seed = b"OTPSEED-0123456789-unique-marker".to_vec();
+        let a = pm_otp::Account {
+            issuer: "Example".into(),
+            account: "alice".into(),
+            secret: zeroize::Zeroizing::new(seed.clone()),
+            params: pm_otp::Params::default(),
+        };
+        assert!(matches!(otp::add(&mut v.payload.otp, a, 1), otp::Added::New(_)));
+        v.save().unwrap();
+        let raw = std::fs::read(&path).unwrap();
+        let b32 = data_encoding_free_base32(&seed);
+        assert!(!raw.windows(seed.len()).any(|w| w == seed.as_slice()), "文件里没有种子原文");
+        assert!(!raw.windows(b32.len()).any(|w| w == b32.as_bytes()), "文件里没有种子的 Base32");
+        assert!(!raw.windows(5).any(|w| w == format::PAYLOAD_V6_MAGIC), "载荷是加密的，文件里看不到标记");
+        // 重新打开：账户与种子都在
+        let back = Vault::open_device_only(&path, &dk, 2).unwrap();
+        assert_eq!(back.payload.otp.len(), 1);
+        assert_eq!(*back.payload.otp[0].secret, seed);
+    }
+
+    /// 测试用的 Base32 编码（RFC 4648，不带填充），只用来在文件里搜种子。
+    fn data_encoding_free_base32(b: &[u8]) -> String {
+        const A: &[u8; 32] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+        let (mut out, mut acc, mut bits) = (String::new(), 0u32, 0);
+        for &x in b {
+            acc = (acc << 8) | x as u32;
+            bits += 8;
+            while bits >= 5 {
+                bits -= 5;
+                out.push(A[((acc >> bits) & 31) as usize] as char);
+            }
+        }
+        if bits > 0 {
+            out.push(A[((acc << (5 - bits)) & 31) as usize] as char);
+        }
+        out
     }
 
     /// 0.1.0 写入的库（v1 载荷，没有字段）能打开，内容不变；保存后升级为 v2，可以保存多字段条目。

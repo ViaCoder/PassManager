@@ -8,6 +8,7 @@ license-file.workspace = true
 
 [dependencies]
 pm-crypto = { path = "../pm-crypto" }
+pm-otp = { path = "../pm-otp" }
 getrandom.workspace = true
 serde.workspace = true
 postcard.workspace = true

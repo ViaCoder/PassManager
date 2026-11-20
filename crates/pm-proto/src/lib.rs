@@ -41,6 +41,27 @@ pub enum Hello {
     },
 }
 
+/// 装着敏感内容（二维码里的链接、2FAS 备份文件、备份口令）的字符串：序列化时原样，`Debug` 只显示长度，用完清零。
+#[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct Sensitive(pub zeroize::Zeroizing<String>);
+
+impl Sensitive {
+    pub fn new(s: impl Into<String>) -> Self {
+        Sensitive(zeroize::Zeroizing::new(s.into()))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for Sensitive {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "<redacted {} bytes>", self.0.len())
+    }
+}
+
 /// 多字段条目的一个字段。`value` 为 None 或空串表示保留原值（编辑时）。
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub struct FieldInput {
@@ -237,6 +258,32 @@ pub enum Request {
     ShowEntry {
         name: String,
     },
+    // ---- 两步验证（只有网页会话能用；种子只在"显示密钥"时返回，每次都记日志） ----
+    /// 账户列表（不含种子，也不含验证码）。
+    OtpList,
+    /// 一个账户的详情与此刻的验证码；`reveal` 为真时另外返回种子（Base32 与 otpauth 链接）。每次都记日志（只记名称）。
+    OtpDetail {
+        name: String,
+        #[serde(default)]
+        reveal: bool,
+    },
+    /// 导入：`texts` 是粘贴的或从二维码读出的链接（每项可以有多行），`twofas` 是 2FAS 备份文件的内容，
+    /// `password` 是它的备份口令（不加密的备份不需要）。
+    OtpImport {
+        #[serde(default)]
+        texts: Vec<Sensitive>,
+        #[serde(default)]
+        twofas: Option<Sensitive>,
+        #[serde(default)]
+        password: Option<Sensitive>,
+    },
+    OtpRename {
+        name: String,
+        new_name: String,
+    },
+    OtpDelete {
+        name: String,
+    },
     Pins,
     PendingPins,
     TrustPins {
@@ -300,6 +347,18 @@ impl Request {
     }
 
     /// 是否允许令牌会话（Agent）执行。
+    /// 两步验证类请求：只有网页会话能用。
+    pub fn is_otp(&self) -> bool {
+        matches!(
+            self,
+            Request::OtpList
+                | Request::OtpDetail { .. }
+                | Request::OtpImport { .. }
+                | Request::OtpRename { .. }
+                | Request::OtpDelete { .. }
+        )
+    }
+
     pub fn is_usage(&self) -> bool {
         matches!(
             self,
@@ -400,6 +459,58 @@ pub struct EntryView {
 pub struct ShownEntry {
     pub secret: Option<String>,
     pub fields: Vec<(String, String)>,
+}
+
+/// `OtpList` 的一项：两步验证账户的公开信息（没有种子）。
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq)]
+pub struct OtpView {
+    pub name: String,
+    pub issuer: String,
+    pub account: String,
+    /// `TOTP` 或 `Steam`。
+    pub kind: String,
+    /// 算法名，例如 `SHA1`。
+    pub alg: String,
+    pub digits: u8,
+    pub period: u32,
+    pub created: u64,
+}
+
+/// `OtpDetail` 的结果。
+#[derive(Serialize, Deserialize, Clone, Default, PartialEq, Eq)]
+pub struct OtpDetailView {
+    #[serde(flatten)]
+    pub view: OtpView,
+    /// 此刻的验证码。
+    pub code: String,
+    /// 这个验证码还剩几秒（1～周期）。
+    pub remaining: u32,
+    /// 服务器此刻的 Unix 时间（网页用来比对浏览器时钟）。
+    pub now: u64,
+    /// 种子的 Base32（只在 reveal 时有）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secret: Option<String>,
+    /// 完整的 otpauth:// 链接（只在 reveal 时有）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uri: Option<String>,
+}
+
+impl std::fmt::Debug for OtpDetailView {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // 验证码与种子不出现在 Debug 输出里
+        f.debug_struct("OtpDetailView").field("view", &self.view).field("revealed", &self.secret.is_some()).finish()
+    }
+}
+
+/// `OtpImport` 的结果。
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq)]
+pub struct OtpImportReport {
+    /// 新加入的账户名。
+    pub added: Vec<String>,
+    /// 库里已经有的（已有的账户名）。
+    pub duplicates: Vec<String>,
+    /// 没有导入的：（名称，原因）。
+    pub skipped: Vec<(String, String)>,
 }
 
 /// git 代理的响应头（经白名单过滤）。

@@ -1,0 +1,29 @@
+[package]
+name = "pm-otp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license-file.workspace = true
+description = "PassManager two-factor codes: TOTP/Steam codes, otpauth and Google migration links, 2FAS backups, QR images"
+
+[dependencies]
+pm-crypto = { path = "../pm-crypto" }
+serde.workspace = true
+serde_json.workspace = true
+zeroize.workspace = true
+base64.workspace = true
+# Base32 种子（otpauth 链接与 2FAS 备份里的 secret）
+data-encoding = "2"
+# otpauth 链接里的百分号编码
+percent-encoding = "2"
+# 二维码解码；不开默认的 img 功能，不带进 image 库
+rqrr = { version = "0.11", default-features = false }
+# PNG 解码（截图）
+png = "0.18"
+# JPEG 解码（照片）；只开 std，不用 SIMD 的 unsafe 代码
+zune-jpeg = { version = "0.5", default-features = false, features = ["std"] }
+
+[dev-dependencies]
+# 测试里生成二维码图片
+qrcode = { version = "=0.14.1", default-features = false }

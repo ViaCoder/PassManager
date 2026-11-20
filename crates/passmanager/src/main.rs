@@ -110,6 +110,9 @@ enum Cmd {
     /// 输出当前使用的本地 socket / 命名管道地址（测试脚本用）
     #[command(hide = true)]
     SocketPath,
+    /// 内部用：服务进程把网页上传的二维码图片交给这个子进程解码（标准输入是图片，标准输出是 JSON）
+    #[command(hide = true)]
+    QrDecode,
     /// MCP 服务器（stdio），供 AI Agent 使用
     Mcp,
     /// 查询某个目标（URL、user@host 或主机）可用的凭据，返回照抄即可的写法（只显示这一个目标的信息）
@@ -704,10 +707,18 @@ fn main() -> ExitCode {
     }
 }
 
+/// 二维码解码子进程：先加上限（1 GiB 地址空间、10 秒 CPU、不能写文件、不能被调试或转储），再从标准输入读图片解码。
+fn qr_decode_child() -> ExitCode {
+    pm_platform::process::limit_child(1 << 30, 10);
+    let code = pm_otp::qr::child_main(&mut std::io::stdin().lock(), &mut std::io::stdout().lock());
+    ExitCode::from(code.clamp(0, 255) as u8)
+}
+
 fn run_cli() -> ExitCode {
     let cli = Cli::parse();
     match cli.cmd {
         None => pm_tui::run(pm_tui::Mode::Full),
+        Some(Cmd::QrDecode) => qr_decode_child(),
         Some(Cmd::Unlock) if server_mode() => server::lock(true),
         Some(Cmd::Unlock) => pm_tui::run(pm_tui::Mode::Unlock),
         Some(Cmd::Trust { pattern }) => pm_tui::run(pm_tui::Mode::Trust(pattern)),

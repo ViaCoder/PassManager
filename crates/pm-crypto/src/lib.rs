@@ -60,6 +60,43 @@ pub fn sha512(data: &[u8]) -> [u8; 64] {
     out
 }
 
+/// 一次性验证码（HOTP/TOTP）用的 HMAC 哈希算法。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HmacAlg {
+    /// SHA-1：RFC 4226/6238 的默认算法，绝大多数网站用它（只用于 HMAC，不用于签名）。
+    Sha1,
+    Sha224,
+    Sha256,
+    Sha384,
+    Sha512,
+}
+
+/// HMAC：`key` 是验证码种子，`msg` 是 8 字节计数器；返回完整的 MAC（长度随算法）。
+pub fn hmac_sha(alg: HmacAlg, key: &[u8], msg: &[u8]) -> Vec<u8> {
+    use aws_lc_rs::hmac;
+    // 把我们的枚举换成 aws-lc-rs 的算法常量
+    let a = match alg {
+        HmacAlg::Sha1 => hmac::HMAC_SHA1_FOR_LEGACY_USE_ONLY,
+        HmacAlg::Sha224 => hmac::HMAC_SHA224,
+        HmacAlg::Sha256 => hmac::HMAC_SHA256,
+        HmacAlg::Sha384 => hmac::HMAC_SHA384,
+        HmacAlg::Sha512 => hmac::HMAC_SHA512,
+    };
+    // 计算 HMAC 并复制出来
+    hmac::sign(&hmac::Key::new(a, key), msg).as_ref().to_vec()
+}
+
+/// PBKDF2-HMAC-SHA256，输出 32 字节（读 2FAS 加密备份用）。`iterations` 为 0 时按 1 处理。
+pub fn pbkdf2_hmac_sha256(password: &[u8], salt: &[u8], iterations: u32) -> zeroize::Zeroizing<[u8; 32]> {
+    // 迭代次数至少 1（PBKDF2 不允许 0）
+    let n = std::num::NonZeroU32::new(iterations.max(1)).unwrap_or(std::num::NonZeroU32::MIN);
+    // 派生出的密钥放进 Zeroizing，用完清零
+    let mut out = zeroize::Zeroizing::new([0u8; 32]);
+    // 输出固定 32 字节，远小于上限，derive 不会 panic
+    aws_lc_rs::pbkdf2::derive(aws_lc_rs::pbkdf2::PBKDF2_HMAC_SHA256, n, salt, password, out.as_mut());
+    out
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -74,5 +111,36 @@ mod tests {
             hex::encode(super::hmac_sha384(b"Jefe", &[b"what do ya want ", b"for nothing?"])),
             "af45d2e376484031617f78d2b58a6b1b9c7ef464f5a01b47e42ec3736322445e8e2240ca5e69e2c78b3239ecfab21649"
         );
+    }
+
+    #[test]
+    fn hmac_sha_known_answers() {
+        use super::{HmacAlg, hmac_sha};
+        // RFC 2202（SHA-1）与 RFC 4231（SHA-2）的测试用例 2："Jefe" / "what do ya want for nothing?"
+        let m = b"what do ya want for nothing?";
+        let want = [
+            (HmacAlg::Sha1, "effcdf6ae5eb2fa2d27416d5f184df9c259a7c79"),
+            (HmacAlg::Sha224, "a30e01098bc6dbbf45690f3a7e9e6d0f8bbea2a39e6148008fd05e44"),
+            (HmacAlg::Sha256, "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843"),
+            (HmacAlg::Sha384, "af45d2e376484031617f78d2b58a6b1b9c7ef464f5a01b47e42ec3736322445e8e2240ca5e69e2c78b3239ecfab21649"),
+            (
+                HmacAlg::Sha512,
+                "164b7a7bfcf819e2e395fbe73b56e0a387bd64222e831fd610270cd7ea2505549758bf75c05a994a6d034f65f8f0e6fdcaeab1a34d4a6b4b636e070a38bce737",
+            ),
+        ];
+        for (alg, hex_want) in want {
+            assert_eq!(hex::encode(hmac_sha(alg, b"Jefe", m)), hex_want, "{alg:?}");
+        }
+    }
+
+    #[test]
+    fn pbkdf2_sha256_known_answers() {
+        // RFC 7914 第 11 节的 PBKDF2-HMAC-SHA256 向量（取前 32 字节；PBKDF2 的输出前缀与输出长度无关）
+        let a = super::pbkdf2_hmac_sha256(b"passwd", b"salt", 1);
+        assert_eq!(hex::encode(*a), "55ac046e56e3089fec1691c22544b605f94185216dde0465e68b9d57c20dacbc");
+        let b = super::pbkdf2_hmac_sha256(b"Password", b"NaCl", 80000);
+        assert_eq!(hex::encode(*b), "4ddcd8f60b98be21830cee5ef22701f9641a4418d04c0414aeff08876b34ab56");
+        // 迭代次数 0 按 1 处理，不 panic
+        assert_eq!(*super::pbkdf2_hmac_sha256(b"passwd", b"salt", 0), *a);
     }
 }

@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+{% block title %}两步验证 · PassManager{% endblock %}
+{% block body %}
+<div class="page-head">
+  <div>
+    <h1>{{ icon("clock") }}两步验证</h1>
+    <p class="lede">点一个账户查看它当前的验证码。密钥平时不显示，要在账户页点"显示密钥"才出现，每次显示都会记日志。Agent 和命令行都拿不到验证码。</p>
+  </div>
+  <div class="actions"><a class="btn" href="/otp/import">{{ icon("plus") }}导入</a></div>
+</div>
+{% if accounts %}
+<ul class="otp-list" aria-label="两步验证账户">
+  {% for a in accounts %}
+  <li>
+    <a class="otp-item" href="/otp/a/{{ a.name | urlencode }}">
+      <span class="avatar av-{{ a.hue }}" aria-hidden="true">{{ a.initial }}</span>
+      <span class="otp-main">
+        <span class="otp-name">{{ a.name }}</span>
+        {% if a.issuer or a.account %}<span class="sub">{% if a.issuer %}{{ a.issuer }}{% endif %}{% if a.issuer and a.account %} · {% endif %}{% if a.account %}{{ a.account }}{% endif %}</span>{% endif %}
+      </span>
+      <span class="tags otp-tags"><span class="tag">{{ a.kind }}</span>{% if a.kind == "TOTP" %} <span class="tag">{{ a.digits }} 位</span>{% endif %}{% if a.period != 30 %} <span class="tag">{{ a.period }} 秒</span>{% endif %}{% if a.alg != "SHA1" %} <span class="tag info">{{ a.alg }}</span>{% endif %}</span>
+      <span class="chev" aria-hidden="true"></span>
+    </a>
+  </li>
+  {% endfor %}
+</ul>
+{% elif flash_kind == "err" %}
+<div class="empty">
+  {{ icon("lock") }}
+  <p class="empty-title">账户暂时无法显示</p>
+  <p class="muted">原因见上方提示。</p>
+  <a class="btn secondary" href="/">{{ icon("activity") }}前往状态页</a>
+</div>
+{% else %}
+<div class="empty">
+  {{ icon("clock") }}
+  <p class="empty-title">还没有两步验证账户</p>
+  <p class="muted">可以导入二维码截图、otpauth:// 链接、Google 身份验证器的导出码，或 2FAS Auth 的备份文件。</p>
+  <a class="btn" href="/otp/import">{{ icon("plus") }}导入</a>
+</div>
+{% endif %}
+{% endblock %}

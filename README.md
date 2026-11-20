@@ -119,6 +119,12 @@ What else 0.2.0 adds on top of `http` / `ssh` / `scp`:
 - **Managed certificates** (server, root): `passmanager cert add` issues a Let's Encrypt certificate for another host with the
   server's ACME account and Cloudflare token, installs it over SSH with a vault credential (files 0600, deleted after the install
   command) and renews it with the server's own certificate. The host never sees the token. See §1.3 of the deployment guide.
+- **Two-factor codes** (web UI only): the "Two-factor" tab lists the TOTP and Steam accounts; click one to see its current
+  code with a countdown (it refreshes itself and copies on click). Import from QR code screenshots or photos (pick, drag in,
+  or paste with Ctrl+V; decoded in a separate resource-limited process), pasted `otpauth://` links, Google Authenticator export
+  codes (`otpauth-migration://`) and 2FAS Auth backups (plain or password-encrypted). The seed stays hidden until "Show secret"
+  on the account page (Base32, `otpauth://` link and a QR code for moving to another authenticator); every view is logged.
+  Agents, the TUI and root's command line cannot read codes or seeds. HOTP accounts are not imported.
 
 - **Single-port mode and IP allowlist**: `install-server.sh --port 8121` serves the web UI and the agent channel on one port
   (split by TLS ALPN), and `--allow "203.0.113.7 2001:db8::/32"` lets extra addresses reach that port (but not SSH); the firewall

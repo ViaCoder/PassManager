@@ -16,7 +16,10 @@ serde_json.workspace = true
 zeroize.workspace = true
 hex.workspace = true
 base64.workspace = true
-axum = "0.8"
+# 两步验证"显示密钥"时把 otpauth 链接画成二维码（SVG，不带图片库）
+qrcode = { version = "=0.14.1", default-features = false }
+# multipart：两步验证的导入页上传二维码图片与 2FAS 备份文件
+axum = { version = "0.8", features = ["multipart"] }
 minijinja = { version = "3", features = ["serde", "urlencode"] }
 hyper = { version = "1", features = ["server", "http1", "http2"] }
 hyper-util = { version = "0.1", features = ["tokio", "server-auto", "http1", "http2", "service"] }
@@ -26,5 +29,8 @@ tokio-rustls = { version = "0.26", default-features = false, features = ["aws_lc
 rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std", "tls12"] }
 
 [dev-dependencies]
+# 测试里在进程内解码二维码、生成二维码图片
+pm-otp = { path = "../pm-otp" }
+png = "0.18"
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"

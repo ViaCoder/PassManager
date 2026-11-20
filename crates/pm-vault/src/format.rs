@@ -198,6 +198,8 @@ pub const PAYLOAD_V3_MAGIC: &[u8; 5] = b"PMP3\0";
 pub const PAYLOAD_V4_MAGIC: &[u8; 5] = b"PMP4\0";
 /// v5 载荷的标记：比 v4 多了托管证书。
 pub const PAYLOAD_V5_MAGIC: &[u8; 5] = b"PMP5\0";
+/// v6 载荷的标记：比 v5 多了两步验证账户。
+pub const PAYLOAD_V6_MAGIC: &[u8; 5] = b"PMP6\0";
 
 /// v2 载荷的字段（借用，写入时不复制密钥）。
 #[derive(serde::Serialize)]
@@ -226,13 +228,38 @@ struct V4Ref<'a> {
     relay: &'a Vec<crate::relay::RelayPolicy>,
 }
 
+/// v5 载荷的字段（借用）。
+#[derive(serde::Serialize)]
+struct V5Ref<'a> {
+    entries: &'a Vec<crate::model::Entry>,
+    pins: &'a Vec<crate::model::Pin>,
+    settings: &'a crate::model::Settings,
+    aliases: &'a Vec<crate::model::Alias>,
+    relay: &'a Vec<crate::relay::RelayPolicy>,
+    managed_certs: &'a Vec<crate::managed_cert::ManagedCert>,
+}
+
 /// 序列化载荷并填充到 4 KiB 的整数倍（隐藏条目数量与长度）。
-/// 只写需要的最低版本，回滚到旧版本的程序仍能打开库：没有别名和策略时写 v2，有别名时写 v3，有中继策略时写 v4，有托管证书时写 v5。
+/// 只写需要的最低版本，回滚到旧版本的程序仍能打开库：没有别名和策略时写 v2，有别名时写 v3，有中继策略时写 v4，有托管证书时写 v5，
+/// 有两步验证账户时写 v6。
 /// 别名让旧程序打不开库，而不是忽略别名、放开原地址；中继策略只有新程序会用，写 v4 只是因为 postcard 不能跳过未知字段。
 pub fn encode_payload(p: &Payload) -> Result<Zeroizing<Vec<u8>>, VaultError> {
     let bad = |_| VaultError::Corrupt("payload encode");
-    let (magic, body) = if !p.managed_certs.is_empty() {
-        (PAYLOAD_V5_MAGIC, postcard::to_allocvec(p).map_err(bad)?)
+    let (magic, body) = if !p.otp.is_empty() {
+        (PAYLOAD_V6_MAGIC, postcard::to_allocvec(p).map_err(bad)?)
+    } else if !p.managed_certs.is_empty() {
+        (
+            PAYLOAD_V5_MAGIC,
+            postcard::to_allocvec(&V5Ref {
+                entries: &p.entries,
+                pins: &p.pins,
+                settings: &p.settings,
+                aliases: &p.aliases,
+                relay: &p.relay,
+                managed_certs: &p.managed_certs,
+            })
+            .map_err(bad)?,
+        )
     } else if !p.relay.is_empty() {
         (
             PAYLOAD_V4_MAGIC,
@@ -285,8 +312,11 @@ pub fn decode_payload(data: &[u8]) -> Result<Payload, VaultError> {
         return Err(VaultError::Corrupt("payload length"));
     }
     let body = &data[4..4 + len];
+    if let Some(v6) = body.strip_prefix(PAYLOAD_V6_MAGIC.as_slice()) {
+        return postcard::from_bytes(v6).map_err(|_| VaultError::Corrupt("payload decode"));
+    }
     if let Some(v5) = body.strip_prefix(PAYLOAD_V5_MAGIC.as_slice()) {
-        return postcard::from_bytes(v5).map_err(|_| VaultError::Corrupt("payload decode"));
+        return postcard::from_bytes::<crate::model::PayloadV5>(v5).map(Payload::from).map_err(|_| VaultError::Corrupt("payload decode"));
     }
     if let Some(v4) = body.strip_prefix(PAYLOAD_V4_MAGIC.as_slice()) {
         return postcard::from_bytes::<crate::model::PayloadV4>(v4).map(Payload::from).map_err(|_| VaultError::Corrupt("payload decode"));

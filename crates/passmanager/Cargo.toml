@@ -14,6 +14,7 @@ path = "src/main.rs"
 [dependencies]
 pm-crypto = { path = "../pm-crypto" }
 pm-vault = { path = "../pm-vault" }
+pm-otp = { path = "../pm-otp" }
 pm-platform = { path = "../pm-platform" }
 pm-proto = { path = "../pm-proto" }
 pm-service = { path = "../pm-service" }
@@ -50,3 +51,6 @@ rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", 
 rcgen = "0.14"
 flate2 = "1"
 percent-encoding = "2"
+# 两步验证端到端测试：生成二维码图片
+qrcode = { version = "=0.14.1", default-features = false }
+png = "0.18"

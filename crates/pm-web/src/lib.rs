@@ -1,17 +1,20 @@
 //! 网页管理界面（服务器模式，443 端口，只对局域网开放）。
 //!
-//! - 服务端渲染，没有 JavaScript；CSP `default-src 'none'`（只允许本站样式表与本站图片，即 favicon）；
+//! - 服务端渲染；只有登录页、继续页和两步验证的详情页、导入页带一段按 SHA-256 放行的内联脚本；
+//!   CSP `default-src 'none'`（只允许本站样式表与本站图片，即 favicon）；
 //!   图标是 base.html 里的内联 SVG sprite，不加载任何外部资源；
 //! - 没有任何密码：只能用服务器上 root 运行 `passmanager login` 打印的一次性链接登录
 //!   （2 分钟有效；GET 只显示确认页，POST 才消耗），会话空闲 2 小时、登录满 12 小时失效；
 //! - 会话 cookie 为 `__Host-` 前缀、HttpOnly、Secure、SameSite=Strict；所有修改类请求校验 CSRF 令牌、
-//!   Origin 与 Fetch Metadata；Host 头必须是本服务域名（防 DNS 重绑定）；请求体上限 64 KiB；
-//! - 密钥只能写入：任何页面、任何响应都不包含密钥。
+//!   Origin 与 Fetch Metadata；Host 头必须是本服务域名（防 DNS 重绑定）；请求体上限 64 KiB（两步验证导入页 4 MiB）；
+//! - 密钥默认不出现在任何页面里：条目要点"全部显示"、两步验证的种子要在详情页点"显示密钥"（都是带 CSRF 的 POST，
+//!   服务端每次记日志）。
 // 处理函数统一用 `Result<_, Response>` 提前返回页面：Response 体积大，但每个请求只出现一次。
 #![allow(clippy::result_large_err)]
 
 pub mod bootstrap;
 pub mod front;
+mod otp;
 pub mod tang;
 
 use std::collections::HashMap;
@@ -49,6 +52,11 @@ const LINK_GONE: &str = "登录链接不存在、已使用或已过期（有效�
 pub const FORM_LIMIT: usize = 64 << 10;
 
 pub type BoxFut<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+
+/// 解一张二维码图片：返回图里全部二维码的文本，或原因。服务器上由子进程实现（pm-service 的 `qr_child`），
+/// 测试里在进程内解码。
+pub type QrDecoder =
+    Arc<dyn Fn(zeroize::Zeroizing<Vec<u8>>) -> BoxFut<'static, Result<Vec<zeroize::Zeroizing<String>>, String>> + Send + Sync>;
 
 /// 网页调用服务的接口（管理会话）。由 pm-service 实现；测试中用内存替身。
 pub trait Backend: Send + Sync + 'static {
@@ -249,6 +257,8 @@ pub struct WebConfig {
     pub tang: Option<std::net::SocketAddr>,
     /// Some 时只有这些来源能打开管理界面（见 [`is_admin_path`]）；None 表示不额外限制。
     pub admin_allow: Option<front::Allow>,
+    /// 两步验证导入页的二维码解码器；None 时导入页只接受粘贴的链接与 2FAS 备份。
+    pub qr: Option<QrDecoder>,
 }
 
 /// 管理界面的路径：除了 Clevis 的 `/tang/` 和一次性接入 `/a/` 之外的一切（它们和管理界面共用端口）。
@@ -379,6 +389,7 @@ fn nav_of(template: &str) -> &'static str {
     match template {
         "dashboard.html" => "home",
         "entries.html" | "entry_form.html" => "entries",
+        "otp.html" | "otp_import.html" | "otp_item.html" => "otp",
         "tokens.html" => "tokens",
         "pins.html" => "pins",
         "settings.html" => "settings",
@@ -397,6 +408,9 @@ pub const TEMPLATES: &[(&str, &str)] = &[
     ("entering.html", include_str!("../templates/entering.html")),
     ("continued.html", include_str!("../templates/continued.html")),
     ("entry_form.html", include_str!("../templates/entry_form.html")),
+    ("otp.html", include_str!("../templates/otp.html")),
+    ("otp_import.html", include_str!("../templates/otp_import.html")),
+    ("otp_item.html", include_str!("../templates/otp_item.html")),
     ("tokens.html", include_str!("../templates/tokens.html")),
     ("pins.html", include_str!("../templates/pins.html")),
     ("settings.html", include_str!("../templates/settings.html")),
@@ -443,6 +457,13 @@ pub fn router(st: St) -> Router {
         .route("/entries/{name}", post(entry_update))
         .route("/entries/{name}/delete", post(entry_delete))
         .route("/entries/{name}/show", post(entry_show))
+        .route("/otp", get(otp::list))
+        .route("/otp/import", get(otp::import_page).post(otp::import).layer(axum::extract::DefaultBodyLimit::max(otp::IMPORT_LIMIT)))
+        // 账户放在 /otp/a/ 下：账户名叫 import 也不会和导入页冲突
+        .route("/otp/a/{name}", get(otp::detail))
+        .route("/otp/a/{name}/secret", post(otp::reveal))
+        .route("/otp/a/{name}/rename", post(otp::rename))
+        .route("/otp/a/{name}/delete", post(otp::delete))
         .route("/tokens", get(tokens).post(token_create))
         .route("/tokens/{id}/revoke", post(token_revoke))
         .route("/enrollments/{id}/cancel", post(enroll_cancel))
@@ -755,6 +776,7 @@ fn done_text(code: Option<&str>) -> Option<&'static str> {
     Some(match code? {
         "saved" => "已保存。",
         "deleted" => "已删除。",
+        "renamed" => "已改名。",
         "revoked" => "令牌已吊销，立即失效。",
         "cancelled" => "注册码已作废。",
         "trusted" => "已清除记录，下次连接时重新记录指纹。",

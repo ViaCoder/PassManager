@@ -1,0 +1,66 @@
+{% extends "base.html" %}
+{% block title %}导入两步验证 · PassManager{% endblock %}
+{% block body %}
+<div class="page-head">
+  <div>
+    <p class="crumb"><a href="/otp">{{ icon("clock") }}两步验证</a><span aria-hidden="true">/</span></p>
+    <h1>{{ icon("plus") }}导入</h1>
+    <p class="lede">三种方式任选，可以一起用。上传的内容只在服务器内存里处理，不写到磁盘；一次的总大小不超过 {{ limit_mib }} MiB。</p>
+  </div>
+</div>
+{% if report %}
+<section class="card" aria-labelledby="r-title">
+  <h2 class="card-title" id="r-title">导入结果</h2>
+  {% if report.added %}
+  <div class="callout ok">{{ icon("check") }}<div><p class="callout-title">已导入 {{ report.added | length }} 个</p><ul>{% for n in report.added %}<li><code>{{ n }}</code></li>{% endfor %}</ul></div></div>
+  {% endif %}
+  {% if report.duplicates %}
+  <div class="callout">{{ icon("info") }}<div><p class="callout-title">库里已经有的 {{ report.duplicates | length }} 个（没有重复导入）</p><ul>{% for n in report.duplicates %}<li><code>{{ n }}</code></li>{% endfor %}</ul></div></div>
+  {% endif %}
+  {% if report.skipped %}
+  <div class="callout warn">{{ icon("warning") }}<div><p class="callout-title">没有导入的 {{ report.skipped | length }} 项</p><ul>{% for s in report.skipped %}<li><code>{{ s[0] }}</code>：{{ s[1] }}</li>{% endfor %}</ul></div></div>
+  {% endif %}
+  {% if not report.added and not report.duplicates and not report.skipped %}<p class="muted">没有读到任何账户。</p>{% endif %}
+  <div class="form-actions"><a class="btn" href="/otp">{{ icon("clock") }}回到两步验证</a></div>
+</section>
+{% endif %}
+<form method="post" action="/otp/import" enctype="multipart/form-data" class="form" autocomplete="off">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <section class="card">
+    <h2 class="card-title">{{ icon("plus") }}扫描二维码</h2>
+    {% if has_qr %}
+    <div class="drop" id="drop">
+      <p class="drop-title">把二维码图片拖到这里，或者直接按 Ctrl+V 粘贴截图</p>
+      <label for="f-images" class="sr-only">选择二维码图片</label>
+      <input id="f-images" type="file" name="images" accept="image/png,image/jpeg" multiple aria-describedby="h-images">
+      <ul class="picked" id="picked" hidden></ul>
+    </div>
+    <p class="hint" id="h-images">PNG 或 JPEG，最多 {{ max_images }} 张。网站开启两步验证时显示的二维码，或 Google 身份验证器"转移账户"导出的二维码（账户多时会分成几张，一起放进来）。</p>
+    {% else %}
+    <p class="hint">这台服务器不支持图片导入，请粘贴链接或上传 2FAS 备份。</p>
+    {% endif %}
+  </section>
+  <section class="card">
+    <h2 class="card-title">{{ icon("link") }}粘贴链接</h2>
+    <div class="field">
+      <label for="f-links">otpauth 链接 <span class="opt">每行一个</span></label>
+      <textarea id="f-links" name="links" spellcheck="false" placeholder="otpauth://totp/Example:alice@example.com?secret=…&amp;issuer=Example"></textarea>
+      <p class="hint">也接受 Google 身份验证器的 <code>otpauth-migration://offline?data=…</code>。</p>
+    </div>
+  </section>
+  <section class="card">
+    <h2 class="card-title">{{ icon("lock") }}2FAS Auth 备份</h2>
+    <div class="field">
+      <label for="f-twofas">备份文件 <span class="opt">.2fas</span></label>
+      <input id="f-twofas" type="file" name="twofas" accept=".2fas,application/json">
+    </div>
+    <div class="field">
+      <label for="f-password">备份口令 <span class="opt">导出时设了口令才需要</span></label>
+      <input id="f-password" type="password" name="password" maxlength="1024" autocomplete="off">
+    </div>
+    <p class="hint">支持 TOTP 与 Steam；HOTP（计数器型）账户不导入，结果里会列出来。</p>
+  </section>
+  <div class="form-actions"><button>{{ icon("plus") }}导入</button><a class="btn secondary" href="/otp">取消</a></div>
+</form>
+<script>{{ import_js }}</script>
+{% endblock %}

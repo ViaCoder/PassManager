@@ -440,6 +440,16 @@ fn end_to_end() {
     // Agent 不能执行管理操作。
     assert_eq!(code(agent.call(&Request::Entries)), "FORBIDDEN");
     assert_eq!(code(agent.call(&Request::Reveal { name: "gh".into(), password: PW.into() })), "FORBIDDEN");
+    // 两步验证只属于网页管理：Agent 与本机 TUI 的管理会话都拿不到验证码，也不能导入。
+    for req in [
+        Request::OtpList,
+        Request::OtpDetail { name: "x".into(), reveal: true },
+        Request::OtpImport { texts: vec![Sensitive::new("otpauth://totp/x?secret=GEZDGNBVGY3TQOJQ")], twofas: None, password: None },
+        Request::OtpDelete { name: "x".into() },
+    ] {
+        assert_eq!(code(agent.call(&req)), "FORBIDDEN", "agent {req:?}");
+        assert_eq!(code(admin.call(&req)), "FORBIDDEN", "admin {req:?}");
+    }
     // 不填名称：按第一个域名自动生成引用名。
     add(&mut admin, "", "auto-secret-value", &["*.auto.example.com"], false).unwrap();
     // Agent 按目标查询：只看到这一个目标的条目名与写法，不看到其他条目、备注或秘密。

@@ -1,0 +1,77 @@
+{% extends "base.html" %}
+{% block title %}{{ a.name }} · 两步验证 · PassManager{% endblock %}
+{% block body %}
+<div class="page-head">
+  <div class="otp-head">
+    <p class="crumb"><a href="/otp">{{ icon("clock") }}两步验证</a><span aria-hidden="true">/</span></p>
+    <h1><span class="avatar large av-{{ hue }}" aria-hidden="true">{{ initial }}</span><span class="otp-title">{{ a.name }}</span></h1>
+    {% if a.issuer or a.account %}<p class="lede">{% if a.issuer %}{{ a.issuer }}{% endif %}{% if a.issuer and a.account %} · {% endif %}{% if a.account %}{{ a.account }}{% endif %}</p>{% endif %}
+  </div>
+</div>
+
+<section class="card otp-now" id="otp" data-now="{{ now }}" data-left="{{ remaining }}" data-round="{{ round }}" data-max="{{ max_rounds }}" data-next="/otp/a/{{ a.name | urlencode }}?r={{ next_round }}" aria-labelledby="c-title">
+  <h2 class="card-title" id="c-title">{{ icon("clock") }}当前验证码</h2>
+  <div class="callout warn" id="otp-clock" hidden>{{ icon("warning") }}<div><p class="callout-title">时钟不一致</p><p>这台电脑的时钟比服务器快 <span id="otp-off">0</span> 秒（负数是慢）。验证码按服务器时间计算，网站按它自己的时间校验，相差太多时验证码会被拒绝。</p></div></div>
+  <div class="callout" id="otp-hidden" hidden>{{ icon("lock") }}<div><p>验证码已隐藏。</p><a class="btn small" href="/otp/a/{{ a.name | urlencode }}">{{ icon("unlock") }}重新显示</a></div></div>
+  <div class="otp-big">
+    <button type="button" class="otp-code" id="otp-code" data-copy="{{ code }}" aria-label="复制验证码">{{ shown }}</button>
+    <span class="copied ok-text" hidden></span>
+  </div>
+  <div class="otp-timer"><progress id="otp-bar" max="{{ a.period }}" value="{{ remaining }}"></progress><span class="muted"><span id="otp-sec">{{ remaining }}</span> 秒后更新</span></div>
+  <p class="hint">点验证码复制。到期自动换成新的；页面不在前台或已经显示约 5 分钟后，验证码会被遮住。</p>
+</section>
+
+<section class="card" aria-labelledby="d-title">
+  <h2 class="card-title" id="d-title">{{ icon("info") }}详情</h2>
+  <dl class="kv">
+    <dt>名称</dt><dd><code class="strong">{{ a.name }}</code></dd>
+    <dt>发行方</dt><dd>{% if a.issuer %}{{ a.issuer }}{% else %}<span class="muted">（无）</span>{% endif %}</dd>
+    <dt>账户</dt><dd>{% if a.account %}{{ a.account }}{% else %}<span class="muted">（无）</span>{% endif %}</dd>
+    <dt>类型</dt><dd>{% if a.kind == "Steam" %}Steam 令牌（5 个字符）{% else %}TOTP，{{ a.digits }} 位{% endif %}</dd>
+    <dt>算法 / 周期</dt><dd>HMAC-{{ a.alg }}，{{ a.period }} 秒</dd>
+    <dt>导入时间</dt><dd>{{ a.created | datetime }}</dd>
+  </dl>
+</section>
+
+<section class="card" aria-labelledby="s-title">
+  <h2 class="card-title" id="s-title">{{ icon("key") }}密钥</h2>
+  {% if secret %}
+  <div id="otp-secret">
+    <div class="callout warn">{{ icon("warning") }}<div><p>有了密钥就能生成这个账户的全部验证码。不要截图或发给别人。验证码到期刷新时，密钥会自动遮住。</p></div></div>
+    <div class="secret-grid">
+      <div class="secret-text">
+        <div class="field">
+          <span class="label">密钥（Base32）</span>
+          <div class="copy-row"><code class="secret-code">{{ secret_shown }}</code><button type="button" class="secondary small" data-copy="{{ secret }}">{{ icon("copy") }}复制</button><span class="copied ok-text" hidden></span></div>
+        </div>
+        <div class="field">
+          <span class="label">otpauth 链接</span>
+          <div class="copy-row"><code class="secret-uri">{{ uri }}</code><button type="button" class="secondary small" data-copy="{{ uri }}">{{ icon("copy") }}复制</button><span class="copied ok-text" hidden></span></div>
+        </div>
+      </div>
+      {% if qr %}<figure class="qr-box">{{ qr }}<figcaption class="hint">用另一个验证器扫这个码，就能把账户加过去。</figcaption></figure>{% endif %}
+    </div>
+  </div>
+  {% else %}
+  <div class="secret-hidden">
+    <p class="muted">密钥已隐藏。显示后可以复制密钥、otpauth 链接，或用另一个验证器扫码迁移；每次显示都会记一行日志。</p>
+    <form method="post" action="/otp/a/{{ a.name | urlencode }}/secret" class="inline"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="secondary">{{ icon("unlock") }}显示密钥</button></form>
+  </div>
+  {% endif %}
+</section>
+
+<section class="card" aria-labelledby="m-title">
+  <h2 class="card-title" id="m-title">{{ icon("settings") }}管理</h2>
+  <form method="post" action="/otp/a/{{ a.name | urlencode }}/rename" class="rename-row">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <label for="f-rename">名称</label>
+    <input id="f-rename" name="new_name" maxlength="300" value="{{ a.name }}" spellcheck="false" autocomplete="off">
+    <button class="secondary">{{ icon("check") }}改名</button>
+  </form>
+  <details class="confirm danger-zone">
+    <summary class="btn danger-outline small">{{ icon("trash") }}删除这个账户</summary>
+    <form method="post" action="/otp/a/{{ a.name | urlencode }}/delete" class="confirm-box"><input type="hidden" name="csrf" value="{{ csrf }}"><span>删除 <code>{{ a.name }}</code>？密钥无法恢复。删除前请确认这个网站的两步验证已经换到别处，或已关闭。</span><button class="danger small">{{ icon("trash") }}确认删除</button></form>
+  </details>
+</section>
+<script>{{ otp_js }}</script>
+{% endblock %}

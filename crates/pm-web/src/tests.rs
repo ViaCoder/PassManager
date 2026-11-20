@@ -19,7 +19,15 @@ struct Mock {
     entries: Mutex<Vec<MockEntry>>,
     locked: Mutex<bool>,
     log: Mutex<Vec<String>>,
+    /// 两步验证账户（替身里只有公开信息；验证码固定为 287082）。
+    otp: Mutex<Vec<pm_proto::OtpView>>,
+    /// 收到的导入请求：(文本, 2FAS 文件, 口令)。
+    otp_imports: Mutex<OtpImports>,
+    /// 收到几次"显示密钥"。
+    otp_reveals: Mutex<u32>,
 }
+
+type OtpImports = Vec<(Vec<String>, Option<String>, Option<String>)>;
 
 impl Backend for Mock {
     fn call(&self, req: Req) -> BoxFut<'_, Resp> {
@@ -200,6 +208,67 @@ impl Backend for Mock {
                     runtime_issues: vec![],
                     warnings: vec!["wide：网段绑定 198.0.0.0/8 很宽，建议缩小".into()],
                 }),
+                Req::OtpList => Resp::ok(self.otp.lock().unwrap().clone()),
+                Req::OtpDetail { name, reveal } => match self.otp.lock().unwrap().iter().find(|v| v.name == name) {
+                    _ if reveal && {
+                        *self.otp_reveals.lock().unwrap() += 1;
+                        false
+                    } =>
+                    {
+                        unreachable!()
+                    }
+                    // 替身：验证码固定 287082；显示密钥时返回 RFC 4226 测试种子
+                    Some(v) => Resp::ok(pm_proto::OtpDetailView {
+                        view: v.clone(),
+                        code: "287082".into(),
+                        remaining: 12,
+                        now: 1_700_000_000,
+                        secret: reveal.then(|| OTP_B32.to_string()),
+                        uri: reveal.then(|| OTP_LINK.to_string()),
+                    }),
+                    None => Resp::err("UNKNOWN_CREDENTIAL", "账户不存在"),
+                },
+                Req::OtpImport { texts, twofas, password } => {
+                    let texts: Vec<String> = texts.iter().map(|t| t.as_str().to_string()).collect();
+                    // 替身：每个 otpauth:// 行算一个新账户
+                    let mut added = vec![];
+                    let mut list = self.otp.lock().unwrap();
+                    for _ in texts.iter().flat_map(|t| t.lines()).filter(|l| l.starts_with("otpauth://")) {
+                        let name = format!("acct{}", list.len() + 1);
+                        list.push(pm_proto::OtpView {
+                            name: name.clone(),
+                            issuer: "Example".into(),
+                            account: "alice".into(),
+                            kind: "TOTP".into(),
+                            alg: "SHA1".into(),
+                            digits: 6,
+                            period: 30,
+                            created: 0,
+                        });
+                        added.push(name);
+                    }
+                    self.otp_imports.lock().unwrap().push((
+                        texts,
+                        twofas.map(|t| t.as_str().to_string()),
+                        password.map(|p| p.as_str().to_string()),
+                    ));
+                    Resp::ok(pm_proto::OtpImportReport {
+                        added,
+                        duplicates: vec![],
+                        skipped: vec![("服务端".into(), "替身的跳过项".into())],
+                    })
+                }
+                Req::OtpRename { name, new_name } => match self.otp.lock().unwrap().iter_mut().find(|v| v.name == name) {
+                    Some(v) => {
+                        v.name = new_name;
+                        Resp::ok("renamed")
+                    }
+                    None => Resp::err("BAD_REQUEST", "账户不存在"),
+                },
+                Req::OtpDelete { name } => {
+                    self.otp.lock().unwrap().retain(|v| v.name != name);
+                    Resp::ok("deleted")
+                }
                 other => Resp::err("FORBIDDEN", format!("unexpected {other:?}")),
             }
         })
@@ -227,7 +296,7 @@ fn state() -> (St, Arc<Mock>) {
     let st = AppState::new(
         mock.clone(),
         LoginLinks::new(),
-        WebConfig { domain: "pm.test".into(), port: 443, agent_bin_dir: Some(agent_bin_dir()), tang: None, admin_allow: None },
+        WebConfig { domain: "pm.test".into(), port: 443, agent_bin_dir: Some(agent_bin_dir()), tang: None, admin_allow: None, qr: None },
     );
     (st, mock)
 }
@@ -311,7 +380,7 @@ async fn non_default_port_in_host_origin_and_urls() {
     for bad in ["pm.example.com", "pm.example.com:443", "pm.example.com:8443", "pm.example.com:81210", "evil.example:8121"] {
         assert!(!host_ok("pm.example.com", 8121, bad), "{bad}");
     }
-    let cfg = WebConfig { domain: "pm.example.com".into(), port: 8121, agent_bin_dir: None, tang: None, admin_allow: None };
+    let cfg = WebConfig { domain: "pm.example.com".into(), port: 8121, agent_bin_dir: None, tang: None, admin_allow: None, qr: None };
     assert_eq!(cfg.origin(), "https://pm.example.com:8121");
     assert_eq!(WebConfig { port: 443, ..cfg }.origin(), "https://pm.example.com");
     let o = "https://pm.example.com:8121".to_string();
@@ -335,7 +404,7 @@ async fn non_default_port_in_host_origin_and_urls() {
     let st = AppState::new(
         mock,
         LoginLinks::new(),
-        WebConfig { domain: "pm.test".into(), port: 8121, agent_bin_dir: Some(agent_bin_dir()), tang: None, admin_allow: None },
+        WebConfig { domain: "pm.test".into(), port: 8121, agent_bin_dir: Some(agent_bin_dir()), tang: None, admin_allow: None, qr: None },
     );
     let b = axum::http::Request::builder().method(Method::GET).uri(format!("/a/{BOOT_CODE}")).header("host", "pm.test:8121");
     let r = router(st.clone()).oneshot(b.body(Body::empty()).unwrap()).await.unwrap();
@@ -742,6 +811,7 @@ fn every_template_escapes_injected_values() {
             "kind": P, "host_port": P, "old_fingerprint": P, "new_fingerprint": P, "seen_at": 0}],
         "pins": [{"kind": P, "host_port": P, "algo": P, "fingerprint": P, "first_seen": 0}],
         "settings": {"auto_lock_hours": P},
+        "a": {"name": P, "issuer": P, "account": P, "kind": P, "alg": P, "digits": 6, "period": 30, "created": 0},
         "sec": {"level": 2, "method": P, "description": P, "l1_reason": P, "mode": P, "runtime_issues": [P], "warnings": [P],
             "report": {"generated": 0, "platform": P, "client_user": P, "findings": [finding], "skipped": P}},
     });
@@ -782,6 +852,38 @@ fn every_template_escapes_injected_values() {
             b["pins"] = serde_json::json!([]);
             b["pending"] = serde_json::json!([]);
         }),
+        // 两步验证：账户的每个字段、验证码、密钥与链接都是注入值；列表、详情（隐藏 / 显示密钥）、导入结果
+        with("otp.html", &|b| {
+            b["accounts"] = serde_json::json!([{"name": P, "issuer": P, "account": P, "kind": P, "alg": P, "digits": 6, "period": 60,
+                "created": 0, "initial": P, "hue": P}]);
+            b["nav"] = "otp".into();
+        }),
+        with("otp.html", &|b| {
+            b["accounts"] = serde_json::json!([]);
+            b["flash_kind"] = "err".into();
+        }),
+        with("otp_item.html", &|b| {
+            b["a"] =
+                serde_json::json!({"name": P, "issuer": P, "account": P, "kind": P, "alg": P, "digits": 6, "period": 30, "created": 0});
+            for k in ["initial", "hue", "code", "shown", "remaining", "now", "round", "next_round", "max_rounds"] {
+                b[k] = P.into();
+            }
+        }),
+        with("otp_item.html", &|b| {
+            b["a"] = serde_json::json!({"name": P, "issuer": "", "account": "", "kind": "Steam", "alg": P, "digits": 5, "period": 30, "created": 0});
+            for k in ["initial", "code", "shown", "secret", "secret_shown", "uri"] {
+                b[k] = P.into();
+            }
+            b["hue"] = 1.into();
+            b["remaining"] = 5.into();
+        }),
+        with("otp_import.html", &|b| {
+            b["report"] = serde_json::json!({"added": [P], "duplicates": [P], "skipped": [[P, P]]});
+            b["has_qr"] = true.into();
+            b["limit_mib"] = 4.into();
+            b["max_images"] = 10.into();
+        }),
+        with("otp_import.html", &|b| b["report"] = serde_json::json!({"added": [], "duplicates": [], "skipped": []})),
     ];
     let cases: Vec<(&str, serde_json::Value)> = TEMPLATES
         .iter()
@@ -873,7 +975,7 @@ async fn bootstrap_routes() {
     let st3 = AppState::new(
         mock.clone(),
         LoginLinks::new(),
-        WebConfig { domain: "pm.test".into(), port: 443, agent_bin_dir: None, tang: None, admin_allow: None },
+        WebConfig { domain: "pm.test".into(), port: 443, agent_bin_dir: None, tang: None, admin_allow: None, qr: None },
     );
     assert_eq!(boot(&st3, Method::GET, &format!("/a/{BOOT_CODE}")).await.0, StatusCode::NOT_FOUND);
 }
@@ -911,6 +1013,8 @@ fn assets_are_offline_and_script_free() {
         let allowed = match name {
             "login.html" => Some("<script>{{ poll_js }}</script>"),
             "continued.html" => Some("<script>{{ close_js }}</script>"),
+            "otp_item.html" => Some("<script>{{ otp_js }}</script>"),
+            "otp_import.html" => Some("<script>{{ import_js }}</script>"),
             _ => None,
         };
         let l = match allowed {
@@ -1131,7 +1235,7 @@ async fn referrer_policy_is_same_origin_and_browser_posts_work() {
     let st = AppState::new(
         mock.clone(),
         LoginLinks::new(),
-        WebConfig { domain: "pm.test".into(), port: 8121, agent_bin_dir: None, tang: None, admin_allow: None },
+        WebConfig { domain: "pm.test".into(), port: 8121, agent_bin_dir: None, tang: None, admin_allow: None, qr: None },
     );
     let browser = [
         ("host", "pm.test:8121"),
@@ -1283,7 +1387,7 @@ fn tang_state(up: Option<std::net::SocketAddr>) -> St {
     AppState::new(
         Arc::new(Mock::default()),
         LoginLinks::new(),
-        WebConfig { domain: "pm.test".into(), port: 8120, agent_bin_dir: None, tang: up, admin_allow: None },
+        WebConfig { domain: "pm.test".into(), port: 8120, agent_bin_dir: None, tang: up, admin_allow: None, qr: None },
     )
 }
 
@@ -1407,7 +1511,7 @@ async fn admin_allow_limits_only_the_admin_ui() {
     let st = AppState::new(
         Arc::new(Mock::default()),
         LoginLinks::new(),
-        WebConfig { domain: "pm.test".into(), port: 8120, agent_bin_dir: None, tang: Some(up), admin_allow: Some(allow) },
+        WebConfig { domain: "pm.test".into(), port: 8120, agent_bin_dir: None, tang: Some(up), admin_allow: Some(allow), qr: None },
     );
     let call = |uri: &'static str, peer: Option<&'static str>| {
         let st = st.clone();
@@ -1745,4 +1849,278 @@ fn stale_waits_are_not_fresh() {
     // 过期的记录在下一次写入时清掉
     w.seen("browser-c", Some("/"), t0 + WAIT_KEEP + Duration::from_secs(20));
     assert!(w.next("browser-a").is_none());
+}
+
+// ---------------- 两步验证 ----------------
+
+/// RFC 4226 测试种子的链接与它的 Base32。
+const OTP_LINK: &str = "otpauth://totp/Example:alice?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ&issuer=Example";
+const OTP_B32: &str = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ";
+
+/// 带进程内二维码解码器的网页状态（服务器上是子进程，这里直接调用 pm-otp）。
+fn qr_state() -> (St, Arc<Mock>) {
+    let mock = Arc::new(Mock::default());
+    let qr: QrDecoder = Arc::new(|img| Box::pin(async move { pm_otp::qr::decode_image(&img).map_err(|e| e.to_string()) }));
+    let st = AppState::new(
+        mock.clone(),
+        LoginLinks::new(),
+        WebConfig { domain: "pm.test".into(), port: 443, agent_bin_dir: None, tang: None, admin_allow: None, qr: Some(qr) },
+    );
+    (st, mock)
+}
+
+/// 一张灰度二维码 PNG（每个模块 4 像素，四周 4 个模块的白边）。
+fn qr_png(text: &str) -> Vec<u8> {
+    let code = qrcode::QrCode::new(text.as_bytes()).unwrap();
+    let (n, colors) = (code.width(), code.to_colors());
+    let side = (n + 8) * 4;
+    let mut px = vec![255u8; side * side];
+    for y in 0..side {
+        for x in 0..side {
+            let (mx, my) = ((x / 4).wrapping_sub(4), (y / 4).wrapping_sub(4));
+            if mx < n && my < n && colors[my * n + mx] == qrcode::Color::Dark {
+                px[y * side + x] = 0;
+            }
+        }
+    }
+    let mut out = Vec::new();
+    {
+        let mut enc = png::Encoder::new(&mut out, side as u32, side as u32);
+        enc.set_color(png::ColorType::Grayscale);
+        enc.write_header().unwrap().write_image_data(&px).unwrap();
+    }
+    out
+}
+
+/// multipart/form-data 请求体：每项是 (字段名, 文件名, 内容)。返回 (Content-Type, 请求体)。
+fn multipart(parts: &[(&str, Option<&str>, &[u8])]) -> (String, Vec<u8>) {
+    let boundary = "pmtestboundary7f3a";
+    let mut body = Vec::new();
+    for (name, file, data) in parts {
+        body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+        match file {
+            Some(f) => body.extend_from_slice(
+                format!(
+                    "Content-Disposition: form-data; name=\"{name}\"; filename=\"{f}\"\r\nContent-Type: application/octet-stream\r\n\r\n"
+                )
+                .as_bytes(),
+            ),
+            None => body.extend_from_slice(format!("Content-Disposition: form-data; name=\"{name}\"\r\n\r\n").as_bytes()),
+        }
+        body.extend_from_slice(data);
+        body.extend_from_slice(b"\r\n");
+    }
+    body.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
+    (format!("multipart/form-data; boundary={boundary}"), body)
+}
+
+/// 发一个任意请求体的 POST。
+async fn post_body(st: &St, uri: &str, cookie: Option<&str>, ctype: &str, body: Vec<u8>) -> Resp2 {
+    let mut b = axum::http::Request::builder().method(Method::POST).uri(uri).header("host", "pm.test").header("content-type", ctype);
+    if let Some(c) = cookie {
+        b = b.header("cookie", format!("{COOKIE}={c}"));
+    }
+    let r = router(st.clone()).oneshot(b.body(Body::from(body)).unwrap()).await.unwrap();
+    let (status, headers) = (r.status(), r.headers().clone());
+    let bytes = r.into_body().collect().await.unwrap().to_bytes();
+    Resp2 { status, headers, body: String::from_utf8_lossy(&bytes).into_owned() }
+}
+
+/// 一个替身账户。
+fn otp_view(name: &str) -> pm_proto::OtpView {
+    pm_proto::OtpView {
+        name: name.into(),
+        issuer: "GitHub".into(),
+        account: "alice".into(),
+        kind: "TOTP".into(),
+        alg: "SHA1".into(),
+        digits: 6,
+        period: 30,
+        created: 0,
+    }
+}
+
+/// 未登录跳到登录页；修改类请求要 CSRF；导入页在读表单前就检查会话。
+#[tokio::test]
+async fn otp_pages_need_session_and_csrf() {
+    let (st, mock) = qr_state();
+    mock.otp.lock().unwrap().push(otp_view("x"));
+    for p in ["/otp", "/otp/import", "/otp/a/x"] {
+        let r = send(&st, Method::GET, p, None, None, &[]).await;
+        assert_eq!(r.status, StatusCode::SEE_OTHER, "{p}");
+        assert!(r.headers.get(header::LOCATION).unwrap().to_str().unwrap().starts_with("/login"), "{p}");
+    }
+    let (ct, body) = multipart(&[("links", None, OTP_LINK.as_bytes())]);
+    assert_eq!(post_body(&st, "/otp/import", None, &ct, body).await.status, StatusCode::SEE_OTHER);
+    let (cookie, _csrf) = login(&st).await;
+    // 没有或错误的 CSRF：403，服务端什么都没收到（显示密钥、删除、改名、导入）
+    for (path, form) in [
+        ("/otp/a/x/secret", "x=1"),
+        ("/otp/a/x/secret", "csrf=wrong"),
+        ("/otp/a/x/delete", "csrf=wrong"),
+        ("/otp/a/x/rename", "new_name=y"),
+    ] {
+        assert_eq!(send(&st, Method::POST, path, Some(&cookie), Some(form), &[]).await.status, StatusCode::FORBIDDEN, "{path}");
+    }
+    let (ct, body) = multipart(&[("csrf", None, b"wrong"), ("links", None, OTP_LINK.as_bytes())]);
+    assert_eq!(post_body(&st, "/otp/import", Some(&cookie), &ct, body).await.status, StatusCode::FORBIDDEN);
+    assert!(mock.otp_imports.lock().unwrap().is_empty());
+    assert_eq!(*mock.otp_reveals.lock().unwrap(), 0, "没有发出显示密钥的请求");
+    assert_eq!(mock.otp.lock().unwrap().len(), 1);
+    // 导航里有两步验证，当前页高亮
+    let r = send(&st, Method::GET, "/otp", Some(&cookie), None, &[]).await;
+    assert!(r.body.contains("<a href=\"/otp\" aria-current=\"page\">"));
+}
+
+/// 列表：整行链接到详情，不显示验证码；详情（GET）显示验证码、不含密钥；POST 显示密钥后才有 Base32、链接与二维码；
+/// 脚本与 CSP 哈希一致；轮次有上限；不存在的账户 404。
+#[tokio::test]
+async fn otp_detail_shows_code_and_reveals_secret_only_on_post() {
+    let (st, mock) = qr_state();
+    mock.otp.lock().unwrap().push(otp_view("GitHub:alice"));
+    let (cookie, csrf) = login(&st).await;
+    let list = send(&st, Method::GET, "/otp", Some(&cookie), None, &[]).await;
+    assert!(list.body.contains("href=\"/otp/a/GitHub%3Aalice\"") && list.body.contains("class=\"avatar av-"));
+    assert!(!list.body.contains("287") && !list.body.contains("<script"), "列表页没有验证码，也没有脚本");
+    // 详情：验证码分组显示，密钥不在页面里
+    let r = send(&st, Method::GET, "/otp/a/GitHub%3Aalice?r=3", Some(&cookie), None, &[]).await;
+    assert_eq!(r.status, StatusCode::OK);
+    assert!(r.body.contains("data-copy=\"287082\"") && r.body.contains(">287 082<"));
+    assert!(r.body.contains("data-now=\"1700000000\"") && r.body.contains("data-round=\"3\""));
+    assert!(r.body.contains("data-next=\"/otp/a/GitHub%3Aalice?r=4\""), "下一轮");
+    assert!(!r.body.contains(OTP_B32) && !r.body.contains("otpauth://totp/") && !r.body.contains("class=\"qr\""), "GET 不含密钥");
+    assert!(r.body.contains("action=\"/otp/a/GitHub%3Aalice/secret\""), "有显示密钥按钮");
+    // 页面里的脚本与常量逐字节相同，CSP 只放行它的哈希
+    assert_eq!(r.body.matches("<script").count(), 1);
+    assert!(r.body.contains(&format!("<script>{}</script>", otp::OTP_JS)));
+    use base64::Engine;
+    let h = base64::engine::general_purpose::STANDARD.encode(pm_crypto::sha256(otp::OTP_JS.as_bytes()));
+    let csp = r.headers.get("content-security-policy").unwrap().to_str().unwrap();
+    assert!(csp.starts_with("default-src 'none'") && csp.contains(&format!("script-src 'sha256-{h}'")), "{csp}");
+    assert_eq!(r.headers.get("cache-control").unwrap(), "no-store");
+    // 页面用 hidden 属性切换提示：样式表里必须有通用的 [hidden] 规则（否则 .callout 的 display:flex 会让它照样显示）
+    assert!(include_str!("../static/style.css").contains("[hidden]{display:none!important}"));
+    // 轮次超过上限时按上限处理（脚本不再自动刷新）
+    let r = send(&st, Method::GET, "/otp/a/GitHub%3Aalice?r=999", Some(&cookie), None, &[]).await;
+    assert!(r.body.contains(&format!("data-round=\"{}\"", otp::MAX_ROUNDS)));
+    // 显示密钥：Base32 分组、可复制的原文、链接与二维码（SVG 里只有方块）
+    let r = send(&st, Method::POST, "/otp/a/GitHub%3Aalice/secret", Some(&cookie), Some(&format!("csrf={csrf}")), &[]).await;
+    assert_eq!(r.status, StatusCode::OK);
+    assert!(r.body.contains(">GEZD GNBV GY3T QOJQ GEZD GNBV GY3T QOJQ<") && r.body.contains(&format!("data-copy=\"{OTP_B32}\"")));
+    // 链接在页面上经过 HTML 转义（斜杠写成 &#x2f;），只比对不含斜杠的一段
+    assert!(r.body.contains("class=\"secret-uri\">otpauth:") && r.body.contains("Example:alice?secret="), "链接");
+    assert!(r.body.contains("<svg class=\"qr\"") && r.body.contains("id=\"otp-secret\""));
+    assert_eq!(*mock.otp_reveals.lock().unwrap(), 1, "GET 不显示密钥，只有这一次 POST");
+    // 不存在的账户
+    let r = send(&st, Method::GET, "/otp/a/nope", Some(&cookie), None, &[]).await;
+    assert_eq!(r.status, StatusCode::NOT_FOUND);
+    assert!(r.body.contains("账户不存在"));
+}
+
+/// 导入：二维码图片在解码器里读出链接，与粘贴的链接、2FAS 文件和口令一起交给服务端；结果页列出结果；
+/// 响应里没有种子；导入页的拖放脚本按哈希放行。
+#[tokio::test]
+async fn otp_import_reads_images_links_and_twofas() {
+    let (st, mock) = qr_state();
+    let (cookie, csrf) = login(&st).await;
+    let page = send(&st, Method::GET, "/otp/import", Some(&cookie), None, &[]).await;
+    assert!(page.body.contains("enctype=\"multipart/form-data\"") && page.body.contains("name=\"images\""));
+    assert!(page.body.contains("id=\"drop\"") && page.body.contains(&format!("<script>{}</script>", otp::IMPORT_JS)));
+    use base64::Engine;
+    let h = base64::engine::general_purpose::STANDARD.encode(pm_crypto::sha256(otp::IMPORT_JS.as_bytes()));
+    assert!(page.headers.get("content-security-policy").unwrap().to_str().unwrap().contains(&format!("script-src 'sha256-{h}'")));
+    let png = qr_png(OTP_LINK);
+    let twofas = br#"{"services": [], "schemaVersion": 4}"#;
+    let (ct, body) = multipart(&[
+        ("csrf", None, csrf.as_bytes()),
+        ("images", Some("qr.png"), &png),
+        ("images", Some(""), b""),
+        ("links", None, format!("{OTP_LINK}\n").as_bytes()),
+        ("twofas", Some("backup.2fas"), twofas),
+        ("password", None, b"pw-123"),
+        ("unknown", None, b"ignored"),
+    ]);
+    let r = post_body(&st, "/otp/import", Some(&cookie), &ct, body).await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+    let imports = mock.otp_imports.lock().unwrap().clone();
+    assert_eq!(imports.len(), 1);
+    let (texts, tf, pw) = &imports[0];
+    // 第一段来自图片（解码器读出的正是那条链接），第二段是粘贴的；空的文件字段被忽略
+    assert_eq!(texts, &vec![OTP_LINK.to_string(), format!("{OTP_LINK}\n")]);
+    assert_eq!(tf.as_deref(), Some(std::str::from_utf8(twofas).unwrap()));
+    assert_eq!(pw.as_deref(), Some("pw-123"));
+    assert!(r.body.contains("已导入 2 个") && r.body.contains("acct1") && r.body.contains("替身的跳过项"));
+    assert!(!r.body.contains(OTP_B32), "结果页里没有种子");
+    assert!(r.headers.get("content-security-policy").unwrap().to_str().unwrap().contains(&format!("script-src 'sha256-{h}'")));
+    // 列表页也没有种子
+    assert!(!send(&st, Method::GET, "/otp", Some(&cookie), None, &[]).await.body.contains(OTP_B32));
+}
+
+/// 导入的限制与错误：不是图片、没有解码器、太多图片、什么都没填、请求体超过 4 MiB。
+#[tokio::test]
+async fn otp_import_limits_and_errors() {
+    let (st, mock) = qr_state();
+    let (cookie, csrf) = login(&st).await;
+    // 不是图片：网页这一侧记成跳过项，服务端不会收到请求（没有别的内容）
+    let (ct, body) = multipart(&[("csrf", None, csrf.as_bytes()), ("images", Some("a.gif"), b"GIF89a")]);
+    let r = post_body(&st, "/otp/import", Some(&cookie), &ct, body).await;
+    assert_eq!(r.status, StatusCode::OK);
+    assert!(r.body.contains("第 1 张图片") && r.body.contains("只支持 PNG 和 JPEG 图片"));
+    assert!(mock.otp_imports.lock().unwrap().is_empty());
+    // 超过 10 张图片
+    let png = qr_png(OTP_LINK);
+    let mut parts: Vec<(&str, Option<&str>, &[u8])> = vec![("csrf", None, csrf.as_bytes())];
+    for _ in 0..otp::MAX_IMAGES + 2 {
+        parts.push(("images", Some("q.png"), &png));
+    }
+    let (ct, body) = multipart(&parts);
+    let r = post_body(&st, "/otp/import", Some(&cookie), &ct, body).await;
+    assert!(r.body.contains("一次最多 10 张"));
+    assert_eq!(mock.otp_imports.lock().unwrap()[0].0.len(), otp::MAX_IMAGES);
+    // 什么都没填
+    let (ct, body) = multipart(&[("csrf", None, csrf.as_bytes()), ("links", None, b"")]);
+    let r = post_body(&st, "/otp/import", Some(&cookie), &ct, body).await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST);
+    assert!(r.body.contains("没有选择图片"));
+    // 2FAS 文件不是 UTF-8
+    let (ct, body) = multipart(&[("csrf", None, csrf.as_bytes()), ("twofas", Some("b.2fas"), &[0xff, 0xfe, 0x00])]);
+    assert!(post_body(&st, "/otp/import", Some(&cookie), &ct, body).await.body.contains("不是 2FAS 备份文件"));
+    // 请求体超过 4 MiB：413
+    let big = vec![b'a'; otp::IMPORT_LIMIT + 1024];
+    let (ct, body) = multipart(&[("csrf", None, csrf.as_bytes()), ("images", Some("big.png"), &big)]);
+    assert_eq!(post_body(&st, "/otp/import", Some(&cookie), &ct, body).await.status, StatusCode::PAYLOAD_TOO_LARGE);
+    // 其他页面的上限仍是 64 KiB
+    let big = format!("csrf={csrf}&new_name={}", "a".repeat(FORM_LIMIT + 10));
+    assert_eq!(send(&st, Method::POST, "/otp/a/x/rename", Some(&cookie), Some(&big), &[]).await.status, StatusCode::PAYLOAD_TOO_LARGE);
+    // 没有解码器的服务器：没有图片输入框，上传的图片记成跳过项
+    let (st2, _) = state();
+    let (cookie2, csrf2) = login(&st2).await;
+    let p2 = send(&st2, Method::GET, "/otp/import", Some(&cookie2), None, &[]).await;
+    assert!(!p2.body.contains("name=\"images\"") && p2.body.contains("不支持图片导入"));
+    let (ct, body) = multipart(&[("csrf", None, csrf2.as_bytes()), ("images", Some("q.png"), &png)]);
+    assert!(post_body(&st2, "/otp/import", Some(&cookie2), &ct, body).await.body.contains("这台服务器不支持图片导入"));
+}
+
+/// 改名与删除：成功后带固定提示跳回列表；名称里有特殊字符也能用（路径里是百分号编码）；
+/// 名叫 import 的账户不会和导入页冲突。
+#[tokio::test]
+async fn otp_rename_and_delete() {
+    let (st, mock) = qr_state();
+    mock.otp.lock().unwrap().push(otp_view("A b/c:d"));
+    mock.otp.lock().unwrap().push(otp_view("import"));
+    let (cookie, csrf) = login(&st).await;
+    assert!(send(&st, Method::GET, "/otp/a/import", Some(&cookie), None, &[]).await.body.contains("data-copy=\"287082\""));
+    assert!(send(&st, Method::GET, "/otp/import", Some(&cookie), None, &[]).await.body.contains("id=\"drop\""));
+    let path = format!("/otp/a/{}/rename", enc("A b/c:d"));
+    let r = send(&st, Method::POST, &path, Some(&cookie), Some(&format!("csrf={csrf}&new_name=Work")), &[]).await;
+    assert_eq!(r.status, StatusCode::SEE_OTHER);
+    assert_eq!(r.headers.get(header::LOCATION).unwrap(), "/otp?done=renamed");
+    assert_eq!(mock.otp.lock().unwrap()[0].name, "Work");
+    assert!(send(&st, Method::GET, "/otp?done=renamed", Some(&cookie), None, &[]).await.body.contains("已改名。"));
+    // 改一个不存在的：错误页
+    let r = send(&st, Method::POST, "/otp/a/nope/rename", Some(&cookie), Some(&format!("csrf={csrf}&new_name=x")), &[]).await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST);
+    let r = send(&st, Method::POST, "/otp/a/Work/delete", Some(&cookie), Some(&format!("csrf={csrf}")), &[]).await;
+    assert_eq!(r.headers.get(header::LOCATION).unwrap(), "/otp?done=deleted");
+    assert_eq!(mock.otp.lock().unwrap().len(), 1);
 }
