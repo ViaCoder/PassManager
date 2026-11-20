@@ -450,6 +450,9 @@ fn end_to_end() {
         assert_eq!(code(agent.call(&req)), "FORBIDDEN", "agent {req:?}");
         assert_eq!(code(admin.call(&req)), "FORBIDDEN", "admin {req:?}");
     }
+    // 自动更新请求属于 Agent 能用的一类；本机模式没有 agent-bin，回复 null。
+    let r = agent.call(&Request::ClientUpdate { targets: vec!["x86_64-unknown-linux-gnu".into()], have: "0.0.1".into() }).unwrap();
+    assert!(r.is_null(), "{r}");
     // 不填名称：按第一个域名自动生成引用名。
     add(&mut admin, "", "auto-secret-value", &["*.auto.example.com"], false).unwrap();
     // Agent 按目标查询：只看到这一个目标的条目名与写法，不看到其他条目、备注或秘密。

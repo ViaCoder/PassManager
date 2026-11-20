@@ -23,6 +23,8 @@ mod prompt;
 mod remote;
 #[cfg(unix)]
 mod run;
+#[cfg(unix)]
+mod self_update;
 #[cfg(target_os = "linux")]
 mod server;
 #[cfg(not(target_os = "linux"))]
@@ -379,6 +381,15 @@ enum Cmd {
     },
     /// [Agent 机器] 取消注册：删除远程配置与令牌、移除 MCP 配置与写入的使用规则
     Unenroll,
+    /// [Agent 机器] 立即检查并安装服务器确认的正式发布（平时运行前最多每 10 分钟自动检查一次）
+    #[command(after_help = "\
+已注册的客户端在运行 mcp、lookup、http、ssh、scp、run、git-proxy、ssh-agent、status 之前会自动检查：
+服务器正在运行的正式发布比本机新时，经加密通道取回程序，核对 SHA-256 与版本后替换自己，再用同样的参数继续运行。
+旧程序留在同目录的 .PassManager.previous。开发构建从不被替换；设置 PASSMANAGER_NO_AUTO_UPDATE=1 可以关掉自动检查。
+
+示例：
+  passmanager self-update")]
+    SelfUpdate,
     /// 内部：一键接入用的 Agent 程序目录（安装脚本使用）
     #[command(hide = true)]
     AgentBinDir,
@@ -716,6 +727,11 @@ fn qr_decode_child() -> ExitCode {
 
 fn run_cli() -> ExitCode {
     let cli = Cli::parse();
+    // 已注册的客户端：运行前检查服务器确认的正式发布，有更新就替换自己并重新执行（不返回）
+    #[cfg(unix)]
+    if auto_update_before(&cli.cmd) && !server_mode() {
+        self_update::before_run();
+    }
     match cli.cmd {
         None => pm_tui::run(pm_tui::Mode::Full),
         Some(Cmd::QrDecode) => qr_decode_child(),
@@ -808,6 +824,16 @@ fn run_cli() -> ExitCode {
         }
         Some(Cmd::Show { label, url, rules, write, lang }) => show(label, url, rules, write, &lang),
         Some(Cmd::Unenroll) => remote::unenroll(),
+        Some(Cmd::SelfUpdate) => {
+            #[cfg(unix)]
+            {
+                self_update::cmd()
+            }
+            #[cfg(not(unix))]
+            {
+                install::fail("自动更新只支持 Linux 与 macOS。")
+            }
+        }
         Some(Cmd::BuildInfo) => {
             let b = pm_service::build_info();
             match b.pinned() {
@@ -910,6 +936,25 @@ fn show(label: Option<String>, url: bool, rules: bool, write: bool, lang: &str) 
     }
 }
 
+/// 运行前要检查自动更新的命令：Agent 机器上经服务器工作的那些（注册、管理、内部命令不检查）。
+#[cfg_attr(not(unix), allow(dead_code))]
+fn auto_update_before(cmd: &Option<Cmd>) -> bool {
+    matches!(
+        cmd,
+        Some(
+            Cmd::Mcp
+                | Cmd::Lookup { .. }
+                | Cmd::List
+                | Cmd::Http { .. }
+                | Cmd::Ssh { .. }
+                | Cmd::Scp { .. }
+                | Cmd::Run { .. }
+                | Cmd::SshAgent { .. }
+                | Cmd::Status
+        )
+    ) || matches!(cmd, Some(Cmd::GitProxy { install: false, uninstall: false, .. }))
+}
+
 /// 本机是否为服务器模式（install.json 有 server 配置）。
 fn server_mode() -> bool {
     cfg!(target_os = "linux")
@@ -918,4 +963,41 @@ fn server_mode() -> bool {
         })
         .ok()
         .is_some_and(|i| i.server.is_some())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn auto_update_only_before_client_commands() {
+        let check = |argv: &[&str]| auto_update_before(&Cli::try_parse_from(argv).unwrap_or_else(|e| panic!("{argv:?}: {e}")).cmd);
+        // 经服务器工作的客户端命令：检查
+        for argv in [
+            &["PassManager", "mcp"][..],
+            &["PassManager", "lookup", "https://example.com"],
+            &["PassManager", "list"],
+            &["PassManager", "status"],
+            &["PassManager", "run", "git", "push"],
+            &["PassManager", "git-proxy"],
+            &["PassManager", "ssh", "user@example.com", "true"],
+        ] {
+            assert!(check(argv), "{argv:?}");
+        }
+        // 注册、自身更新、服务安装、内部与管理命令：不检查
+        for argv in [
+            &["PassManager"][..],
+            &["PassManager", "self-update"],
+            &["PassManager", "enroll", "pm-enroll://x"],
+            &["PassManager", "unenroll"],
+            &["PassManager", "build-info"],
+            &["PassManager", "qr-decode"],
+            &["PassManager", "git-proxy", "--install"],
+            &["PassManager", "git-proxy", "--uninstall"],
+            &["PassManager", "show"],
+            &["PassManager", "token", "list"],
+        ] {
+            assert!(!check(argv), "{argv:?}");
+        }
+    }
 }

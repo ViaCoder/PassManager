@@ -118,6 +118,11 @@ passmanager show --label laptop                                            # 打
   `otpauth://` 链接、Google 身份验证器的导出码（`otpauth-migration://`）、2FAS Auth 的备份（加密或不加密）。密钥平时不显示，
   要在账户页点"显示密钥"才出现（Base32、`otpauth://` 链接和一张二维码，可以拿另一个验证器扫码迁移），每次显示都记日志。
   Agent、TUI 和 root 命令行都拿不到验证码和密钥。HOTP 账户不导入。
+- **客户端自动更新**（Linux 与 macOS）：已注册的客户端在运行 `mcp`、`lookup`、`http`、`ssh`、`scp`、`run`、`git-proxy`、
+  `ssh-agent` 和 `status` 之前，最多每 10 分钟问一次服务器。服务器正在运行的正式发布比本机新、而且各平台包已由
+  `agent-bundle.sh` 按这个发布的 `SHA256SUMS` 校验过时，客户端经固定指纹的双层加密通道取回程序，核对 SHA-256 并确认它报告的是
+  同一个发布标签，把旧程序留为 `.PassManager.previous`，原子地替换自己，再用新版本运行这条命令。只升不降，开发构建从不被替换；
+  `PASSMANAGER_NO_AUTO_UPDATE=1` 关掉它，`passmanager self-update` 立即检查一次。
 
 - **单端口模式与 IP 允许列表**：`install-server.sh --port 8121` 在一个端口上同时提供网页与 Agent 通道（按 TLS ALPN 分流），
   `--allow "203.0.113.7 2001:db8::/32"` 让额外的地址访问这个端口（但不能访问 SSH）；防火墙与服务使用同一份列表。

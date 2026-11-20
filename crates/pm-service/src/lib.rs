@@ -87,6 +87,48 @@ pub fn release_sums(layout: &Layout) -> Vec<pm_proto::agent_text::ReleaseAsset> 
     }
 }
 
+/// 客户端自动更新：服务器正在运行的正式发布比客户端的 `have` 新、agent-bin 里有它的发布记录、
+/// 而且程序文件此刻的 SHA-256 与记录一致时，按客户端给的平台顺序返回第一个可用的程序；否则 `Ok(None)`。
+/// `Err` 是需要管理员处理的不一致（记日志，客户端照常运行旧版本）。
+pub fn client_offer(
+    agent_bin: &std::path::Path,
+    own: &pm_proto::agent_text::BuildInfo,
+    targets: &[String],
+    have: &str,
+) -> Result<Option<pm_proto::update::ClientUpdateView>, String> {
+    use pm_proto::update::{MAX_BINARY, MAX_RELEASE_FILE, RELEASE_FILE, newer, parse_release};
+    // 1. 服务器自己必须是正式发布构建，而且比客户端新
+    if own.pinned().is_none() || !newer(&own.version, have) {
+        return Ok(None);
+    }
+    // 2. 发布记录：普通文件（不跟随符号链接）、不太大；只取服务器自己这个版本的行
+    let p = agent_bin.join(RELEASE_FILE);
+    let text = match std::fs::symlink_metadata(&p) {
+        Ok(md) if md.file_type().is_file() && md.len() <= MAX_RELEASE_FILE => {
+            std::fs::read(&p).map_err(|e| format!("读取 {RELEASE_FILE} 失败：{e}"))?
+        }
+        _ => return Ok(None),
+    };
+    let recs: Vec<_> = parse_release(&String::from_utf8_lossy(&text)).into_iter().filter(|r| r.version == own.version).collect();
+    // 3. 按客户端的顺序找第一个有记录的平台（最多看 4 个）
+    for t in targets.iter().take(4) {
+        let Some(rec) = recs.iter().find(|r| &r.target == t) else { continue };
+        let f = agent_bin.join(format!("PassManager-{t}"));
+        let md = std::fs::symlink_metadata(&f).map_err(|e| format!("找不到 PassManager-{t}：{e}"))?;
+        if !md.file_type().is_file() || md.len() == 0 || md.len() > MAX_BINARY {
+            return Err(format!("PassManager-{t} 不是普通文件或大小不对"));
+        }
+        let bin = std::fs::read(&f).map_err(|e| format!("读取 PassManager-{t} 失败：{e}"))?;
+        // 4. 程序此刻的 SHA-256 必须与发布记录一致（有人换过文件就不提供）
+        let sha = hex::encode(pm_crypto::sha256(&bin));
+        if sha != rec.sha256 {
+            return Err(format!("PassManager-{t} 与发布记录 {RELEASE_FILE} 不一致（重新运行 agent-bundle.sh）"));
+        }
+        return Ok(Some(pm_proto::update::ClientUpdateView::new(&own.version, t, &sha, &bin)));
+    }
+    Ok(None)
+}
+
 pub struct Shared {
     pub layout: Layout,
     pub info: InstallInfo,
@@ -565,6 +607,8 @@ impl Shared {
             );
         }
         let server = self.online.is_some();
+        // 自动更新的应答是公开的发布程序：不做别名脱敏（扫描几十 MB 的 base64 既慢，又可能改坏程序）
+        let is_update = matches!(req, Request::ClientUpdate { .. });
         let r = match session {
             Session::Agent if !req.is_usage() => Err(err("FORBIDDEN", "this operation is only available in the PassManager TUI")),
             Session::Admin { ready: false } if !matches!(req, Request::Status | Request::Security | Request::Lock) => {
@@ -629,7 +673,7 @@ impl Shared {
             Err(e) => Response::err(&e.code, e.message),
         };
         // 给 Agent 的一切（结果与错误，包括上游错误里的 URL）都再过一遍别名脱敏：这是别名不泄露的最后一道关。
-        if matches!(session, Session::Agent) {
+        if matches!(session, Session::Agent) && !is_update {
             let redactor = self.inner.lock().await.redactor.clone();
             if redactor.has_aliases() {
                 if let Some(d) = resp.data.as_mut() {
@@ -689,6 +733,32 @@ impl Shared {
     async fn handle(self: &Arc<Self>, req: Request) -> R {
         self.touch().await;
         match req {
+            Request::ClientUpdate { targets, have } => {
+                // 只在服务器模式提供（本机模式没有 agent-bin）
+                if self.online.is_none() {
+                    return ok(Option::<pm_proto::update::ClientUpdateView>::None);
+                }
+                let dir = self.layout.data_dir.join("agent-bin");
+                let own = build_info();
+                // 读文件和算哈希放到阻塞线程里，不占异步线程
+                let have2 = have.clone();
+                let r = tokio::task::spawn_blocking(move || client_offer(&dir, &own, &targets, &have2))
+                    .await
+                    .map_err(|e| err("INTERNAL", e.to_string()))?;
+                match r {
+                    Ok(Some(v)) => {
+                        // 客户端报的版本只留可见 ASCII，最多 40 个字符
+                        let have: String = have.chars().filter(|c| c.is_ascii_graphic()).take(40).collect();
+                        log(&format!("agent: client update {have} -> {} ({})", v.version, v.target));
+                        ok(Some(v))
+                    }
+                    Ok(None) => ok(Option::<pm_proto::update::ClientUpdateView>::None),
+                    Err(m) => {
+                        log(&format!("WARNING: client update not offered: {m}"));
+                        ok(Option::<pm_proto::update::ClientUpdateView>::None)
+                    }
+                }
+            }
             Request::Status => {
                 let locked = self.inner.lock().await.vault.is_none();
                 ok(StatusView {
@@ -2166,6 +2236,57 @@ mod tests {
         {
             std::os::unix::fs::symlink(t.path().join("elsewhere"), dir.join("SHA256SUMS")).unwrap();
             assert!(release_sums(&l).is_empty());
+        }
+    }
+
+    #[test]
+    fn client_offer_needs_official_build_record_and_matching_hash() {
+        use pm_proto::agent_text::BuildInfo;
+        let t = tempfile::tempdir().unwrap();
+        let dir = t.path();
+        let own = BuildInfo { version: "0.3.11-rc.23".into(), tag: Some("v0.3.11-rc.23".into()), commit: Some("a".repeat(40)) };
+        let linux = vec!["x86_64-unknown-linux-gnu".to_string()];
+        let mac = vec!["universal-apple-darwin".to_string(), "aarch64-apple-darwin".to_string()];
+        let bin = b"\x7fELF new client".to_vec();
+        let sha = hex::encode(pm_crypto::sha256(&bin));
+        // 没有发布记录：不提供
+        std::fs::write(dir.join("PassManager-x86_64-unknown-linux-gnu"), &bin).unwrap();
+        assert_eq!(client_offer(dir, &own, &linux, "0.3.11-rc.22"), Ok(None));
+        // 有记录（另有一行旧版本、一行 macOS 本架构）
+        let rec = format!(
+            "# agent-bundle.sh\n0.3.11-rc.22 universal-apple-darwin {}\n0.3.11-rc.23 x86_64-unknown-linux-gnu {sha}\n0.3.11-rc.23 aarch64-apple-darwin {sha}\n",
+            "c".repeat(64)
+        );
+        std::fs::write(dir.join("RELEASE"), &rec).unwrap();
+        let v = client_offer(dir, &own, &linux, "0.3.11-rc.22").unwrap().unwrap();
+        assert_eq!((v.version.as_str(), v.target.as_str(), v.sha256.as_str()), ("0.3.11-rc.23", "x86_64-unknown-linux-gnu", sha.as_str()));
+        assert_eq!(v.binary().unwrap(), bin);
+        // 客户端已经是这个版本、或者更新：不提供（从不降级）
+        assert_eq!(client_offer(dir, &own, &linux, "0.3.11-rc.23"), Ok(None));
+        assert_eq!(client_offer(dir, &own, &linux, "0.3.11"), Ok(None));
+        assert_eq!(client_offer(dir, &own, &linux, "garbage"), Ok(None));
+        // macOS：通用二进制只有旧版本的记录，于是给本架构的
+        std::fs::write(dir.join("PassManager-aarch64-apple-darwin"), &bin).unwrap();
+        assert_eq!(client_offer(dir, &own, &mac, "0.3.11-rc.22").unwrap().unwrap().target, "aarch64-apple-darwin");
+        // 没有记录的平台：不提供
+        assert_eq!(client_offer(dir, &own, &["aarch64-unknown-linux-gnu".to_string()], "0.3.11-rc.22"), Ok(None));
+        // 服务器是开发构建：不提供
+        let dev = BuildInfo { version: own.version.clone(), ..Default::default() };
+        assert_eq!(client_offer(dir, &dev, &linux, "0.3.11-rc.22"), Ok(None));
+        // 程序被换过：报错（服务端记日志），不提供
+        std::fs::write(dir.join("PassManager-x86_64-unknown-linux-gnu"), b"tampered").unwrap();
+        assert!(client_offer(dir, &own, &linux, "0.3.11-rc.22").unwrap_err().contains("不一致"));
+        // 程序是符号链接：报错
+        #[cfg(unix)]
+        {
+            std::fs::write(dir.join("real"), &bin).unwrap();
+            std::fs::remove_file(dir.join("PassManager-x86_64-unknown-linux-gnu")).unwrap();
+            std::os::unix::fs::symlink(dir.join("real"), dir.join("PassManager-x86_64-unknown-linux-gnu")).unwrap();
+            assert!(client_offer(dir, &own, &linux, "0.3.11-rc.22").is_err());
+            // 发布记录是符号链接：当作没有
+            std::fs::rename(dir.join("RELEASE"), dir.join("rec")).unwrap();
+            std::os::unix::fs::symlink(dir.join("rec"), dir.join("RELEASE")).unwrap();
+            assert_eq!(client_offer(dir, &own, &linux, "0.3.11-rc.22"), Ok(None));
         }
     }
 }

@@ -289,6 +289,8 @@ pub fn status() -> ExitCode {
         }
         Some(Err(e)) => crate::install::fail(e),
         Some(Ok(cfg)) => {
+            let b = pm_service::build_info();
+            println!("客户端       {}（{}）", b.version, if b.pinned().is_some() { "正式发布" } else { "开发构建" });
             println!("服务器       {}:{}", cfg.server, cfg.port);
             println!("公钥指纹     {}", fpr_text(&cfg.fingerprint));
             let r = connect_in(&d, &cfg).and_then(|mut c| c.call_as::<pm_proto::StatusView>(&pm_proto::Request::Status));

@@ -12,8 +12,7 @@ use std::sync::Mutex;
 use std::time::SystemTime;
 
 /// 支持的 Agent 程序（文件名为 `PassManager-<目标>`）。
-pub const TARGETS: &[&str] =
-    &["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu", "universal-apple-darwin", "aarch64-apple-darwin", "x86_64-apple-darwin"];
+pub const TARGETS: &[&str] = pm_proto::update::TARGETS;
 /// 单个程序的大小上限。
 const MAX_BIN: u64 = 256 << 20;
 

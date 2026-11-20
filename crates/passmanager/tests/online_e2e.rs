@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 
 use pm_net::client::Target;
 use pm_net::inner::ServerPublic;
-use pm_proto::{Client, Hello, PROTO_V};
+use pm_proto::{Client, Hello, PROTO_V, Request};
 use serde_json::{Value, json};
 
 const BIN: &str = env!("CARGO_BIN_EXE_PassManager");
@@ -386,6 +386,22 @@ fn lan_server_end_to_end() {
     assert!(o.status.success() && stdout(&o).contains("echo"), "{}", stdout(&o));
     let o = env.agent_cmd(&["status"]).output().unwrap();
     assert!(stdout(&o).contains("双层加密"), "{}", stdout(&o));
+
+    // ---- 客户端自动更新：开发构建的客户端不检查也不被替换；开发构建的服务器不提供更新 ----
+    assert!(!env.agent_dir.join("update-check").exists(), "开发构建的客户端运行前不检查更新");
+    let o = env.agent_cmd(&["self-update"]).output().unwrap();
+    assert!(!o.status.success() && stderr(&o).contains("开发构建"), "{}", stderr(&o));
+    let ab = data.join("agent-bin");
+    std::fs::create_dir_all(&ab).unwrap();
+    let fake = b"#!/bin/sh\nexit 0\n";
+    std::fs::write(ab.join("PassManager-x86_64-unknown-linux-gnu"), fake).unwrap();
+    let ver = env!("CARGO_PKG_VERSION");
+    std::fs::write(ab.join("RELEASE"), format!("{ver} x86_64-unknown-linux-gnu {}\n", hex::encode(pm_crypto::sha256(fake)))).unwrap();
+    let stream = pm_net::client::connect(&env.target(), &public).unwrap();
+    let mut c = Client::connect_stream(stream, &Hello::Token { v: PROTO_V, token: token.trim().to_string() }).unwrap();
+    let r = c.call(&Request::ClientUpdate { targets: vec!["x86_64-unknown-linux-gnu".into()], have: "0.0.1".into() }).unwrap();
+    assert!(r.is_null(), "开发构建的服务器不提供更新：{r}");
+    std::fs::remove_dir_all(&ab).unwrap();
 
     // ---- kill -9 后重启：自动解锁，无需任何人工操作 ----
     svc.kill().unwrap();

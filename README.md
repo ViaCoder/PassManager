@@ -125,6 +125,12 @@ What else 0.2.0 adds on top of `http` / `ssh` / `scp`:
   codes (`otpauth-migration://`) and 2FAS Auth backups (plain or password-encrypted). The seed stays hidden until "Show secret"
   on the account page (Base32, `otpauth://` link and a QR code for moving to another authenticator); every view is logged.
   Agents, the TUI and root's command line cannot read codes or seeds. HOTP accounts are not imported.
+- **Clients update themselves** (Linux and macOS): before `mcp`, `lookup`, `http`, `ssh`, `scp`, `run`, `git-proxy`,
+  `ssh-agent` and `status`, an enrolled client asks the server at most every 10 minutes. When the server runs a newer official
+  release whose packages `agent-bundle.sh` checked against the release's `SHA256SUMS`, the client fetches the binary over the
+  pinned double-encrypted channel, checks its SHA-256 and that it reports the same release tag, keeps the old binary as
+  `.PassManager.previous`, replaces itself atomically and runs the command with the new version. It never downgrades,
+  development builds are never replaced, `PASSMANAGER_NO_AUTO_UPDATE=1` turns it off, and `passmanager self-update` checks now.
 
 - **Single-port mode and IP allowlist**: `install-server.sh --port 8121` serves the web UI and the agent channel on one port
   (split by TLS ALPN), and `--allow "203.0.113.7 2001:db8::/32"` lets extra addresses reach that port (but not SSH); the firewall

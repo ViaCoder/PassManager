@@ -4,6 +4,38 @@ English | [简体中文](CHANGELOG.zh-CN.md)
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.3.11-rc.23] - 2026-11-20
+
+### Added
+
+- **Clients update themselves before running** (Linux and macOS). Before `mcp`, `lookup`, `http`, `ssh`, `scp`, `run`,
+  `git-proxy`, `ssh-agent` and `status`, an enrolled client sends the new `ClientUpdate` request at most every 10 minutes (the
+  time of the last check is kept in `update-check` in the client configuration directory). The server answers with a binary only
+  when it is an official build itself (release tag and commit), its version is newer than the client's (semantic versioning, so
+  `0.3.11` is newer than `0.3.11-rc.23`), `agent-bin/RELEASE` lists that version for one of the client's targets (macOS asks for
+  the universal binary first, then its own architecture) and the file's SHA-256 still matches the line. The binary travels base64
+  encoded over the pinned double-encrypted channel. The client checks the version again, checks the SHA-256, writes the binary
+  next to itself (mode 0755), runs its `build-info` and requires the same version and release tag, keeps the old binary as
+  `.PassManager.previous`, renames the new one into place and re-executes itself with the same arguments. Development builds
+  never check and are never replaced; `PASSMANAGER_NO_AUTO_UPDATE=1` turns the check off. A server that cannot be reached, that
+  is older than this release or has nothing newer is silent; an update that arrived but could not be installed (for example a
+  directory the user cannot write) prints one line on stderr and the command runs with the current version.
+- `passmanager self-update` checks right away and says what happened.
+- `agent-bundle.sh` writes `RELEASE` (`<version> <target> <SHA-256 of the binary>`) for every package that matched `SHA256SUMS`.
+- `passmanager status` on a client shows the client version and whether it is an official build.
+
+### Changed
+
+- `agent-bundle.sh` now also checks the package for the server's own target against `SHA256SUMS` and records it only when its
+  binary is byte-identical to the server's; it still never replaces the server's binary.
+- Agent answers to `ClientUpdate` skip the alias scrubbing, which would otherwise scan the encoded binary (it is a public release
+  binary and contains no aliases).
+
+### Upgrading
+
+- Clients older than this release do not know the request: update them by hand once. Run `agent-bundle.sh` again after every
+  server update so that `RELEASE` matches the server's version.
+
 ## [0.3.11-rc.22] - 2026-11-20
 
 ### Added

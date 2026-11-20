@@ -147,8 +147,14 @@ AB="$R2/var/lib/passmanager-dryrun/data/agent-bin"
 check "发布包：校验通过的 macOS 程序已解出" '[ "$(cat "$AB/PassManager-universal-apple-darwin")" = mac-client ]'
 # 与服务器架构无关：aarch64 包要么因校验不一致被跳过，要么（aarch64 服务器上）让位给本机程序；内容都不会被安装。
 check "发布包：校验不一致的跳过并警告" '! grep -q arm-client "$AB"/* && grep -Eq "跳过 PassManager-0.3.0-aarch64-unknown-linux-gnu.tar.gz|PassManager-0.3.0-aarch64-unknown-linux-gnu.tar.gz：使用本机程序" "$T/out3.txt"'
-check "发布包：Windows 包与未知文件忽略" '[ ! -e "$AB/PassManager-x86_64-pc-windows-msvc" ] && [ -z "$(find "$AB" -type f ! -name PassManager-x86_64-unknown-linux-gnu ! -name PassManager-aarch64-unknown-linux-gnu ! -name PassManager-universal-apple-darwin ! -name SHA256SUMS)" ]'
+check "发布包：Windows 包与未知文件忽略" '[ ! -e "$AB/PassManager-x86_64-pc-windows-msvc" ] && [ -z "$(find "$AB" -type f ! -name PassManager-x86_64-unknown-linux-gnu ! -name PassManager-aarch64-unknown-linux-gnu ! -name PassManager-universal-apple-darwin ! -name SHA256SUMS ! -name RELEASE)" ]'
 check "发布包：SHA256SUMS 复制到 Agent 程序目录（接入说明用）" 'cmp -s "$AB/SHA256SUMS" "$B/SHA256SUMS"'
+MAC_SHA="$(printf mac-client | sha256sum | cut -d ' ' -f 1)"
+X86_SHA="$(printf x86-client | sha256sum | cut -d ' ' -f 1)"
+# x86_64 主机上 x86_64 是本机目标（服务器自己的程序与包里的不同，不记）；其他主机上它是校验通过的别的平台，要记下
+if [ "$(uname -m)" = x86_64 ]; then X86_REC='! grep -q x86_64-unknown-linux-gnu "$AB/RELEASE"'; else X86_REC='grep -qx "0.3.0 x86_64-unknown-linux-gnu $X86_SHA" "$AB/RELEASE"'; fi
+check "发布记录：记下校验通过的程序（版本 目标 SHA-256），校验不一致的不记" 'grep -qx "0.3.0 universal-apple-darwin $MAC_SHA" "$AB/RELEASE" && ! grep -q aarch64 "$AB/RELEASE" && eval "$X86_REC"'
+check "发布记录：本机程序与包里的不同，不提供自动更新并警告" 'grep -q "本机程序与 PassManager-0.3.0-x86_64-unknown-linux-gnu.tar.gz 里的不同" "$T/out3.txt" || [ "$(uname -m)" != x86_64 ]'
 
 echo "== agent-bundle.sh 单独运行（已部署的服务器更新 Agent 程序目录）"
 SA="$T/ab-standalone"
@@ -161,6 +167,12 @@ check "agent-bundle：macOS 程序已解出" '[ "$(cat "$SA/PassManager-universa
 check "agent-bundle：本机目标不用发布包里的" '[ ! -e "$SA/PassManager-x86_64-unknown-linux-gnu" ] && grep -q "使用本机程序" "$T/out-ab.txt"'
 check "agent-bundle：校验不一致的跳过并警告" '[ ! -e "$SA/PassManager-aarch64-unknown-linux-gnu" ] && grep -q "跳过 PassManager-0.3.0-aarch64-unknown-linux-gnu.tar.gz" "$T/out-ab.txt"'
 check "agent-bundle：SHA256SUMS 已复制、没有留下临时文件" 'cmp -s "$SA/SHA256SUMS" "$B/SHA256SUMS" && [ -z "$(find "$SA" -name ".*.new")" ]'
+check "agent-bundle：本机程序不存在时不记下这个平台" '! grep -q x86_64-unknown-linux-gnu "$SA/RELEASE" && grep -q "不提供客户端自动更新" "$T/out-ab.txt"'
+# 服务器自己的程序与发布包里的逐字节相同：记下它（服务器据此给本平台的客户端自动更新）
+printf x86-client > "$SA/PassManager-x86_64-unknown-linux-gnu"
+bash "$SRC/scripts/agent-bundle.sh" --agent-bin "$SA" --native x86_64-unknown-linux-gnu "$B" > "$T/out-ab2.txt" 2>&1
+check "agent-bundle：本机程序与包里相同时记下，且不被替换" 'grep -qx "0.3.0 x86_64-unknown-linux-gnu $X86_SHA" "$SA/RELEASE" && grep -qx "0.3.0 universal-apple-darwin $MAC_SHA" "$SA/RELEASE" && [ "$(cat "$SA/PassManager-x86_64-unknown-linux-gnu")" = x86-client ] && grep -q "RELEASE：已写入 2 个平台" "$T/out-ab2.txt"'
+check "agent-bundle：发布记录没有留下临时文件" '[ -z "$(find "$SA" -name ".*.new")" ]'
 NS="$T/bundle-nosums"; mkdir -p "$NS"; cp "$B"/PassManager-*.tar.gz "$NS/"
 check "agent-bundle：没有 SHA256SUMS 时拒绝，什么都不装" '! bash "$SRC/scripts/agent-bundle.sh" --agent-bin "$T/ab-none" --native "" "$NS" > /dev/null 2>&1 && [ ! -e "$T/ab-none" ]'
 ln -s "$B/SHA256SUMS" "$NS/SHA256SUMS"

@@ -4,6 +4,7 @@
 //! 握手失败时服务端直接断开，不返回任何错误或特征信息（防探测）。
 
 pub mod agent_text;
+pub mod update;
 
 use std::io::{Read, Write};
 use std::path::Path;
@@ -284,6 +285,12 @@ pub enum Request {
     OtpDelete {
         name: String,
     },
+    /// 客户端自动更新：报上自己能用的平台包（按优先顺序）与自己的版本；服务器正在运行的正式发布更新时，
+    /// 回复 [`update::ClientUpdateView`]（含程序），否则回复 null。
+    ClientUpdate {
+        targets: Vec<String>,
+        have: String,
+    },
     Pins,
     PendingPins,
     TrustPins {
@@ -377,6 +384,7 @@ impl Request {
                 | Request::RelayOpen { .. }
                 | Request::Relay { .. }
                 | Request::RelayClose { .. }
+                | Request::ClientUpdate { .. }
         )
     }
 }

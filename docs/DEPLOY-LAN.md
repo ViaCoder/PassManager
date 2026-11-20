@@ -171,6 +171,12 @@ without re-running the installer, download the release assets and `SHA256SUMS` o
 as root, `agent-bundle.sh <dir>` (it is in the server package next to `install-server.sh`). Only the packages of the server's own
 version appear in the setup text.
 
+`agent-bundle.sh` also writes `RELEASE` into the agent-bin directory: one line `<version> <target> <SHA-256 of the binary>` for
+every package that matched `SHA256SUMS`; for the server's own target the package is checked too and recorded only when its binary
+is byte-identical to the server's. Enrolled Linux and macOS clients update themselves from these binaries before running, and only
+to the version the server itself runs when that is an official build. A binary whose hash no longer matches its line is not offered
+and the server logs a warning. Run `agent-bundle.sh` again after every server update, otherwise the clients stay on their version.
+
 ### 3.1 Importing secrets (server, root)
 
 ```sh
