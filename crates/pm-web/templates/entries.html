@@ -16,7 +16,7 @@
   <tr>
     <td data-label="引用名" class="entry-name"><code class="strong">{{ e.name }}</code>{% if e.alias %}<br><span class="tag">{{ icon("link") }}alias://{{ e.alias }}</span>{% endif %}{% if e.note %}<div class="sub">{{ e.note }}</div>{% endif %}</td>
     <td data-label="域名" class="domains">{% for d in e.domains %}<code>{{ d }}</code> {% else %}<span class="badge warn">{{ icon("warning") }}未绑定域名</span>{% endfor %}</td>
-    <td data-label="类型"><div class="tags">{% if e.kind == "ssh-key" %}<span class="tag">{{ icon("key") }}SSH 私钥</span>{% elif e.kind == "fields" %}<span class="tag">{{ e.fields | length }} 个字段</span>{% else %}<span class="tag">{{ icon("lock") }}密钥</span>{% endif %}{% if e.self_signed %} <span class="tag">自签证书</span>{% endif %}{% if e.ops %} <span class="tag info">仅 {{ e.ops | join("、") }}</span>{% endif %}</div></td>
+    <td data-label="类型"><div class="tags">{% if e.kind == "ssh-key" %}<span class="tag">{{ icon("key") }}SSH 私钥</span>{% elif e.kind == "fields" %}<span class="tag">{{ e.fields | length }} 个字段</span>{% else %}<span class="tag">{{ icon("lock") }}密钥</span>{% endif %}{% if e.self_signed %} <span class="tag">自签证书</span>{% endif %}{% if e.ops %} <span class="tag info">仅 {{ e.ops | join("、") }}</span>{% endif %}{% if e.name in relays %} <a class="tag info" href="/entries/{{ e.name | urlencode }}/edit#relay">{{ icon("shield") }}中继{% if relays[e.name] %}：{{ relays[e.name] | join("、") }}{% else %}：不限模型{% endif %}</a>{% endif %}</div></td>
     <td class="actions-cell">
       <div class="row">
         <a class="btn secondary small" href="/entries/{{ e.name | urlencode }}/edit">{{ icon("edit") }}编辑</a>

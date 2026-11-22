@@ -4,6 +4,22 @@ English | [简体中文](CHANGELOG.zh-CN.md)
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.3.11-rc.25] - 2026-11-22
+
+### Added
+
+- **Relay policies in the web UI.** The edit page of an HTTP entry has a Relay policy card: the allowed requests, the
+  allowed models (one per line; each becomes a `json:model=` rule, and a request whose `model` is none of them is refused
+  before it reaches the upstream), other request-body rules, the auth header, extra response headers and the four limits.
+  Saving replaces the entry's policy, as `passmanager relay set` does; the policy can also be deleted there. The entries
+  list marks entries that have a policy and names their allowed models. Before this a policy could only be read and
+  changed with `passmanager relay` as root on the server.
+
+### Security
+
+- `url` 2.5.8 → 2.5.9 (RUSTSEC-2026-0592, stack overflow in `Url::origin()` on nested `blob:` URLs), with
+  `form_urlencoded` 1.2.2 → 1.2.3, which it requires.
+
 ## [0.3.11-rc.24] - 2026-11-22
 
 ### Changed

@@ -124,6 +124,61 @@
     <a class="btn secondary" href="/entries">取消</a>
   </div>
 </form>
+{% if original and relay_shown %}
+{# 中继策略：独立的表单（不能嵌在上面的条目表单里），保存时整条替换这个条目的策略 #}
+<section class="card" id="relay">
+  <div class="card-head">
+    <h2 class="card-title">{{ icon("shield") }}中继策略</h2>
+    {% if relay.exists %}<span class="badge ok">{{ icon("check") }}已启用</span>{% else %}<span class="badge neutral">未设置</span>{% endif %}
+  </div>
+  <p class="hint">本机程序经 <code>passmanager run --http</code> 使用这个凭据时，服务器只放行这里允许的请求；没有策略时不能这样使用。</p>
+  {% if relay_error %}<p class="hint err" role="alert">{{ icon("warning") }}{{ relay_error }}</p>{% endif %}
+  <form method="post" action="/entries/{{ original | urlencode }}/relay" class="form" autocomplete="off">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <input type="hidden" name="exists" value="{% if relay.exists %}1{% endif %}">
+    <div class="field">
+      <label for="r-allow">允许的请求 <span class="opt">每行一条：方法 路径</span></label>
+      <textarea id="r-allow" name="allow" rows="3" spellcheck="false" aria-describedby="h-allow" placeholder="POST /api/v1/chat/completions&#10;GET /api/v1/models">{{ relay.allow }}</textarea>
+      <p class="hint" id="h-allow">路径精确匹配；以 <code>/*</code> 结尾表示这个前缀下的任意路径。管理凭据或账号的路径（keys、auth、token、billing、account 等）永远不放行。</p>
+    </div>
+    <div class="field">
+      <label for="r-models">允许的模型 <span class="opt">每行一个；留空表示不限模型</span></label>
+      <textarea id="r-models" name="models" rows="3" spellcheck="false" aria-describedby="h-models" placeholder="@preset/glm5-3flash&#10;openai/gpt-6-luna-pro">{{ relay.models }}</textarea>
+      <p class="hint" id="h-models">请求体里的 <code>model</code> 必须是其中之一，否则服务器直接拒绝，请求不会发到上游。</p>
+    </div>
+    <details class="help"><summary>更多规则与上限</summary>
+      <div class="field">
+        <label for="r-require">其他请求体规则 <span class="opt">每行一条：json:键=值</span></label>
+        <textarea id="r-require" name="require" rows="2" spellcheck="false" placeholder="json:stream=false">{{ relay.require }}</textarea>
+      </div>
+      <div class="field">
+        <label for="r-auth">认证头 <span class="opt">头名: 值，值里写一个占位符</span></label>
+        <input id="r-auth" name="auth" value="{{ relay.auth }}" spellcheck="false">
+      </div>
+      <div class="field">
+        <label for="r-headers">额外放行的响应头 <span class="opt">可选，每行一个</span></label>
+        <textarea id="r-headers" name="response_headers" rows="2" spellcheck="false">{{ relay.response_headers }}</textarea>
+      </div>
+      <fieldset>
+        <legend>上限 <span class="opt">0 或留空表示不限</span></legend>
+        <div class="field"><label for="r-mrr">每次运行的请求数</label><input id="r-mrr" name="max_requests_run" inputmode="numeric" value="{{ relay.max_requests_run }}"></div>
+        <div class="field"><label for="r-mbr">每次运行的字节数</label><input id="r-mbr" name="max_bytes_run" inputmode="numeric" value="{{ relay.max_bytes_run }}"></div>
+        <div class="field"><label for="r-mrd">每 24 小时的请求数</label><input id="r-mrd" name="max_requests_day" inputmode="numeric" value="{{ relay.max_requests_day }}"></div>
+        <div class="field"><label for="r-mbd">每 24 小时的字节数</label><input id="r-mbd" name="max_bytes_day" inputmode="numeric" value="{{ relay.max_bytes_day }}"></div>
+      </fieldset>
+    </details>
+    <div class="form-actions">
+      <button>{{ icon("check") }}保存策略</button>
+    </div>
+  </form>
+  {% if relay.exists %}
+  <details class="confirm">
+    <summary class="btn danger-outline small">{{ icon("trash") }}删除策略</summary>
+    <form method="post" action="/entries/{{ original | urlencode }}/relay/delete" class="confirm-box"><input type="hidden" name="csrf" value="{{ csrf }}"><span>删除 <code>{{ original }}</code> 的中继策略？之后这个凭据不能再经 <code>passmanager run --http</code> 使用。</span><button class="danger small">{{ icon("trash") }}确认删除</button></form>
+  </details>
+  {% endif %}
+</section>
+{% endif %}
 {% if original and not shown %}
 {# "全部显示"：独立的表单（按钮在上面的密钥区里，经 form 属性提交这里），不会带上主表单里正在输入的内容 #}
 <form id="show-form" method="post" action="/entries/{{ original | urlencode }}/show"><input type="hidden" name="csrf" value="{{ csrf }}"></form>

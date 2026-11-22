@@ -249,6 +249,9 @@ passmanager relay list
 passmanager relay remove --name openrouter
 ```
 
+The web UI edits the same policy: the Relay policy card on the edit page of an HTTP entry. Several values for one key
+(several `--require 'json:model=…'` rules, or several lines under Allowed models) allow any one of them.
+
 On the agent machine:
 
 ```sh

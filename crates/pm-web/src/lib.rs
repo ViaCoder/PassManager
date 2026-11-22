@@ -31,7 +31,7 @@ use axum::routing::{get, post};
 use minijinja::value::Serde;
 use minijinja::{Environment, Value, context};
 use pm_proto::{EntryInput, EntryView, PendingEnrollView, PendingPinView, PinView, Request as Req, Response as Resp};
-use pm_proto::{FieldInput, SecurityView, ServerStatusView, SettingsView, TokenView};
+use pm_proto::{FieldInput, RelayPolicyView, SecurityView, ServerStatusView, SettingsView, TokenView};
 use serde::de::DeserializeOwned;
 
 pub use front::ConnInfo;
@@ -457,6 +457,8 @@ pub fn router(st: St) -> Router {
         .route("/entries/{name}", post(entry_update))
         .route("/entries/{name}/delete", post(entry_delete))
         .route("/entries/{name}/show", post(entry_show))
+        .route("/entries/{name}/relay", post(relay_save))
+        .route("/entries/{name}/relay/delete", post(relay_delete))
         .route("/otp", get(otp::list))
         .route("/otp/import", get(otp::import_page).post(otp::import).layer(axum::extract::DefaultBodyLimit::max(otp::IMPORT_LIMIT)))
         // 账户放在 /otp/a/ 下：账户名叫 import 也不会和导入页冲突
@@ -776,6 +778,8 @@ fn done_text(code: Option<&str>) -> Option<&'static str> {
     Some(match code? {
         "saved" => "已保存。",
         "deleted" => "已删除。",
+        "relay-saved" => "中继策略已保存。",
+        "relay-deleted" => "中继策略已删除，这个凭据不能再经 passmanager run --http 使用。",
         "renamed" => "已改名。",
         "revoked" => "令牌已吊销，立即失效。",
         "cancelled" => "注册码已作废。",
@@ -972,7 +976,13 @@ async fn entries(State(st): State<St>, h: HeaderMap, conn: Option<Extension<Conn
         Err(r) => return r,
     };
     match call::<Vec<EntryView>>(&st, Req::Entries).await {
-        Ok(list) => page(&st, &c, "entries.html", context! { entries => sv(&list), ..flash_ctx(&q) }),
+        Ok(list) => {
+            // 有中继策略的条目在列表里标出来，并列出允许的模型（没有模型限制时为空表）
+            let relays = call::<Vec<RelayPolicyView>>(&st, Req::RelayPolicies).await.unwrap_or_default();
+            let relays: std::collections::BTreeMap<String, Vec<String>> =
+                relays.iter().map(|p| (p.entry.clone(), relay_form_of(Some(p)).models.lines().map(String::from).collect())).collect();
+            page(&st, &c, "entries.html", context! { entries => sv(&list), relays => sv(relays), ..flash_ctx(&q) })
+        }
         Err(e) => page(&st, &c, "entries.html", context! { entries => sv(Vec::<EntryView>::new()), ..err_flash(&e) }),
     }
 }
@@ -1132,12 +1142,18 @@ async fn entry_new(State(st): State<St>, h: HeaderMap, conn: Option<Extension<Co
     )
 }
 
-async fn entry_edit(State(st): State<St>, h: HeaderMap, conn: Option<Extension<ConnInfo>>, Path(name): Path<String>) -> Response {
+async fn entry_edit(
+    State(st): State<St>,
+    h: HeaderMap,
+    conn: Option<Extension<ConnInfo>>,
+    Path(name): Path<String>,
+    Query(q): Query<DoneQ>,
+) -> Response {
     let c = match require(&st, &h, &conn) {
         Ok(c) => c,
         Err(r) => return r,
     };
-    edit_page(&st, &c, &name, None).await
+    edit_page(&st, &c, &name, None, None, flash_ctx(&q)).await
 }
 
 /// "全部显示"：编辑页上给出这个条目的全部值，放进可编辑的输入框（POST + CSRF；只有网页会话能取到，服务器记一行日志）。
@@ -1153,13 +1169,21 @@ async fn entry_show(
         Err(r) => return r,
     };
     match call::<pm_proto::ShownEntry>(&st, Req::ShowEntry { name: name.clone() }).await {
-        Ok(shown) => edit_page(&st, &c, &name, Some(shown)).await,
+        Ok(shown) => edit_page(&st, &c, &name, Some(shown), None, context! {}).await,
         Err(e) => message(&st, Some(&c), StatusCode::BAD_REQUEST, "无法显示", &err_text(&e)),
     }
 }
 
-/// 编辑页：`shown` 是"全部显示"取到的值（没有时已保存的值全部遮住）。
-async fn edit_page(st: &AppState, c: &Ctx, name: &str, shown: Option<pm_proto::ShownEntry>) -> Response {
+/// 编辑页：`shown` 是"全部显示"取到的值（没有时已保存的值全部遮住）；`relay` 是提交失败后回填的中继策略表单和
+/// 错误说明；`flash` 是页面顶部的提示（保存成功等）。
+async fn edit_page(
+    st: &AppState,
+    c: &Ctx,
+    name: &str,
+    shown: Option<pm_proto::ShownEntry>,
+    relay: Option<(RelayForm, String)>,
+    flash: Value,
+) -> Response {
     let list = match call::<Vec<EntryView>>(st, Req::Entries).await {
         Ok(l) => l,
         Err(e) => return message(st, Some(c), StatusCode::BAD_REQUEST, "无法读取条目", &err_text(&e)),
@@ -1187,12 +1211,183 @@ async fn edit_page(st: &AppState, c: &Ctx, name: &str, shown: Option<pm_proto::S
         .iter()
         .map(|n| shown.as_ref().and_then(|s| s.fields.iter().find(|(k, _)| k == n)).map(|(_, v)| v.clone()).unwrap_or_default())
         .collect();
+    // 中继策略只对 HTTP 用途有意义：没勾 HTTP 的条目不显示这张卡片
+    let relay_shown = e.ops.iter().any(|o| o == "http");
+    let (relay, relay_error) = match relay {
+        Some((form, message)) => (form, Some(message)),
+        None => {
+            let list = if relay_shown { call::<Vec<RelayPolicyView>>(st, Req::RelayPolicies).await.unwrap_or_default() } else { vec![] };
+            (relay_form_of(list.iter().find(|p| p.entry == e.name)), None)
+        }
+    };
     page(
         st,
         c,
         "entry_form.html",
-        context! { form => sv(form), original => e.name, public_key => e.public_key, shown => shown.is_some(), shown_secret, shown_values },
+        context! {
+            form => sv(form), original => e.name, public_key => e.public_key, shown => shown.is_some(), shown_secret, shown_values,
+            relay => sv(relay), relay_shown, relay_error, ..flash
+        },
     )
+}
+
+// ---------------- 中继策略（编辑页里的一张卡片） ----------------
+
+/// 不写认证头时用的默认值（与 `passmanager relay set` 的默认值相同）。
+const RELAY_AUTH_DEFAULT: &str = "Authorization: Bearer {{secret}}";
+/// 模型限制就是请求体里 `model` 字段的规则；表单把它单独列成"允许的模型"。
+const MODEL_RULE: &str = "json:model=";
+
+/// 编辑页上中继策略表单的内容。多值的项每行一个；数字也按文本保存，提交出错时原样回填。
+#[derive(serde::Serialize, Default, Clone, Debug, PartialEq)]
+struct RelayForm {
+    /// 这个条目已经有策略（显示"删除策略"）。
+    exists: bool,
+    /// 允许的请求，每行"方法 路径"。
+    allow: String,
+    /// 允许的模型，每行一个（对应 json:model=…）。
+    models: String,
+    /// 其他请求体规则，每行 json:键=值。
+    require: String,
+    /// 凭据怎样发出（头名: 值）。
+    auth: String,
+    /// 额外放行给本机程序的响应头，每行一个。
+    response_headers: String,
+    /// 四个上限，0 或留空表示不限。
+    max_requests_run: String,
+    max_bytes_run: String,
+    max_requests_day: String,
+    max_bytes_day: String,
+}
+
+/// 已保存的策略（没有策略时是空表单，带默认认证头）变成表单：模型规则拆到"允许的模型"，其余请求体规则原样保留。
+fn relay_form_of(p: Option<&RelayPolicyView>) -> RelayForm {
+    let Some(p) = p else {
+        return RelayForm { auth: RELAY_AUTH_DEFAULT.into(), ..RelayForm::default() };
+    };
+    // 服务端把同一个键的多个值展开成多行 json:model=…，这里每个值一行
+    let models: Vec<&str> = p.require.iter().filter_map(|r| r.strip_prefix(MODEL_RULE)).collect();
+    let other: Vec<&str> = p.require.iter().filter(|r| !r.starts_with(MODEL_RULE)).map(String::as_str).collect();
+    RelayForm {
+        exists: true,
+        allow: p.allow.join("\n"),
+        models: models.join("\n"),
+        require: other.join("\n"),
+        auth: p.auth.clone(),
+        response_headers: p.response_headers.join("\n"),
+        max_requests_run: p.max_requests_run.to_string(),
+        max_bytes_run: p.max_bytes_run.to_string(),
+        max_requests_day: p.max_requests_day.to_string(),
+        max_bytes_day: p.max_bytes_day.to_string(),
+    }
+}
+
+/// 提交上来的表单，原样取出（出错时回填用）。
+fn relay_form_from(f: &HashMap<String, String>) -> RelayForm {
+    let field = |k: &str| f.get(k).cloned().unwrap_or_default();
+    RelayForm {
+        exists: field("exists") == "1",
+        allow: field("allow"),
+        models: field("models"),
+        require: field("require"),
+        auth: field("auth"),
+        response_headers: field("response_headers"),
+        max_requests_run: field("max_requests_run"),
+        max_bytes_run: field("max_bytes_run"),
+        max_requests_day: field("max_requests_day"),
+        max_bytes_day: field("max_bytes_day"),
+    }
+}
+
+/// 多行文本框里的非空行，去掉首尾空白。
+fn form_lines(s: &str) -> Vec<String> {
+    s.lines().map(str::trim).filter(|l| !l.is_empty()).map(String::from).collect()
+}
+
+/// 表单变成要保存的策略。这里只查表单写法（行的格式、数字）；路径、方法、认证头等的规则由服务端 validate_relay 检查。
+fn relay_policy_of(entry: &str, form: &RelayForm) -> Result<RelayPolicyView, String> {
+    let allow = form_lines(&form.allow);
+    if allow.is_empty() {
+        return Err("至少写一条允许的请求，每行一条，例如 POST /api/v1/chat/completions。".into());
+    }
+    // 每个模型一条 json:model 规则；服务端把同一个键的多个值合并成"其中之一即可"
+    let mut require: Vec<String> = form_lines(&form.models).into_iter().map(|m| format!("{MODEL_RULE}{m}")).collect();
+    for rule in form_lines(&form.require) {
+        if !rule.starts_with("json:") {
+            return Err(format!("其他请求体规则每行写成 json:键=值，例如 json:stream=false：{rule}"));
+        }
+        require.push(rule);
+    }
+    // 上限：留空按 0（不限），其余必须是非负整数
+    let number = |label: &str, text: &str| -> Result<u64, String> {
+        let text = text.trim();
+        if text.is_empty() {
+            return Ok(0);
+        }
+        text.parse::<u64>().map_err(|_| format!("{label}要写成不小于 0 的整数（0 表示不限）：{text}"))
+    };
+    let auth = form.auth.trim();
+    Ok(RelayPolicyView {
+        entry: entry.to_string(),
+        allow,
+        auth: if auth.is_empty() { RELAY_AUTH_DEFAULT.into() } else { auth.into() },
+        require,
+        response_headers: form_lines(&form.response_headers),
+        max_requests_run: number("每次运行的请求数", &form.max_requests_run)?,
+        max_bytes_run: number("每次运行的字节数", &form.max_bytes_run)?,
+        max_requests_day: number("每 24 小时的请求数", &form.max_requests_day)?,
+        max_bytes_day: number("每 24 小时的字节数", &form.max_bytes_day)?,
+    })
+}
+
+/// 保存中继策略（新增或整条替换），回到编辑页。
+async fn relay_save(
+    State(st): State<St>,
+    h: HeaderMap,
+    conn: Option<Extension<ConnInfo>>,
+    Path(name): Path<String>,
+    Form(f): Form<HashMap<String, String>>,
+) -> Response {
+    let c = match require_post(&st, &h, &conn, &f) {
+        Ok(c) => c,
+        Err(r) => return r,
+    };
+    let form = relay_form_from(&f);
+    let policy = match relay_policy_of(&name, &form) {
+        Ok(p) => p,
+        Err(m) => return relay_error(&st, &c, &name, form, m).await,
+    };
+    match call::<RelayPolicyView>(&st, Req::PutRelayPolicy { policy }).await {
+        Ok(_) => done(&format!("/entries/{}/edit", urlenc(&name)), "relay-saved"),
+        Err(e) => relay_error(&st, &c, &name, form, err_text(&e)).await,
+    }
+}
+
+/// 删除中继策略，回到编辑页。
+async fn relay_delete(
+    State(st): State<St>,
+    h: HeaderMap,
+    conn: Option<Extension<ConnInfo>>,
+    Path(name): Path<String>,
+    Form(f): Form<HashMap<String, String>>,
+) -> Response {
+    let c = match require_post(&st, &h, &conn, &f) {
+        Ok(c) => c,
+        Err(r) => return r,
+    };
+    match call::<serde_json::Value>(&st, Req::DeleteRelayPolicy { entry: name.clone() }).await {
+        Ok(_) => done(&format!("/entries/{}/edit", urlenc(&name)), "relay-deleted"),
+        Err(e) => message(&st, Some(&c), StatusCode::BAD_REQUEST, "无法删除中继策略", &err_text(&e)),
+    }
+}
+
+/// 保存失败：编辑页重新显示，中继表单回填刚才提交的内容，错误写在卡片里。
+async fn relay_error(st: &AppState, c: &Ctx, name: &str, form: RelayForm, message: String) -> Response {
+    let mut r = edit_page(st, c, name, None, Some((form, message)), context! {}).await;
+    if r.status() == StatusCode::OK {
+        *r.status_mut() = StatusCode::BAD_REQUEST;
+    }
+    r
 }
 
 /// 校验失败时重新显示表单：保留其他字段，但**不回显密钥**（需要重新输入）。

@@ -25,6 +25,8 @@ struct Mock {
     otp_imports: Mutex<OtpImports>,
     /// 收到几次"显示密钥"。
     otp_reveals: Mutex<u32>,
+    /// 中继策略（与服务端一样按条目名整条替换）。
+    relays: Mutex<Vec<pm_proto::RelayPolicyView>>,
 }
 
 type OtpImports = Vec<(Vec<String>, Option<String>, Option<String>)>;
@@ -268,6 +270,26 @@ impl Backend for Mock {
                 Req::OtpDelete { name } => {
                     self.otp.lock().unwrap().retain(|v| v.name != name);
                     Resp::ok("deleted")
+                }
+                Req::RelayPolicies => Resp::ok(self.relays.lock().unwrap().clone()),
+                Req::PutRelayPolicy { policy } => {
+                    // 服务端 validate_relay 的一条代表性检查：管理凭据的路径永远不放行
+                    if policy.allow.iter().any(|a| a.contains("/keys")) {
+                        return Resp::err("BAD_REQUEST", "不能放行管理凭据或账号的路径");
+                    }
+                    if !self.entries.lock().unwrap().iter().any(|(e, _, _)| e.name == policy.entry) {
+                        return Resp::err("UNKNOWN_CREDENTIAL", "条目不存在");
+                    }
+                    let mut l = self.relays.lock().unwrap();
+                    l.retain(|p| p.entry != policy.entry);
+                    l.push(policy.clone());
+                    Resp::ok(policy)
+                }
+                Req::DeleteRelayPolicy { entry } => {
+                    let mut l = self.relays.lock().unwrap();
+                    let before = l.len();
+                    l.retain(|p| p.entry != entry);
+                    if l.len() == before { Resp::err("UNKNOWN_CREDENTIAL", "没有中继策略") } else { Resp::ok("deleted") }
                 }
                 other => Resp::err("FORBIDDEN", format!("unexpected {other:?}")),
             }
@@ -807,6 +829,9 @@ fn every_template_escapes_injected_values() {
         "csrf": P, "nav": P, "conn": {"group": P, "suite": P, "peer": P}, "flash": P, "flash_kind": P, "heading": P, "message": P, "token": P,
         "st": status.clone(), "entries": [entry.clone(), key_entry], "form": {"name": P, "domains": P, "note": P, "self_signed": true, "auto_accept_host_key": true, "kind": P, "fields": [P, P], "new_rows": [2, 3], "host_keys": P, "ops": [P]}, "public_key": P,
         "original": P, "enroll": {"label": P, "url": P, "text": P, "minutes": 10},
+        "relay": {"exists": true, "allow": P, "models": P, "require": P, "auth": P, "response_headers": P,
+            "max_requests_run": P, "max_bytes_run": P, "max_requests_day": P, "max_bytes_day": P},
+        "relay_shown": true, "relay_error": P, "relays": {P: [P, P]},
         "tokens": [{"id": P, "label": P, "created": 0, "last_used": 0}], "pending": [{"id": P, "label": P, "expires_in_secs": 70,
             "kind": P, "host_port": P, "old_fingerprint": P, "new_fingerprint": P, "seen_at": 0}],
         "pins": [{"kind": P, "host_port": P, "algo": P, "fingerprint": P, "first_seen": 0}],
@@ -2123,4 +2148,114 @@ async fn otp_rename_and_delete() {
     let r = send(&st, Method::POST, "/otp/a/Work/delete", Some(&cookie), Some(&format!("csrf={csrf}")), &[]).await;
     assert_eq!(r.headers.get(header::LOCATION).unwrap(), "/otp?done=deleted");
     assert_eq!(mock.otp.lock().unwrap().len(), 1);
+}
+
+/// relay_form_of / relay_policy_of / relay_form_from / form_lines：策略与表单互相转换，模型单独成一栏，写法错误给出说明。
+#[test]
+fn relay_form_round_trip_and_errors() {
+    // 没有策略：空表单，带默认认证头。
+    let empty = relay_form_of(None);
+    assert!(!empty.exists && empty.models.is_empty());
+    assert_eq!(empty.auth, RELAY_AUTH_DEFAULT);
+    // 已有策略：两个模型拆到"允许的模型"，其他规则原样保留。
+    let saved = pm_proto::RelayPolicyView {
+        entry: "openrouter".into(),
+        allow: vec!["POST /api/v1/chat/completions".into(), "GET /api/v1/models".into()],
+        auth: "authorization: Bearer {{secret}}".into(),
+        require: vec!["json:model=@preset/glm5-3flash".into(), "json:stream=false".into(), "json:model=openai/gpt-6-luna-pro".into()],
+        response_headers: vec![],
+        max_requests_run: 0,
+        max_bytes_run: 0,
+        max_requests_day: 2000,
+        max_bytes_day: 0,
+    };
+    let form = relay_form_of(Some(&saved));
+    assert!(form.exists);
+    assert_eq!(form.models, "@preset/glm5-3flash\nopenai/gpt-6-luna-pro");
+    assert_eq!(form.require, "json:stream=false");
+    assert_eq!(form.max_requests_day, "2000");
+    // 再转回策略：内容不变（模型在前，其他规则在后）。
+    let back = relay_policy_of("openrouter", &form).unwrap();
+    assert_eq!(back.allow, saved.allow);
+    assert_eq!(back.require, vec!["json:model=@preset/glm5-3flash", "json:model=openai/gpt-6-luna-pro", "json:stream=false"]);
+    assert_eq!((back.max_requests_day, back.max_bytes_run), (2000, 0));
+    // 空行和首尾空白去掉；认证头留空用默认值；上限留空为 0。
+    let typed = RelayForm { allow: " POST /v1/x \n\n".into(), models: "\n m1 \n".into(), ..RelayForm::default() };
+    let p = relay_policy_of("e", &typed).unwrap();
+    assert_eq!(
+        (p.allow, p.require, p.auth.as_str(), p.max_bytes_day),
+        (vec!["POST /v1/x".to_string()], vec!["json:model=m1".to_string()], RELAY_AUTH_DEFAULT, 0)
+    );
+    assert_eq!(form_lines(" a \n\n b"), vec!["a", "b"]);
+    // 写法错误：没有允许的请求、规则不是 json:、上限不是非负整数。
+    assert!(relay_policy_of("e", &RelayForm::default()).unwrap_err().contains("至少写一条"));
+    let bad_rule = RelayForm { allow: "GET /a".into(), require: "model=x".into(), ..RelayForm::default() };
+    assert!(relay_policy_of("e", &bad_rule).unwrap_err().contains("json:键=值"));
+    let bad_number = RelayForm { allow: "GET /a".into(), max_requests_day: "-3".into(), ..RelayForm::default() };
+    assert!(relay_policy_of("e", &bad_number).unwrap_err().contains("每 24 小时的请求数"));
+    // 提交的表单原样取出（出错回填用）。
+    let f: HashMap<String, String> =
+        [("exists", "1"), ("models", "a\nb"), ("max_bytes_run", "x")].iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+    let got = relay_form_from(&f);
+    assert!(got.exists && got.models == "a\nb" && got.max_bytes_run == "x" && got.allow.is_empty());
+}
+
+/// 编辑页的中继策略卡片（relay_save / relay_delete / relay_error 与条目列表的标记）：只对 HTTP 条目显示；
+/// 保存要 CSRF；模型限制写进策略；出错时回填并说明；列表标出模型；删除后卡片回到"未设置"。
+#[tokio::test]
+async fn relay_policy_card_on_the_edit_page() {
+    let (st, mock) = state();
+    let (cookie, csrf) = login(&st).await;
+    // 一个 HTTP 条目和一个只用 SSH 的条目。
+    let http = format!("csrf={csrf}&name=openrouter&domains=openrouter.ai&secret=k&op_http=1");
+    assert_eq!(send(&st, Method::POST, "/entries", Some(&cookie), Some(&http), &[]).await.status, StatusCode::SEE_OTHER);
+    let ssh = format!("csrf={csrf}&name=box&domains=box.example.com&secret=k&op_ssh=1");
+    assert_eq!(send(&st, Method::POST, "/entries", Some(&cookie), Some(&ssh), &[]).await.status, StatusCode::SEE_OTHER);
+    // 卡片只出现在 HTTP 条目上，初始为"未设置"。
+    let page = send(&st, Method::GET, "/entries/openrouter/edit", Some(&cookie), None, &[]).await;
+    assert!(page.body.contains("中继策略") && page.body.contains("未设置") && page.body.contains("允许的模型"));
+    assert!(!send(&st, Method::GET, "/entries/box/edit", Some(&cookie), None, &[]).await.body.contains("允许的模型"));
+    // 没有 CSRF 的保存被拒。
+    let form = format!(
+        "allow={}&models={}&auth={}&max_requests_day=2000",
+        enc("POST /api/v1/chat/completions\nGET /api/v1/models"),
+        enc("@preset/glm5-3flash\nopenai/gpt-6-luna-pro"),
+        enc("Authorization: Bearer {{secret}}")
+    );
+    assert_eq!(send(&st, Method::POST, "/entries/openrouter/relay", Some(&cookie), Some(&form), &[]).await.status, StatusCode::FORBIDDEN);
+    assert!(mock.relays.lock().unwrap().is_empty());
+    // 保存：两个模型成为两条 json:model 规则，回到编辑页并提示。
+    let r = send(&st, Method::POST, "/entries/openrouter/relay", Some(&cookie), Some(&format!("csrf={csrf}&{form}")), &[]).await;
+    assert_eq!(r.status, StatusCode::SEE_OTHER);
+    assert_eq!(r.headers.get(header::LOCATION).unwrap(), "/entries/openrouter/edit?done=relay-saved");
+    {
+        let l = mock.relays.lock().unwrap();
+        assert_eq!(l[0].require, vec!["json:model=@preset/glm5-3flash", "json:model=openai/gpt-6-luna-pro"]);
+        assert_eq!((l[0].max_requests_day, l[0].allow.len()), (2000, 2));
+    }
+    let page = send(&st, Method::GET, "/entries/openrouter/edit?done=relay-saved", Some(&cookie), None, &[]).await;
+    assert!(page.body.contains("中继策略已保存") && page.body.contains("已启用") && page.body.contains("openai&#x2f;gpt-6-luna-pro"));
+    // 列表里标出中继和允许的模型（页面里的 / 按 HTML 转义成 &#x2f;）。
+    let list = send(&st, Method::GET, "/entries", Some(&cookie), None, &[]).await;
+    assert!(list.body.contains("中继：@preset&#x2f;glm5-3flash、openai&#x2f;gpt-6-luna-pro"));
+    // 写法错误：400，表单回填，说明写在卡片里，策略不变。
+    let bad = format!("csrf={csrf}&allow={}&models=keep-model&max_bytes_run=abc", enc("POST /v1/x"));
+    let r = send(&st, Method::POST, "/entries/openrouter/relay", Some(&cookie), Some(&bad), &[]).await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST);
+    assert!(r.body.contains("每次运行的字节数") && r.body.contains("keep-model") && r.body.contains("value=\"abc\""));
+    // 服务端拒绝（管理凭据的路径）：同样回填并显示服务端的说明。
+    let refused = format!("csrf={csrf}&allow={}", enc("POST /api/v1/keys"));
+    let r = send(&st, Method::POST, "/entries/openrouter/relay", Some(&cookie), Some(&refused), &[]).await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST);
+    assert!(r.body.contains("不能放行管理凭据") && r.body.contains("POST &#x2f;api&#x2f;v1&#x2f;keys"));
+    assert_eq!(mock.relays.lock().unwrap()[0].require.len(), 2, "失败的保存不改变已有策略");
+    // 删除：回到编辑页，卡片回到"未设置"，列表不再标出。
+    let d = send(&st, Method::POST, "/entries/openrouter/relay/delete", Some(&cookie), Some(&format!("csrf={csrf}")), &[]).await;
+    assert_eq!(d.headers.get(header::LOCATION).unwrap(), "/entries/openrouter/edit?done=relay-deleted");
+    assert!(mock.relays.lock().unwrap().is_empty());
+    assert!(send(&st, Method::GET, "/entries/openrouter/edit", Some(&cookie), None, &[]).await.body.contains("未设置"));
+    assert!(!send(&st, Method::GET, "/entries", Some(&cookie), None, &[]).await.body.contains("中继："));
+    // 没有策略时再删：说明原因。
+    let again = send(&st, Method::POST, "/entries/openrouter/relay/delete", Some(&cookie), Some(&format!("csrf={csrf}")), &[]).await;
+    assert_eq!(again.status, StatusCode::BAD_REQUEST);
 }

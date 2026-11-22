@@ -1422,9 +1422,9 @@ checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
 
 [[package]]
 name = "form_urlencoded"
-version = "1.2.2"
+version = "1.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cb4cb245038516f5f85277875cdaa4f7d2c9a0fa0468de06ed190163b1581fcf"
+checksum = "afa489199eaffb1211795df1c6236ce1ad0d41a6fa45250add73e3b02420f06e"
 dependencies = [
  "percent-encoding",
 ]
@@ -2718,7 +2718,7 @@ dependencies = [
 
 [[package]]
 name = "passmanager"
-version = "0.3.11-rc.24"
+version = "0.3.11-rc.25"
 dependencies = [
  "base64 0.22.1",
  "clap",
@@ -2965,7 +2965,7 @@ checksum = "f6b464fbc74e149a392436b17d523f769e057cb6877f6a5c4618bc6f11800548"
 
 [[package]]
 name = "pm-crypto"
-version = "0.3.11-rc.24"
+version = "0.3.11-rc.25"
 dependencies = [
  "argon2 0.5.3",
  "aws-lc-rs",
@@ -2981,7 +2981,7 @@ dependencies = [
 
 [[package]]
 name = "pm-net"
-version = "0.3.11-rc.24"
+version = "0.3.11-rc.25"
 dependencies = [
  "axum",
  "base64 0.22.1",
@@ -3005,7 +3005,7 @@ dependencies = [
 
 [[package]]
 name = "pm-otp"
-version = "0.3.11-rc.24"
+version = "0.3.11-rc.25"
 dependencies = [
  "base64 0.22.1",
  "data-encoding",
@@ -3022,7 +3022,7 @@ dependencies = [
 
 [[package]]
 name = "pm-platform"
-version = "0.3.11-rc.24"
+version = "0.3.11-rc.25"
 dependencies = [
  "base64 0.22.1",
  "hex",
@@ -3038,7 +3038,7 @@ dependencies = [
 
 [[package]]
 name = "pm-proto"
-version = "0.3.11-rc.24"
+version = "0.3.11-rc.25"
 dependencies = [
  "base64 0.22.1",
  "pm-platform",
@@ -3051,7 +3051,7 @@ dependencies = [
 
 [[package]]
 name = "pm-service"
-version = "0.3.11-rc.24"
+version = "0.3.11-rc.25"
 dependencies = [
  "aho-corasick",
  "base64 0.22.1",
@@ -3091,7 +3091,7 @@ dependencies = [
 
 [[package]]
 name = "pm-tui"
-version = "0.3.11-rc.24"
+version = "0.3.11-rc.25"
 dependencies = [
  "pm-crypto",
  "pm-platform",
@@ -3106,7 +3106,7 @@ dependencies = [
 
 [[package]]
 name = "pm-vault"
-version = "0.3.11-rc.24"
+version = "0.3.11-rc.25"
 dependencies = [
  "getrandom 0.3.4",
  "hex",
@@ -3123,7 +3123,7 @@ dependencies = [
 
 [[package]]
 name = "pm-web"
-version = "0.3.11-rc.24"
+version = "0.3.11-rc.25"
 dependencies = [
  "axum",
  "base64 0.22.1",
@@ -4841,9 +4841,9 @@ checksum = "8ecb6da28b8a351d773b68d5825ac39017e680750f980f3a1a85cd8dd28a47c1"
 
 [[package]]
 name = "url"
-version = "2.5.8"
+version = "2.5.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ff67a8a4397373c3ef660812acab3268222035010ab8680ec4215f38ba3d0eed"
+checksum = "f00cd2407bb42c0ef17be88d4cf020f5cceffd121665bac9b8b9493a369b3b1a"
 dependencies = [
  "form_urlencoded",
  "idna",

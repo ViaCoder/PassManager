@@ -243,6 +243,9 @@ passmanager relay list
 passmanager relay remove --name openrouter
 ```
 
+网页管理也能改同一份策略：HTTP 条目编辑页里的"中继策略"卡片。同一个键写多个值（多条 `--require 'json:model=…'`，
+或"允许的模型"里写多行）表示其中之一即可。
+
 在 Agent 机器上：
 
 ```sh
