@@ -4,6 +4,24 @@ English | [简体中文](CHANGELOG.zh-CN.md)
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.3.11-rc.24] - 2026-11-22
+
+### Changed
+
+- **A server and its enrolled clients have no TUI.** On a LAN server, `PassManager` without a subcommand and
+  `PassManager trust` now refuse to start and point to the web UI (`passmanager login` as root). On an enrolled client,
+  `PassManager`, `trust` and `unlock` do the same and point to `passmanager web`. Stand-alone installs keep the TUI.
+  Before this change the server-side `trust` opened a TUI that asked for a password, which server mode never accepts, so it
+  could not succeed.
+- **Changed fingerprints are trusted only in the web UI in server mode.** The service accepts `TrustPins` only from a web
+  session when it runs as a server; root's command line and old TUIs get `FORBIDDEN`. The `HOST_KEY_CHANGED` message and its
+  `Next:` line now send the user to the Host fingerprints page of the web UI instead of `PassManager trust`.
+
+### Upgrading
+
+- Nothing to migrate. Clients from 0.3.11-rc.23 update themselves once the server runs this release and `agent-bundle.sh`
+  has been rerun.
+
 ## [0.3.11-rc.23] - 2026-11-20
 
 ### Added

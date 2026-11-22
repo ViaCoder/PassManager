@@ -1,7 +1,7 @@
 //! PassManager —— 面向 AI Agent 的抗量子密码管理器。
 //!
-//! - `PassManager`：打开管理界面（TUI）。
-//! - `PassManager unlock` / `PassManager trust <主机>`：只弹出对应对话框。
+//! - `PassManager`：打开管理界面（TUI，只在单机模式；服务器和已注册的客户端只用网页管理）。
+//! - `PassManager unlock` / `PassManager trust <主机>`：只弹出对应对话框（同样只在单机模式）。
 //! - `PassManager mcp`：MCP 服务器（供 AI Agent 使用）。
 //! - `PassManager list|http|ssh|scp`：CLI（输出 JSON，供 AI Agent 使用）。
 //! - `sudo PassManager install`：一键安装。
@@ -51,7 +51,7 @@ struct Cli {
 enum Cmd {
     /// 解锁库（单机：弹出解锁对话框，完成后退出；服务器：root 用设备密钥解锁）
     Unlock,
-    /// 信任主机的新指纹（SSH 主机重装或自签证书更换后使用）
+    /// 信任主机的新指纹（单机模式；服务器和已注册的客户端请在网页的"主机指纹"页信任）
     Trust {
         /// 主机名（如 db1.example.com，清除该主机所有端口的记录）、*.domain 批量，或 host:port 只清除一个端口
         pattern: String,
@@ -732,10 +732,18 @@ fn run_cli() -> ExitCode {
     if auto_update_before(&cli.cmd) && !server_mode() {
         self_update::before_run();
     }
+    // 服务器和已注册的客户端没有 TUI：管理只在网页上做（单机模式照常打开 TUI）
+    let server = server_mode();
+    if opens_tui(&cli.cmd, server)
+        && let Some(msg) = no_tui_reason(server, remote::enrolled().as_deref())
+    {
+        eprintln!("{msg}");
+        return ExitCode::FAILURE;
+    }
     match cli.cmd {
         None => pm_tui::run(pm_tui::Mode::Full),
         Some(Cmd::QrDecode) => qr_decode_child(),
-        Some(Cmd::Unlock) if server_mode() => server::lock(true),
+        Some(Cmd::Unlock) if server => server::lock(true),
         Some(Cmd::Unlock) => pm_tui::run(pm_tui::Mode::Unlock),
         Some(Cmd::Trust { pattern }) => pm_tui::run(pm_tui::Mode::Trust(pattern)),
         Some(Cmd::Install { user, client_user, yes, password_stdin, no_fix }) => {
@@ -955,6 +963,33 @@ fn auto_update_before(cmd: &Option<Cmd>) -> bool {
     ) || matches!(cmd, Some(Cmd::GitProxy { install: false, uninstall: false, .. }))
 }
 
+/// 这条命令会不会打开 TUI：不带子命令、`trust`，以及非服务器上的 `unlock`（服务器上是 root 用设备密钥解锁）。
+fn opens_tui(cmd: &Option<Cmd>, server: bool) -> bool {
+    match cmd {
+        // 完整界面与信任对话框
+        None | Some(Cmd::Trust { .. }) => true,
+        // 解锁对话框只在非服务器上出现
+        Some(Cmd::Unlock) => !server,
+        _ => false,
+    }
+}
+
+/// 不能打开 TUI 时显示的说明：服务器模式和已注册的客户端都只用网页管理；单机模式返回 None（照常打开 TUI）。
+/// `client` 是本机注册的服务器主机名（见 `remote::enrolled`）。
+fn no_tui_reason(server: bool, client: Option<&str>) -> Option<String> {
+    // 两种情况共用的信任指纹说明
+    let pins = "主机重装或证书更换后，在网页的\"主机指纹\"页信任新指纹。";
+    if server {
+        Some(format!(
+            "服务器模式没有 TUI，管理请用网页：以 root 运行 passmanager login 取一次性登录链接（在自己的电脑上可以用 passmanager web）。{pins}"
+        ))
+    } else {
+        client.map(|s| {
+            format!("这台机器已注册到 PassManager 服务器 {s}，没有本机 TUI，管理请用服务器的网页：运行 passmanager web 打开。{pins}")
+        })
+    }
+}
+
 /// 本机是否为服务器模式（install.json 有 server 配置）。
 fn server_mode() -> bool {
     cfg!(target_os = "linux")
@@ -968,6 +1003,35 @@ fn server_mode() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn opens_tui_only_for_tui_commands() {
+        let cmd = |argv: &[&str]| Cli::try_parse_from(argv).unwrap_or_else(|e| panic!("{argv:?}: {e}")).cmd;
+        // 不带子命令和 trust：任何模式下都会打开 TUI
+        for server in [false, true] {
+            assert!(opens_tui(&cmd(&["PassManager"]), server));
+            assert!(opens_tui(&cmd(&["PassManager", "trust", "db1.example.com"]), server));
+        }
+        // unlock：非服务器是 TUI 对话框，服务器上是设备密钥解锁
+        assert!(opens_tui(&cmd(&["PassManager", "unlock"]), false));
+        assert!(!opens_tui(&cmd(&["PassManager", "unlock"]), true));
+        // 其他命令都不打开 TUI
+        for argv in [&["PassManager", "status"][..], &["PassManager", "login"], &["PassManager", "web"], &["PassManager", "mcp"]] {
+            assert!(!opens_tui(&cmd(argv), false) && !opens_tui(&cmd(argv), true), "{argv:?}");
+        }
+    }
+
+    #[test]
+    fn no_tui_on_server_or_enrolled_client() {
+        // 单机模式：照常打开 TUI
+        assert_eq!(no_tui_reason(false, None), None);
+        // 服务器：指向 passmanager login 和网页"主机指纹"页
+        let s = no_tui_reason(true, None).unwrap();
+        assert!(s.contains("passmanager login") && s.contains("主机指纹"), "{s}");
+        // 已注册的客户端：写出服务器名，指向 passmanager web
+        let c = no_tui_reason(false, Some("pm.example.com")).unwrap();
+        assert!(c.contains("pm.example.com") && c.contains("passmanager web") && c.contains("主机指纹"), "{c}");
+    }
 
     #[test]
     fn auto_update_only_before_client_commands() {

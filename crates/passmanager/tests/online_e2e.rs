@@ -368,6 +368,20 @@ fn lan_server_end_to_end() {
     assert_eq!(https(&env, "POST", "/entries/echo", Some(&cookie), Some(&del)).status, 303);
     assert_eq!(https(&env, "GET", "/entries/echo/edit", Some(&cookie), None).body.matches("••••••••").count(), 1);
 
+    // ---- 服务器模式没有 TUI：信任新指纹只能在网页"主机指纹"页做 ----
+    for args in [&[][..], &["trust", "127.0.0.1"]] {
+        let o = env.run(args);
+        assert!(!o.status.success() && stderr(&o).contains("服务器模式没有 TUI") && stderr(&o).contains("主机指纹"), "{}", stderr(&o));
+    }
+    // root 会话（本机 socket）发 TrustPins：拒绝
+    let mut root = Client::connect_at(&env.home.join("run/passmanager.sock"), &Hello::Root { v: PROTO_V }).unwrap();
+    let e = root.call(&Request::TrustPins { pattern: "127.0.0.1".into() }).unwrap_err();
+    assert!(e.code == "FORBIDDEN" && e.message.contains("web UI"), "{}: {}", e.code, e.message);
+    // 网页：要 CSRF，带上之后照常清除
+    assert_eq!(https(&env, "POST", "/pins/trust", Some(&cookie), Some("csrf=wrong&pattern=127.0.0.1")).status, 403);
+    let r = https(&env, "POST", "/pins/trust", Some(&cookie), Some(&format!("csrf={csrf}&pattern=127.0.0.1")));
+    assert_eq!(r.status, 303, "网页信任");
+
     // ---- Agent：MCP lookup 与 http（经双层通道），结果脱敏 ----
     let echo = echo_server();
     let out = mcp(
@@ -386,6 +400,12 @@ fn lan_server_end_to_end() {
     assert!(o.status.success() && stdout(&o).contains("echo"), "{}", stdout(&o));
     let o = env.agent_cmd(&["status"]).output().unwrap();
     assert!(stdout(&o).contains("双层加密"), "{}", stdout(&o));
+    // 已注册的客户端没有本机 TUI：不带参数、trust、unlock 都拒绝，并指向服务器的网页
+    for args in [&[][..], &["trust", "127.0.0.1"], &["unlock"]] {
+        let o = env.agent_cmd(args).stdin(Stdio::null()).output().unwrap();
+        let e = stderr(&o);
+        assert!(!o.status.success() && e.contains("已注册到 PassManager 服务器 pm.test") && e.contains("passmanager web"), "{args:?}: {e}");
+    }
 
     // ---- 客户端自动更新：开发构建的客户端不检查也不被替换；开发构建的服务器不提供更新 ----
     assert!(!env.agent_dir.join("update-check").exists(), "开发构建的客户端运行前不检查更新");

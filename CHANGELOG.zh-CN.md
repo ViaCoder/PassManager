@@ -4,6 +4,21 @@
 
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.3.11-rc.24] - 2026-11-22
+
+### 变更
+
+- **服务器和注册到它的客户端没有 TUI。** 局域网服务器上，不带子命令的 `PassManager` 和 `PassManager trust` 不再启动，
+  而是提示用网页管理（root 运行 `passmanager login`）。已注册的客户端上，`PassManager`、`trust` 和 `unlock` 同样不再启动，
+  提示运行 `passmanager web`。单机安装保留 TUI。改动之前，服务器上的 `trust` 会打开一个要口令的 TUI，而服务器模式从不接受口令，
+  所以它不可能成功。
+- **服务器模式下指纹变化只能在网页上信任。** 服务以服务器模式运行时只接受网页会话发来的 `TrustPins`，root 命令行和旧版 TUI
+  会得到 `FORBIDDEN`。`HOST_KEY_CHANGED` 的错误信息和 `Next:` 行改为让用户去网页的"主机指纹"页，不再提 `PassManager trust`。
+
+### 升级
+
+- 不需要迁移。服务器换成这个版本并重新运行 `agent-bundle.sh` 后，0.3.11-rc.23 的客户端会自己更新。
+
 ## [0.3.11-rc.23] - 2026-11-20
 
 ### 新增

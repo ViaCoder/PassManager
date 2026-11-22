@@ -183,7 +183,7 @@ MCP 服务器为 stdio、按行分隔的 JSON-RPC 2.0，支持协议版本 2025-
 | `NO_CREDENTIAL` | 该主机没有保存密钥；Next：在服务器上导入，秘密只经过管道（`… \| ssh root@<服务器> passmanager import …`） |
 | `AMBIGUOUS` | 该主机有多个密钥，列出引用名供指定 |
 | `UNKNOWN_CREDENTIAL` | 指定的引用名不存在 |
-| `HOST_KEY_CHANGED` | SSH 主机密钥 / 自签证书指纹变化，**未发送任何数据**：`Ask the user to run: PassManager trust <主机>` |
+| `HOST_KEY_CHANGED` | SSH 主机密钥 / 自签证书指纹变化，**未发送任何数据**：单机模式 `Ask the user to run: PassManager trust <主机>`；服务器模式：在网页的"主机指纹"页信任 |
 | `AUTH_FAILED` / `AUTH_REJECTED` / `UPSTREAM_ERROR` / `BAD_REQUEST` / `FORBIDDEN` | 其他错误 |
 
 ### 5.3 输出脱敏
@@ -195,6 +195,7 @@ MCP 服务器为 stdio、按行分隔的 JSON-RPC 2.0，支持协议版本 2025-
 - 首次连接自动记录（按 `host:port`）：SSH 记录主机密钥（`SHA256:…`），自签证书记录证书 SubjectPublicKeyInfo 的 SHA-256。
 - 指纹变化时在**认证之前 / TLS 握手阶段**中止，不发送任何认证数据，记入"待确认"列表，返回 `HOST_KEY_CHANGED`。
 - 用户运行 `PassManager trust db1.example.com`（不需要端口，清除该主机所有端口的记录；`*.example.com` 可批量；也可写 `host:port` 只清除一个端口）：弹出只做这一件事的对话框，显示新旧指纹，输入口令后确认，程序自动退出。该命令要求真实 TTY 且不在 Agent 会话中。
+- 服务器模式没有 TUI，也没有 `trust` 命令：程序直接拒绝，服务端也只接受网页会话发来的 `TrustPins`，用户在网页的"主机指纹"页（`/pins`）信任新指纹，root 命令行同样不行。已注册的客户端也没有 TUI，会提示用 `passmanager web`。
 
 ---
 
@@ -217,7 +218,7 @@ MCP 服务器为 stdio、按行分隔的 JSON-RPC 2.0，支持协议版本 2025-
 ## 7. 易用性
 
 - 一键安装：Linux/macOS `sudo ./PassManager install`；Windows 双击 `PassManager.exe`（弹出一次 UAC）。安装程序复制程序到只有 root 可写的路径（Linux `/usr/local/bin`；macOS `/Library/PassManager`，再链接到 `/usr/local/bin`，因为很多 Mac 上 `/usr/local/bin` 归用户所有；Windows `C:\Program Files\PassManager`）、创建服务账户、生成并按最高可用等级封存设备密钥、注册并启动服务、执行账户加固、设置口令（确认"没有恢复机制"、显示强度）、最后打开 TUI。
-- TUI 按需运行、用完即退（解锁状态由服务保持，空闲 15 分钟退出）：`PassManager`（完整界面）、`PassManager unlock`、`PassManager trust <主机>`。键盘与鼠标都可用：单击选中、双击编辑、滚轮滚动、标签页 / 按钮栏 / 对话框按钮可点击、支持粘贴（多行私钥）。
+- TUI 只在单机模式下有（服务器和注册到它的客户端用网页管理），按需运行、用完即退（解锁状态由服务保持，空闲 15 分钟退出）：`PassManager`（完整界面）、`PassManager unlock`、`PassManager trust <主机>`。键盘与鼠标都可用：单击选中、双击编辑、滚轮滚动、标签页 / 按钮栏 / 对话框按钮可点击、支持粘贴（多行私钥）。
 - 五个标签页：条目、主机、Agent 接入、诊断、设置（空闲自动锁定时长，默认 12 小时；修改口令；立即锁定）。
 - Agent 接入页自动检测 Claude Code（优先 `claude mcp add`）、Codex CLI、Cursor、Gemini CLI、VS Code、Windsurf，一键接入：为该 Agent 新建专用令牌，合并写入其 MCP 配置（先备份原文件，只增加 `passmanager` 一项）。其他 Agent 显示可复制的配置片段（令牌只显示一次）。
 

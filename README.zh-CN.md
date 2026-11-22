@@ -37,6 +37,8 @@ PassManager unlock                  # 开机后解锁一次
 PassManager trust db1.example.com   # 主机重装或证书更换后信任新指纹（*.example.com 可批量）
 ```
 
+这三个命令只在单机模式下有。局域网服务器和注册到它的客户端没有 TUI，一切都在网页上管理（客户端运行 `passmanager web`，服务器上 root 运行 `passmanager login`），指纹变化在网页的"主机指纹"页信任。
+
 每个条目只需要**密钥**（API 密钥、口令或 SSH 私钥）和**域名**（如 `api.github.com`、`*.example.com`、`10.0.0.5`）。
 
 在"Agent 接入"页选中你的 Agent，按回车即可接入（为它生成专用令牌并写入 MCP 配置）。其他 Agent 可复制：

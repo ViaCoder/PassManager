@@ -260,6 +260,20 @@ pub fn unenroll() -> ExitCode {
     ExitCode::SUCCESS
 }
 
+/// 这台机器是否已注册到服务器：返回服务器主机名；配置存在但读不出来时也算已注册（返回提示文字）；没有配置返回 None。
+pub fn enrolled_in(d: &Path) -> Option<String> {
+    // 有 remote.toml 就是客户端，不管内容是否完整
+    load_in(d).map(|r| r.map(|c| c.server).unwrap_or_else(|_| "（remote.toml 无法读取）".into()))
+}
+
+/// 本机是否为已注册的客户端（测试布局：设置了 PASSMANAGER_HOME 而没有 PASSMANAGER_CONFIG_DIR 时不算，同 `connect_if_configured`）。
+pub fn enrolled() -> Option<String> {
+    if std::env::var_os("PASSMANAGER_HOME").is_some() && std::env::var_os("PASSMANAGER_CONFIG_DIR").is_none() {
+        return None;
+    }
+    enrolled_in(&dir())
+}
+
 /// 本机已注册的服务器（`主机:端口`），用于 `passmanager show` 的公开说明。
 pub fn connected_server() -> Option<String> {
     match load_in(&dir()) {
@@ -333,6 +347,20 @@ mod tests {
         let mut c3 = c.to_toml();
         c3.push_str("connect_addr = \"nope\"\n");
         assert!(RemoteConfig::parse(&c3).is_err());
+    }
+
+    #[test]
+    fn enrolled_in_needs_only_remote_toml() {
+        let dir = tempfile::tempdir().unwrap();
+        // 没有 remote.toml：不是客户端
+        assert_eq!(enrolled_in(dir.path()), None);
+        // 合法的配置：返回服务器主机名
+        let c = RemoteConfig { server: "pm.example.com".into(), port: 8443, fingerprint: [7u8; 48], connect_addr: None, ca_file: None };
+        std::fs::write(dir.path().join(CONFIG_FILE), c.to_toml()).unwrap();
+        assert_eq!(enrolled_in(dir.path()).as_deref(), Some("pm.example.com"));
+        // 坏掉的配置：仍算已注册（不能因此退回本机 TUI）
+        std::fs::write(dir.path().join(CONFIG_FILE), "not toml [").unwrap();
+        assert!(enrolled_in(dir.path()).is_some_and(|s| s.contains("remote.toml")));
     }
 
     #[test]

@@ -624,6 +624,10 @@ impl Shared {
             }
             // 两步验证同样只属于网页管理：Agent、本机 TUI 与 root 命令行都拿不到验证码，也不能导入或删除。
             _ if req.is_otp() && !otp_session_ok(session) => Err(err("FORBIDDEN", "two-factor accounts are only available in the web UI")),
+            // 服务器模式：信任新指纹只能在网页"主机指纹"页做；root 命令行和旧版 TUI 都不行。
+            _ if matches!(req, Request::TrustPins { .. }) && !trust_session_ok(server, session) => {
+                Err(err("FORBIDDEN", "in server mode new fingerprints can only be trusted in the web UI (Host fingerprints page)"))
+            }
             // 服务器模式：密钥只写不读；没有口令；令牌只能通过注册码经双层加密通道发放。
             _ if server && matches!(req, Request::Reveal { .. }) => Err(err("FORBIDDEN", "secrets are write-only in server mode")),
             _ if server && matches!(req, Request::ChangePassword { .. }) => Err(err("BAD_REQUEST", "server mode has no password")),
@@ -1597,12 +1601,9 @@ impl Shared {
             );
         }
         let host = host_port.rsplit_once(':').map(|(h, _)| h).unwrap_or(host_port);
-        err(
-            "HOST_KEY_CHANGED",
-            format!(
-                "The {what} fingerprint of {host_port} changed (old {old}, new {new}). Nothing was sent. If the host was reinstalled, ask the user to run: PassManager trust {host}"
-            ),
-        )
+        // 怎样信任取决于模式：服务器模式只在网页上，单机模式用 TUI
+        let hint = trust_hint(self.online.is_some(), host);
+        err("HOST_KEY_CHANGED", format!("The {what} fingerprint of {host_port} changed (old {old}, new {new}). Nothing was sent. {hint}"))
     }
 
     async fn do_http(&self, method: &str, url: &str, headers: &[(String, String)], body: Option<&str>) -> R {
@@ -2065,6 +2066,23 @@ fn otp_session_ok(session: &Session) -> bool {
     matches!(session, Session::Web)
 }
 
+/// 谁可以信任新指纹（清除旧记录）：服务器模式只有网页会话；单机模式还有本机 TUI（Agent 在第一道检查就被拒）。
+fn trust_session_ok(server: bool, session: &Session) -> bool {
+    // 网页会话在任何模式下都可以
+    matches!(session, Session::Web) || !server
+}
+
+/// 指纹变化时附在错误里的做法：服务器模式只能在网页"主机指纹"页信任，单机模式用 `PassManager trust <主机>`。
+fn trust_hint(server: bool, host: &str) -> String {
+    if server {
+        // 服务器模式没有 TUI，也不接受 root 命令行信任
+        "If the host was reinstalled, ask the user to check and trust the new fingerprint on the Host fingerprints page of the PassManager web UI.".into()
+    } else {
+        // 单机模式：本机 TUI 的信任对话框
+        format!("If the host was reinstalled, ask the user to run: PassManager trust {host}")
+    }
+}
+
 /// 账户的公开信息（没有种子）。
 fn otp_view(a: &pm_vault::OtpAccount) -> OtpView {
     OtpView {
@@ -2316,6 +2334,23 @@ mod otp_tests {
             assert!(r.is_otp() && !r.is_usage(), "{r:?}");
         }
         assert!(!Request::ShowEntry { name: "a".into() }.is_otp());
+    }
+
+    #[test]
+    fn trust_only_in_web_ui_in_server_mode() {
+        // 服务器模式：只有网页会话能信任新指纹
+        assert!(trust_session_ok(true, &Session::Web));
+        for s in [Session::Root, Session::Admin { ready: true }, Session::Agent] {
+            assert!(!trust_session_ok(true, &s));
+        }
+        // 单机模式：本机 TUI（Admin）照常可以
+        assert!(trust_session_ok(false, &Session::Admin { ready: true }));
+        // 信任不是使用类请求：Agent 在任何模式下都在第一道检查被拒
+        assert!(!Request::TrustPins { pattern: "a".into() }.is_usage());
+        // 提示：服务器模式指向网页且不出现命令，单机模式给出命令
+        let s = trust_hint(true, "db1.example.com");
+        assert!(s.contains("web UI") && s.contains("Host fingerprints") && !s.contains("PassManager trust"), "{s}");
+        assert!(trust_hint(false, "db1.example.com").ends_with("PassManager trust db1.example.com"));
     }
 
     #[test]

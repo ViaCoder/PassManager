@@ -183,7 +183,7 @@ The MCP server speaks newline-delimited JSON-RPC 2.0 over stdio, supports protoc
 | `NO_CREDENTIAL` | No secret is stored for this host; Next: import it on the server without displaying it (`… \| ssh root@<server> passmanager import …`) |
 | `AMBIGUOUS` | This host has several secrets; their reference names are listed |
 | `UNKNOWN_CREDENTIAL` | The given reference name does not exist |
-| `HOST_KEY_CHANGED` | SSH host key / self-signed certificate fingerprint changed, **nothing was sent**: `Ask the user to run: PassManager trust <host>` |
+| `HOST_KEY_CHANGED` | SSH host key / self-signed certificate fingerprint changed, **nothing was sent**: stand-alone `Ask the user to run: PassManager trust <host>`; server mode: trust it on the Host fingerprints page of the web UI |
 | `AUTH_FAILED` / `AUTH_REJECTED` / `UPSTREAM_ERROR` / `BAD_REQUEST` / `FORBIDDEN` | Other errors |
 
 ### 5.3 Output redaction
@@ -195,6 +195,7 @@ For each secret, variants are generated: the raw value, the value with whitespac
 - Recorded automatically on first connection (per `host:port`): the SSH host key (`SHA256:…`), or the SHA-256 of a self-signed certificate's SubjectPublicKeyInfo.
 - When a fingerprint changes, the connection is aborted **before authentication / during the TLS handshake**, no credentials are sent, the change is added to a "pending" list, and `HOST_KEY_CHANGED` is returned.
 - The user runs `PassManager trust db1.example.com` (no port needed; it clears the records for all ports of that host; `*.example.com` works in bulk; `host:port` clears just one port). A single-purpose dialog shows the old and new fingerprints, the user enters the password and confirms, and the program exits. The command requires a real TTY and refuses to run inside an agent session.
+- In server mode there is no TUI and no `trust` command: the server refuses it, and accepts `TrustPins` only from a web session, so the user trusts the new fingerprint on the Host fingerprints page (`/pins`) of the web UI. Root's command line cannot do it either. Enrolled clients have no TUI as well and point to `passmanager web`.
 
 ---
 
@@ -217,7 +218,7 @@ User mode (`install --user`, the fallback without administrator rights) has no a
 ## 7. Usability
 
 - One-step install: Linux/macOS `sudo ./PassManager install`; Windows: double-click `PassManager.exe` (one UAC prompt). The installer copies the program to a path only root can write (Linux `/usr/local/bin`; macOS `/Library/PassManager`, linked into `/usr/local/bin`, because `/usr/local/bin` belongs to the user on many Macs; Windows `C:\Program Files\PassManager`), creates the service account, generates the device key and seals it at the highest available level, registers and starts the service, hardens the account, sets the password (confirming "no recovery", showing strength), and finally opens the TUI.
-- The TUI runs on demand and exits when done (the service keeps the unlocked state; the TUI exits after 15 idle minutes): `PassManager` (full UI), `PassManager unlock`, `PassManager trust <host>`. Keyboard and mouse both work: click to select, double-click to edit, scroll with the wheel, click tabs / button bars / dialog buttons, and paste (multi-line private keys).
+- The TUI exists only in stand-alone mode (a server and its enrolled clients are managed in the web UI). It runs on demand and exits when done (the service keeps the unlocked state; the TUI exits after 15 idle minutes): `PassManager` (full UI), `PassManager unlock`, `PassManager trust <host>`. Keyboard and mouse both work: click to select, double-click to edit, scroll with the wheel, click tabs / button bars / dialog buttons, and paste (multi-line private keys).
 - Five tabs: entries, hosts, agents, diagnostics, settings (idle auto-lock, 12 hours by default; change password; lock now).
 - The agents tab detects Claude Code (preferring `claude mcp add`), Codex CLI, Cursor, Gemini CLI, VS Code, and Windsurf and connects them in one step: it creates a dedicated token for that agent and merges it into the agent's MCP configuration (backing up the original file first and adding only the `passmanager` entry). For other agents it shows a configuration snippet to copy (the token is shown only once).
 

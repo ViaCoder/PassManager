@@ -39,6 +39,8 @@ PassManager unlock                  # unlock once after boot
 PassManager trust db1.example.com   # trust a new fingerprint after a host reinstall or certificate change (*.example.com works too)
 ```
 
+These three commands exist only in stand-alone mode. A LAN server and its enrolled clients have no TUI: everything is managed in the web UI (`passmanager web` on a client, `passmanager login` as root on the server), and a changed fingerprint is trusted on its Host fingerprints page.
+
 Each entry needs only a **secret** (API key, password, or SSH private key) and **domains** (such as `api.github.com`, `*.example.com`, `10.0.0.5`).
 
 On the "Agent 接入" (Agents) tab, select your agent and press Enter to connect it: PassManager creates a dedicated token and writes the MCP configuration. For other agents, copy:

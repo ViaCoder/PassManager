@@ -125,9 +125,14 @@ pub fn next_step(code: &str, server: Option<&str>) -> Option<String> {
                         field); never into other text, a prompt or an ssh command. Do not try other positions."
             .into(),
         "LOCKED" | "NOT_READY" => "tell the user PassManager is not available (the message says why). Do not retry.".into(),
-        "HOST_KEY_CHANGED" => {
-            "tell the user the server's key or certificate changed; they must verify and trust it. Do not retry or work around it.".into()
-        }
+        // 经服务器工作时只能在网页上信任；单机模式的做法在错误信息里（PassManager trust）
+        "HOST_KEY_CHANGED" => match server {
+            Some(_) => "tell the user the target's key or certificate changed; they must check it and trust the new fingerprint on \
+                        the Host fingerprints page of the PassManager web UI. Do not retry or work around it."
+                .into(),
+            None => "tell the user the server's key or certificate changed; they must verify and trust it. Do not retry or work around it."
+                .into(),
+        },
         "AUTH_REJECTED" | "AUTH_FAILED" | "BAD_CREDENTIAL" => {
             "the target rejected the stored credential. Do not retry and do not try other names; tell the user which target \
              rejected it."
@@ -635,6 +640,10 @@ mod tests {
         assert!(next_step("NO_TANG", Some("pm.example.com")).unwrap().contains("root on pm.example.com"));
         assert!(next_step("ALIAS_ONLY", None).unwrap().contains("alias://") && next_step("UNKNOWN_ALIAS", None).is_some());
         assert!(next_step("PLACEMENT", None).unwrap().contains("Do not try other positions"));
+        // 指纹变化：注册了服务器时指向网页"主机指纹"页，不出现命令
+        let h = next_step("HOST_KEY_CHANGED", Some("pm.example.com")).unwrap();
+        assert!(h.contains("Host fingerprints page") && h.contains("web UI") && !h.contains("PassManager trust"), "{h}");
+        assert!(next_step("HOST_KEY_CHANGED", None).unwrap().contains("verify and trust"));
         assert!(next_step("INTERNAL", None).is_none());
     }
 
