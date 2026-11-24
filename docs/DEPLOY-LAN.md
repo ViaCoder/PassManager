@@ -310,6 +310,23 @@ The server needs an entry bound to that host: a single-value PAT, or a multi-fie
 entry's domains is forwarded, redirects are not followed, and the token is injected on the server only. The path token is stored in
 the config directory (0600) so other local programs cannot borrow the proxy.
 
+### 3.4 SSH hosts reached through the client's network
+
+Some hosts are out of the server's reach but reachable from the agent machine (for example, only on the agent machine's network).
+Mark such a host on the web UI's Host fingerprints page as reached through the client (`host` or `host:port`). From then on, `ssh`
+and `scp` to it use a TCP connection made by the requesting client: the client connects to the target from its own network, opens
+a second double-encrypted connection to the server with the same token, and copies bytes between the two. The SSH handshake, the
+host key check and authentication still run end to end on the server; the client only relays SSH's own encrypted data and never
+sees passwords, key signatures or command output.
+
+The host key of such a host is never trusted on first use, and a changed key is never accepted automatically (the entry's
+auto-accept option does not apply): on the first connection the server only reads the host key and sends no authentication, the
+agent gets `HOST_KEY_UNCONFIRMED`, and the fingerprint waits on the Host fingerprints page. Check it on that host
+(`ssh-keygen -lf /etc/ssh/ssh_host_ecdsa_key.pub`) and press Trust; the server records exactly the fingerprint shown. The client
+connects only to the request's own first hop (the jump host, or the target when there is none), so the server cannot use it to
+reach other addresses. Hosts with an alias cannot be used this way, because the client must know the real address. A client that
+cannot relay (a process older than the server) gets `RELAY_UNAVAILABLE`, and the server does not fall back to a direct connection.
+
 ## 4. TPM (L3)
 
 `/dev/tpmrm0` is auto-detected. A software TPM exposed as a swtpm Unix socket can be configured with `--tpm-socket <path>`.

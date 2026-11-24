@@ -87,7 +87,7 @@ impl Service {
     }
 
     fn agent(&self, token: &str) -> Result<Client, ApiError> {
-        Client::connect_at(&self.socket(), &Hello::Token { v: PROTO_V, token: token.into() })
+        Client::connect_at(&self.socket(), &Hello::Token { v: PROTO_V, token: token.into(), dial: false })
     }
 }
 
@@ -570,7 +570,7 @@ fn end_to_end() {
     {
         let us = std::os::unix::net::UnixStream::connect(svc.socket()).unwrap();
         let ctl = us.try_clone().unwrap();
-        let mut waiting = Client::connect_stream(us, &Hello::Token { v: PROTO_V, token: tok.token.clone() }).unwrap();
+        let mut waiting = Client::connect_stream(us, &Hello::Token { v: PROTO_V, token: tok.token.clone(), dial: false }).unwrap();
         let url = format!("https://127.0.0.1:{}/hang", tls.port);
         let call = std::thread::spawn(move || {
             let headers = vec![("Authorization".into(), "Bearer {{secret}}".into())];

@@ -25,7 +25,24 @@ pub const MAX_FILE: usize = 64 * 1024 * 1024;
 #[serde(tag = "auth", rename_all = "snake_case")]
 pub enum Hello {
     /// Agent（MCP / CLI）：访问令牌，只能执行"使用类"操作。
-    Token { v: u32, token: String },
+    /// `dial`：这个客户端能按服务器的要求，从自己的网络连接 SSH 主机并转发字节（见 [`DialAsk`]）。
+    /// 旧客户端不发这个字段（读作 false），服务器就不会要它转发；旧服务器忽略这个字段。
+    Token {
+        v: u32,
+        token: String,
+        #[serde(default)]
+        dial: bool,
+    },
+    /// 经客户端网络转发的数据连接：同一个访问令牌 + 服务器在 [`DialAsk`] 里给的一次性票据。
+    /// 握手确认后，这条连接只承载客户端与 SSH 主机之间的原始字节（SSH 自己的加密，客户端看不到内容）。
+    /// `error` 非空：客户端没能连上目标（或拒绝了这个要求），服务器不再等这张票据，连接随即关闭。
+    Dial {
+        v: u32,
+        token: String,
+        ticket: String,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        error: String,
+    },
     /// TUI：口令，可执行管理操作；库处于锁定状态时同时完成解锁。
     Password { v: u32, password: String },
     /// 首次设置口令（仅当库尚不存在时有效；系统模式下仅接受 root/管理员）。
@@ -296,6 +313,16 @@ pub enum Request {
     TrustPins {
         pattern: String,
     },
+    /// 经客户端网络连接的 SSH 主机（只限网页），返回 [`ViaClientView`] 列表。
+    ViaClientHosts,
+    /// 加一台经客户端网络连接的 SSH 主机：`host` 写成 `host` 或 `host:port`（默认 22）。只限网页。
+    AddViaClientHost {
+        host: String,
+    },
+    /// 去掉一台经客户端网络连接的主机（`host:port`）。只限网页。
+    RemoveViaClientHost {
+        host_port: String,
+    },
     Tokens,
     CreateToken {
         label: String,
@@ -351,6 +378,19 @@ impl Request {
     /// 等待回复时不设读超时：上游 HTTP 请求不限时（Agent 断开时服务器取消它）。
     pub fn waits_unbounded(&self) -> bool {
         matches!(self, Request::Http { .. })
+    }
+
+    /// SSH 类请求（ssh / scp 上传 / scp 下载）的目标；只有它们可能经客户端网络连接。
+    pub fn ssh_target(&self) -> Option<&str> {
+        match self {
+            Request::Ssh { target, .. } | Request::Upload { target, .. } | Request::Download { target, .. } => Some(target),
+            _ => None,
+        }
+    }
+
+    /// 管理"经客户端网络连接的主机"的请求：只有网页会话能用。
+    pub fn is_via_client_admin(&self) -> bool {
+        matches!(self, Request::ViaClientHosts | Request::AddViaClientHost { .. } | Request::RemoveViaClientHost { .. })
     }
 
     /// 是否允许令牌会话（Agent）执行。
@@ -656,7 +696,40 @@ pub struct PendingPinView {
     pub old_fingerprint: String,
     pub new_fingerprint: String,
     pub seen_at: u64,
+    /// 新指纹的算法（经客户端网络看到的主机，信任时直接记下它）。
+    #[serde(default)]
+    pub algo: String,
+    /// 经客户端网络看到的指纹：信任时记下表中的新指纹（不会再首次信任）；`old_fingerprint` 为空表示首次。
+    #[serde(default)]
+    pub via_client: bool,
 }
+
+/// 一台经客户端网络连接的 SSH 主机。
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ViaClientView {
+    pub host_port: String,
+    pub added: u64,
+}
+
+/// 服务器在一个 SSH 类请求处理到一半时发给客户端的一帧（`{"dial": {...}}`）：
+/// 请从你的网络连接 `host:port`，再用同一个令牌和这个票据开一条 [`Hello::Dial`] 连接，在两者之间转发字节。
+/// 只发给握手时声明了 `dial` 的客户端；客户端只接受请求本身的目标（见 `passmanager` 的检查）。
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct DialAsk {
+    pub ticket: String,
+    pub host: String,
+    pub port: u16,
+}
+
+/// 服务器 → 客户端：转发要求。
+#[derive(Serialize, Deserialize, Debug)]
+pub struct DialFrame {
+    pub dial: DialAsk,
+}
+
+/// 客户端执行转发要求的回调：参数是正在等回复的请求和服务器的要求。回调自己开 [`Hello::Dial`] 连接
+/// （成功时转发，失败时带上原因），原来的连接上不回任何内容：服务器处理请求期间只写不读这条连接。
+pub type Dialer = Box<dyn FnMut(&Request, &DialAsk) + Send>;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct TokenView {
@@ -825,6 +898,8 @@ pub type LongWait = Box<dyn Fn(bool) -> std::io::Result<()> + Send>;
 pub struct Client {
     stream: Box<dyn Rw>,
     long_wait: Option<LongWait>,
+    /// 执行服务器转发要求的回调（只有远程客户端有，见 [`Client::with_dialer`]）。
+    dialer: Option<Dialer>,
 }
 
 /// 注册握手的回复。
@@ -898,7 +973,7 @@ impl Client {
         let hello_bytes = serde_json::to_vec(hello).map_err(|e| ApiError::new("INTERNAL", e.to_string()))?;
         let ack = write_frame(&mut stream, &hello_bytes).and_then(|_| read_frame(&mut stream));
         match ack {
-            Ok(_) => Ok(Self { stream, long_wait: None }),
+            Ok(_) => Ok(Self { stream, long_wait: None, dialer: None }),
             Err(_) => Err(match hello {
                 Hello::Token { .. } => ApiError::new(
                     "AUTH_FAILED",
@@ -914,6 +989,7 @@ impl Client {
                     "服务拒绝了 root 管理会话：需要以 root 在服务器本机运行，且服务处于服务器模式（passmanager init）。",
                 ),
                 Hello::Enroll { .. } => ApiError::new("ENROLL_FAILED", "注册失败。"),
+                Hello::Dial { .. } => ApiError::new("DIAL_REJECTED", "the server did not accept the relay connection"),
             }),
         }
     }
@@ -921,6 +997,12 @@ impl Client {
     /// 设置读超时开关（网络连接）：之后不限时的请求（见 [`Request::waits_unbounded`]）等待回复时不设读超时。
     pub fn with_long_wait(mut self, f: LongWait) -> Self {
         self.long_wait = Some(f);
+        self
+    }
+
+    /// 设置转发回调：服务器要求经这台客户端的网络连接 SSH 主机时调用（握手时须声明 `dial: true`）。
+    pub fn with_dialer(mut self, f: Dialer) -> Self {
+        self.dialer = Some(f);
         self
     }
 
@@ -938,11 +1020,26 @@ impl Client {
         out
     }
 
+    /// 执行一个转发要求。没有回调的客户端（本机 socket、测试）握手时没有声明 `dial`，服务器不会发来；
+    /// 万一收到就不理它，服务器等不到转发连接会自己超时并回复错误。
+    fn on_dial(&mut self, req: &Request, ask: &DialAsk) {
+        if let Some(d) = self.dialer.as_mut() {
+            d(req, ask);
+        }
+    }
+
     /// 发送一个请求并读取它的回复。
     fn exchange(&mut self, req: &Request) -> Result<Value, ApiError> {
         let bytes = serde_json::to_vec(req).map_err(|e| ApiError::new("INTERNAL", e.to_string()))?;
         write_frame(&mut self.stream, &bytes).map_err(|e| ApiError::new("DISCONNECTED", e.to_string()))?;
-        let resp = read_frame(&mut self.stream).map_err(|e| ApiError::new("DISCONNECTED", e.to_string()))?;
+        let resp = loop {
+            let frame = read_frame(&mut self.stream).map_err(|e| ApiError::new("DISCONNECTED", e.to_string()))?;
+            // 服务器要求经这台客户端的网络连接 SSH 主机：照做（或回报失败），然后继续等这个请求的回复
+            match serde_json::from_slice::<DialFrame>(&frame) {
+                Ok(f) => self.on_dial(req, &f.dial),
+                Err(_) => break frame,
+            }
+        };
         let resp: Response = serde_json::from_slice(&resp).map_err(|e| ApiError::new("INTERNAL", e.to_string()))?;
         if resp.ok {
             Ok(resp.data.unwrap_or(Value::Null))
@@ -1062,6 +1159,15 @@ mod tests {
         assert!(matches!(e, Hello::Enroll { ref code, ref host, .. } if code == "abc" && host.is_empty()));
         let t: Hello = serde_json::from_str(r#"{"auth":"token","v":1,"token":"pm_x"}"#).unwrap();
         assert!(matches!(t, Hello::Token { .. }));
+        // 旧客户端不发 dial：读作 false，服务器不会要它转发
+        assert!(matches!(t, Hello::Token { dial: false, .. }));
+        let t: Hello = serde_json::from_str(r#"{"auth":"token","v":1,"token":"pm_x","dial":true}"#).unwrap();
+        assert!(matches!(t, Hello::Token { dial: true, .. }));
+        // 转发连接的握手
+        let d = Hello::Dial { v: 1, token: "pm_x".into(), ticket: "t1".into(), error: String::new() };
+        assert_eq!(serde_json::to_string(&d).unwrap(), r#"{"auth":"dial","v":1,"token":"pm_x","ticket":"t1"}"#);
+        let d: Hello = serde_json::from_str(r#"{"auth":"dial","v":1,"token":"pm_x","ticket":"t1","error":"refused"}"#).unwrap();
+        assert!(matches!(d, Hello::Dial { ref error, .. } if error == "refused"));
         assert!(serde_json::from_str::<Hello>(r#"{"auth":"admin","v":1}"#).is_err());
     }
 
@@ -1081,6 +1187,95 @@ mod tests {
         }
         let r: Request = serde_json::from_str(r#"{"op":"login_link"}"#).unwrap();
         assert!(matches!(r, Request::LoginLink));
+    }
+
+    #[test]
+    fn ssh_target_and_via_client_admin() {
+        // 三种 SSH 类请求都给出目标，其他请求没有
+        let ssh = Request::Ssh { target: "a>root@h".into(), command: "true".into() };
+        assert_eq!(ssh.ssh_target(), Some("a>root@h"));
+        let up = Request::Upload { target: "u@h:2222".into(), path: "/p".into(), data_base64: String::new() };
+        assert_eq!(up.ssh_target(), Some("u@h:2222"));
+        assert_eq!(Request::Download { target: "h".into(), path: "/p".into() }.ssh_target(), Some("h"));
+        assert_eq!(Request::Status.ssh_target(), None);
+        // 管理经客户端连接的主机：只属于网页，不是 Agent 能用的操作
+        for r in [
+            Request::ViaClientHosts,
+            Request::AddViaClientHost { host: "h".into() },
+            Request::RemoveViaClientHost { host_port: "h:22".into() },
+        ] {
+            assert!(r.is_via_client_admin() && !r.is_usage(), "{r:?}");
+        }
+        assert!(!ssh.is_via_client_admin() && !Request::TrustPins { pattern: "h".into() }.is_via_client_admin());
+    }
+
+    /// 能在测试里取回客户端写出内容的管道。
+    struct SharedPipe {
+        input: std::io::Cursor<Vec<u8>>,
+        output: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+    }
+    impl Read for SharedPipe {
+        fn read(&mut self, b: &mut [u8]) -> std::io::Result<usize> {
+            self.input.read(b)
+        }
+    }
+    impl Write for SharedPipe {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            self.output.lock().unwrap().extend_from_slice(b);
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// 把写出的字节切成帧。
+    fn frames(mut b: &[u8]) -> Vec<Vec<u8>> {
+        let mut out = vec![];
+        while b.len() >= 4 {
+            let n = u32::from_be_bytes(b[..4].try_into().unwrap()) as usize;
+            out.push(b[4..4 + n].to_vec());
+            b = &b[4 + n..];
+        }
+        out
+    }
+
+    #[test]
+    fn dial_frames_are_handled_before_the_reply() {
+        use std::sync::{Arc, Mutex};
+        // 服务端脚本：握手确认，两个转发要求，然后这个请求的回复
+        let mut v = framed(r#"{"ok":true}"#);
+        v.extend(framed(r#"{"dial":{"ticket":"t1","host":"h.example.com","port":22}}"#));
+        v.extend(framed(r#"{"dial":{"ticket":"t2","host":"h.example.com","port":2222}}"#));
+        v.extend(framed(r#"{"ok":true,"data":7}"#));
+        let out = Arc::new(Mutex::new(Vec::new()));
+        let pipe = SharedPipe { input: std::io::Cursor::new(v), output: out.clone() };
+        // 回调：记下每个要求和当时的请求目标
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let rec = seen.clone();
+        let hello = Hello::Token { v: 1, token: "pm_x".into(), dial: true };
+        let mut c = Client::connect_stream(pipe, &hello).unwrap().with_dialer(Box::new(move |req: &Request, ask: &DialAsk| {
+            rec.lock().unwrap().push((req.ssh_target().unwrap_or_default().to_string(), ask.clone()));
+        }));
+        let req = Request::Ssh { target: "root@h.example.com".into(), command: "true".into() };
+        // 转发要求不当作回复：最终拿到的是真正的回复
+        assert_eq!(c.call(&req).unwrap(), serde_json::json!(7));
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 2);
+        assert_eq!(seen[0].0, "root@h.example.com");
+        assert_eq!(seen[1].1, DialAsk { ticket: "t2".into(), host: "h.example.com".into(), port: 2222 });
+        // 原来的连接上只写了握手和请求：转发要求不在这里回复
+        assert_eq!(frames(&out.lock().unwrap()).len(), 2);
+
+        // 没有回调的客户端：不理转发要求，照样拿到回复
+        let mut v = framed(r#"{"ok":true}"#);
+        v.extend(framed(r#"{"dial":{"ticket":"t3","host":"h","port":22}}"#));
+        v.extend(framed(r#"{"ok":false,"code":"UPSTREAM_ERROR","message":"x"}"#));
+        let out = Arc::new(Mutex::new(Vec::new()));
+        let mut c =
+            Client::connect_stream(SharedPipe { input: std::io::Cursor::new(v), output: out.clone() }, &Hello::Root { v: 1 }).unwrap();
+        assert_eq!(c.call(&req).unwrap_err().code, "UPSTREAM_ERROR");
+        assert_eq!(frames(&out.lock().unwrap()).len(), 2);
     }
 
     /// 内存中的双向管道，模拟服务端行为。

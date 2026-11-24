@@ -536,6 +536,30 @@ mod tests {
         let back = format::decode_payload(&v6).unwrap();
         assert_eq!(back.otp, p.otp);
         assert_eq!((back.managed_certs.len(), back.relay.len(), back.aliases.len()), (1, 1, 1));
+        // v6 的字节与 rc.22–rc.24 写出的完全相同（当时直接序列化七个字段的 Payload）。
+        let old6 = PayloadV6 {
+            entries: p.entries.clone(),
+            pins: vec![],
+            settings: p.settings.clone(),
+            aliases: p.aliases.clone(),
+            relay: p.relay.clone(),
+            managed_certs: p.managed_certs.clone(),
+            otp: p.otp.clone(),
+        };
+        assert_eq!(&v6[9..9 + postcard::to_allocvec(&old6).unwrap().len()], postcard::to_allocvec(&old6).unwrap().as_slice());
+        // 有经客户端网络连接的主机：写 v7，读回主机和其余字段；查询按 host:port 精确匹配。
+        p.via_client.push(ViaClientHost { host_port: "198.51.100.5:22".into(), added: 3 });
+        let v7 = format::encode_payload(&p).unwrap();
+        assert_eq!(&v7[4..9], format::PAYLOAD_V7_MAGIC);
+        let back = format::decode_payload(&v7).unwrap();
+        assert_eq!(back.via_client, p.via_client);
+        assert_eq!((back.otp.len(), back.managed_certs.len(), back.relay.len(), back.aliases.len()), (1, 1, 1, 1));
+        assert!(
+            back.via_client_host("198.51.100.5:22") && !back.via_client_host("198.51.100.5:2222") && !back.via_client_host("198.51.100.5")
+        );
+        // 主机去掉后回到 v6，rc.24 仍能打开。
+        p.via_client.clear();
+        assert_eq!(&format::encode_payload(&p).unwrap()[4..9], format::PAYLOAD_V6_MAGIC);
         // 账户删除后回到 v5。
         p.otp.clear();
         assert_eq!(&format::encode_payload(&p).unwrap()[4..9], format::PAYLOAD_V5_MAGIC);
@@ -891,7 +915,7 @@ mod tests {
         assert_eq!(auto_name(&d(&["*.github.com"]), &["github.com"]), "github.com-2");
         assert_eq!(auto_name(&d(&["*.github.com"]), &["github.com", "github.com-2"]), "github.com-3");
         assert_eq!(auto_name(&d(&["::1"]), &[]), "--1");
-        assert_eq!(auto_name(&d(&["10.0.0.5"]), &[]), "10.0.0.5");
+        assert_eq!(auto_name(&d(&["198.51.100.5"]), &[]), "198.51.100.5");
         assert!(validate_name("secret").is_err());
     }
 

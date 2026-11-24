@@ -12,6 +12,8 @@
 //! - 输出与下载内容全部脱敏。
 //! - 跳板：目标写成 `跳板>目标`（各自是 `[<引用名>/]user@host[:port]`，只支持一级）。先用跳板自己的凭据登录跳板，
 //!   再经跳板的 direct-tcpip 通道与目标做完整的 SSH 握手与认证：目标的主机密钥照常核对，跳板只转发密文。
+//! - 经客户端网络（网页上设置的主机，见 `dial.rs`）：发起请求的客户端替服务器建立 TCP 连接，SSH 握手、
+//!   主机密钥核对与认证仍在这里端到端完成。主机密钥必须已经确认过：不首次信任，也不自动接受变化。
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -127,7 +129,42 @@ impl Target {
 pub struct Checker {
     expected: Option<String>,
     accept_change: bool,
+    /// 经客户端网络：没有记录时不首次信任，记录不一致时不自动接受。
+    strict: bool,
     observed: Arc<Mutex<Option<(String, String)>>>,
+}
+
+/// 主机密钥能否继续：已记录时必须一致（条目允许时可自动接受变化）；没有记录时首次信任。`strict`（经客户端）时两者都不行。
+fn key_ok(expected: Option<&str>, fp: &str, accept_change: bool, strict: bool) -> bool {
+    match expected {
+        // 首次见到：直连时记下，经客户端时不信任
+        None => !strict,
+        // 已记录：一致，或允许自动接受变化（经客户端时不允许）
+        Some(e) => e == fp || (accept_change && !strict),
+    }
+}
+
+/// 连接失败后，如果是因为主机密钥被拒，给出对应的结果（未确认 / 已变化）；否则 None（普通的连接错误）。
+fn rejected_key(expected: Option<&str>, observed: Option<(String, String)>, auto_accept: bool, strict: bool) -> Option<Connected> {
+    // 握手没走到主机密钥那一步：不是密钥的问题
+    let (algo, fp) = observed?;
+    match expected {
+        // 经客户端、没有记录：等用户在网页上确认
+        None if strict => Some(Connected::Unconfirmed { algo, observed: fp }),
+        // 已记录但不一致，并且没有（或不允许）自动接受
+        Some(exp) if exp != fp && (strict || !auto_accept) => Some(Connected::PinMismatch { algo, observed: fp }),
+        _ => None,
+    }
+}
+
+/// 经哪里连到目标。
+pub enum Via<'a> {
+    /// 服务器直接连。
+    Direct,
+    /// 经已认证的跳板会话；名称（`host:port`）用于错误信息。
+    Jump(&'a Handle<Checker>, &'a str),
+    /// 经发起请求的客户端的网络：客户端送来的转发连接（只承载 SSH 自己加密的字节）。
+    Client(crate::dial::DialStream),
 }
 
 fn fingerprint(k: &PublicKey) -> (String, String) {
@@ -142,18 +179,27 @@ impl client::Handler for Checker {
             PublicKeyOrCertificate::PublicKey { key, .. } => fingerprint(key),
             PublicKeyOrCertificate::Certificate(c) => fingerprint(&PublicKey::from(c.public_key().clone())),
         };
-        let ok = match &self.expected {
-            None => true,
-            Some(e) => *e == fp || self.accept_change,
-        };
+        let ok = key_ok(self.expected.as_deref(), &fp, self.accept_change, self.strict);
         *self.observed.lock().unwrap() = Some((algo, fp));
         Ok(ok)
     }
 }
 
 pub enum Connected {
-    Session { handle: Handle<Checker>, observed: Option<(String, String)> },
-    PinMismatch { observed: String },
+    Session {
+        handle: Handle<Checker>,
+        observed: Option<(String, String)>,
+    },
+    /// 主机密钥和记录不一致（没有发送任何认证数据）。
+    PinMismatch {
+        algo: String,
+        observed: String,
+    },
+    /// 经客户端网络、还没有确认过的主机密钥（没有发送任何认证数据）。
+    Unconfirmed {
+        algo: String,
+        observed: String,
+    },
 }
 
 /// 一次 SSH 会话：目标会话，以及经跳板时仍需保持的跳板会话。
@@ -168,21 +214,29 @@ impl Session {
     }
 }
 
-/// 连接并认证。`expected_pin` 为已记录的主机密钥指纹；`via` 为已认证的跳板会话及其名称（`host:port`，用于错误信息）时，
-/// 经跳板的 direct-tcpip 通道连接目标。
-pub async fn connect_on(t: &Target, expected_pin: Option<String>, via: Option<(&Handle<Checker>, &str)>) -> Result<Connected, ApiErr> {
+/// 连接并认证。`expected_pin` 为已记录的主机密钥指纹；`via` 见 [`Via`]：经跳板时走跳板的 direct-tcpip 通道，
+/// 经客户端时走客户端送来的转发连接（严格核对主机密钥）。
+pub async fn connect_on(t: &Target, expected_pin: Option<String>, via: Via<'_>) -> Result<Connected, ApiErr> {
+    let strict = matches!(via, Via::Client(_));
     let observed = Arc::new(Mutex::new(None));
-    let checker = Checker { expected: expected_pin.clone(), accept_change: t.auto_accept, observed: observed.clone() };
+    let checker = Checker { expected: expected_pin.clone(), accept_change: t.auto_accept, strict, observed: observed.clone() };
     let config = Arc::new(client_config());
-    let through = via.map(|(_, name)| format!(" via {name}")).unwrap_or_default();
-    let open = async {
+    // 错误信息里说明走的是哪条路
+    let through = match &via {
+        Via::Direct => String::new(),
+        Via::Jump(_, name) => format!(" via {name}"),
+        Via::Client(_) => " via the client's network".to_string(),
+    };
+    let open = async move {
         match via {
-            None => client::connect(config, (t.host.as_str(), t.port), checker).await,
-            Some((jump, _)) => {
+            Via::Direct => client::connect(config, (t.host.as_str(), t.port), checker).await,
+            Via::Jump(jump, _) => {
                 // 跳板替我们连到目标的 TCP 端口；之后的 SSH 握手、主机密钥核对与认证都在这条通道里端到端完成。
                 let ch = jump.channel_open_direct_tcpip(t.host.clone(), u32::from(t.port), "127.0.0.1", 0).await?;
                 client::connect_stream(config, ch.into_stream(), checker).await
             }
+            // 客户端已经连上目标的 TCP 端口；它只转发字节，SSH 握手同样在这里端到端完成。
+            Via::Client(stream) => client::connect_stream(config, stream, checker).await,
         }
     };
     let conn = tokio::time::timeout(CONNECT_TIMEOUT, open).await;
@@ -190,11 +244,9 @@ pub async fn connect_on(t: &Target, expected_pin: Option<String>, via: Option<(&
         Err(_) => return Err(err("UPSTREAM_ERROR", format!("SSH connection to {}{through} timed out", t.host_port()))),
         Ok(Err(e)) => {
             let obs = observed.lock().unwrap().clone();
-            if let (Some((_, fp)), Some(exp)) = (&obs, &expected_pin)
-                && fp != exp
-                && !t.auto_accept
-            {
-                return Ok(Connected::PinMismatch { observed: fp.clone() });
+            // 因为主机密钥被拒：交给调用方记进"待确认"；否则是普通的连接错误
+            if let Some(c) = rejected_key(expected_pin.as_deref(), obs, t.auto_accept, strict) {
+                return Ok(c);
             }
             return Err(err("UPSTREAM_ERROR", format!("SSH connection to {}{through} failed: {e}", t.host_port())));
         }
@@ -557,6 +609,35 @@ mod tests {
         assert!(parse_target("u@host:abc").is_err());
         assert!(parse_target("u@").is_err());
         assert!(parse_target("u@a>b").is_err());
+    }
+
+    #[test]
+    fn host_keys_via_the_client_are_never_trusted_on_first_use() {
+        // 直连：首次信任；一致可以；不一致只有条目允许时才接受
+        assert!(key_ok(None, "SHA256:a", false, false));
+        assert!(key_ok(Some("SHA256:a"), "SHA256:a", false, false));
+        assert!(!key_ok(Some("SHA256:a"), "SHA256:b", false, false));
+        assert!(key_ok(Some("SHA256:a"), "SHA256:b", true, false));
+        // 经客户端：首次不信任，不一致时即使条目允许也不接受，一致才行
+        assert!(!key_ok(None, "SHA256:a", false, true));
+        assert!(!key_ok(Some("SHA256:a"), "SHA256:b", true, true));
+        assert!(key_ok(Some("SHA256:a"), "SHA256:a", true, true));
+    }
+
+    #[test]
+    fn rejected_keys_become_pending_results() {
+        let seen = || Some(("ecdsa-sha2-nistp384".to_string(), "SHA256:b".to_string()));
+        // 经客户端、没有记录：未确认，带上算法与指纹
+        assert!(matches!(rejected_key(None, seen(), false, true),
+            Some(Connected::Unconfirmed { ref algo, ref observed }) if algo == "ecdsa-sha2-nistp384" && observed == "SHA256:b"));
+        // 不一致：直连（不允许自动接受）和经客户端（允许也不行）都是已变化
+        assert!(matches!(rejected_key(Some("SHA256:a"), seen(), false, false), Some(Connected::PinMismatch { .. })));
+        assert!(matches!(rejected_key(Some("SHA256:a"), seen(), true, true), Some(Connected::PinMismatch { .. })));
+        // 直连且允许自动接受、直连首次、一致、或握手没走到主机密钥：都不是密钥的问题
+        assert!(rejected_key(Some("SHA256:a"), seen(), true, false).is_none());
+        assert!(rejected_key(None, seen(), false, false).is_none());
+        assert!(rejected_key(Some("SHA256:b"), seen(), false, true).is_none());
+        assert!(rejected_key(Some("SHA256:a"), None, false, true).is_none());
     }
 
     #[test]

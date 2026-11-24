@@ -97,6 +97,58 @@ pub fn connect(t: &Target, server: &ServerPublic) -> Result<InnerStream<TlsStrea
     InnerStream::connect(s, server, &e)
 }
 
+/// 异步版的 [`connect`]：建立同样的双层加密会话，但返回一条可以同时读写的流（`AsyncRead + AsyncWrite`）。
+/// 经客户端网络转发 SSH 时用它：SSH 字节双向同时流动，阻塞式的 [`InnerStream`] 一次只能做一个方向。
+/// 外层策略（混合后量子组、AES-256-GCM、内层 ALPN）与内层握手和阻塞版完全一样。
+pub async fn connect_async(t: &Target, server: &ServerPublic) -> Result<tokio::io::DuplexStream, InnerError> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    // 地址：测试时用指定的地址，否则只解析 IPv4（和阻塞版相同）
+    let addrs = match t.connect_addr {
+        Some(a) => vec![a],
+        None => resolve_ipv4(&t.host, t.port)?,
+    };
+    // 依次尝试每个地址，每个最多等 CONNECT_TIMEOUT
+    let mut last = io::Error::new(io::ErrorKind::NotFound, "no address");
+    let mut tcp = None;
+    for a in addrs {
+        match tokio::time::timeout(CONNECT_TIMEOUT, tokio::net::TcpStream::connect(a)).await {
+            Ok(Ok(s)) => {
+                tcp = Some(s);
+                break;
+            }
+            Ok(Err(e)) => last = e,
+            Err(_) => last = io::Error::new(io::ErrorKind::TimedOut, "connect timed out"),
+        }
+    }
+    let tcp = tcp.ok_or(last)?;
+    // 小包立即发出（SSH 交互式的往返），并打开 keepalive 发现断网
+    let _ = tcp.set_nodelay(true);
+    let _ = crate::keepalive(&tcp);
+    // 外层 TLS：同一份客户端配置（只信任公共根证书或测试 CA）
+    let cfg = tls::client_config(t.extra_ca_pem.as_deref()).map_err(io_err)?;
+    let name = ServerName::try_from(t.host.clone()).map_err(io_err)?;
+    let mut s = tokio_rustls::TlsConnector::from(cfg).connect(name, tcp).await?;
+    // 协商结果必须符合策略，否则不做内层握手
+    let conn = s.get_ref().1;
+    let group = conn.negotiated_key_exchange_group().map(|g| g.name());
+    let suite = conn.negotiated_cipher_suite().map(|c| c.suite());
+    if !tls::negotiated_ok(group, suite) || conn.alpn_protocol() != Some(tls::ALPN_INNER) {
+        return Err(io::Error::new(io::ErrorKind::PermissionDenied, "TLS negotiation does not meet the post-quantum policy").into());
+    }
+    // 内层握手绑定这条 TLS 连接（exporter），转发到别的 TLS 连接上会失败
+    let exporter = conn.export_keying_material([0u8; EXPORTER_LEN], EXPORTER_LABEL, None).map_err(io_err)?;
+    let (hs, msg) = inner::ClientHandshake::start(server)?;
+    s.write_all(&msg).await?;
+    s.flush().await?;
+    let mut reply = [0u8; inner::SERVER_REPLY_LEN];
+    s.read_exact(&mut reply).await?;
+    let (session, tag_c) = hs.finish(&reply, &exporter)?;
+    s.write_all(&tag_c).await?;
+    s.flush().await?;
+    // 包装成双向流：一个任务解密收到的帧，另一个加密要发的数据（与服务端同一个实现）
+    Ok(inner::server::wrap(s, session))
+}
+
 /// 返回一个开关，调整这条会话流的读超时：`true` 时不设读超时（上游 HTTP 请求不限时，
 /// 服务器宕机或断网由 keepalive 发现），`false` 时恢复为 [`IO_TIMEOUT`]。
 pub fn read_timeout_control(s: &InnerStream<TlsStream>) -> io::Result<Box<dyn Fn(bool) -> io::Result<()> + Send>> {

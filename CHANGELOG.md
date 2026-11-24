@@ -4,6 +4,32 @@ English | [简体中文](CHANGELOG.zh-CN.md)
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.3.11-rc.26] - 2026-11-24
+
+### Added
+
+- **SSH through the client's network.** Hosts that the server cannot reach but an agent machine can are marked on the web
+  UI's Host fingerprints page (`host` or `host:port`). For `ssh` and `scp` to such a host, the server asks the requesting client
+  to connect to it: the client opens the TCP connection from its own network, opens a second double-encrypted connection to
+  the server with the same token and a single-use ticket, and copies bytes between the two. The SSH handshake, the host key
+  check and authentication still run end to end on the server, so the client only relays SSH's encrypted data and never sees
+  passwords, key signatures or output. The client connects only to the request's own first hop. Only the web UI can mark
+  hosts; root's command line, the TUI and agents cannot.
+- New error codes `HOST_KEY_UNCONFIRMED` (a host reached through the client whose host key is not confirmed yet) and
+  `RELAY_UNAVAILABLE` (the client cannot relay, for example an agent process older than the server).
+
+### Changed
+
+- **Host keys seen through a client are confirmed in the web UI, never trusted on first use.** The first connection only
+  reads the host key and sends nothing; the fingerprint waits on the Host fingerprints page, marked as seen through the
+  client. Trusting it records exactly the fingerprint shown. A changed key is handled the same way, and an entry's
+  auto-accept option does not apply to such hosts. Directly reached hosts behave as before.
+
+### Upgrading
+
+- The vault is written as payload v7 only once a host is marked; without one it stays v6 and rc.25 can still open it.
+  Clients must run this release to relay; older agent processes get `RELAY_UNAVAILABLE` for marked hosts until they restart.
+
 ## [0.3.11-rc.25] - 2026-11-22
 
 ### Added

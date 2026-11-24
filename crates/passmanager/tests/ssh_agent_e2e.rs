@@ -195,5 +195,5 @@ fn remote_client(env: &Env) -> Client {
         extra_ca_pem: Some(std::fs::read_to_string(&env.ca).unwrap()),
     };
     let stream = pm_net::client::connect(&target, &public).unwrap();
-    Client::connect_stream(stream, &Hello::Token { v: PROTO_V, token }).unwrap()
+    Client::connect_stream(stream, &Hello::Token { v: PROTO_V, token, dial: false }).unwrap()
 }

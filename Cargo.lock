@@ -2718,7 +2718,7 @@ dependencies = [
 
 [[package]]
 name = "passmanager"
-version = "0.3.11-rc.25"
+version = "0.3.11-rc.26"
 dependencies = [
  "base64 0.22.1",
  "clap",
@@ -2965,7 +2965,7 @@ checksum = "f6b464fbc74e149a392436b17d523f769e057cb6877f6a5c4618bc6f11800548"
 
 [[package]]
 name = "pm-crypto"
-version = "0.3.11-rc.25"
+version = "0.3.11-rc.26"
 dependencies = [
  "argon2 0.5.3",
  "aws-lc-rs",
@@ -2981,7 +2981,7 @@ dependencies = [
 
 [[package]]
 name = "pm-net"
-version = "0.3.11-rc.25"
+version = "0.3.11-rc.26"
 dependencies = [
  "axum",
  "base64 0.22.1",
@@ -3005,7 +3005,7 @@ dependencies = [
 
 [[package]]
 name = "pm-otp"
-version = "0.3.11-rc.25"
+version = "0.3.11-rc.26"
 dependencies = [
  "base64 0.22.1",
  "data-encoding",
@@ -3022,7 +3022,7 @@ dependencies = [
 
 [[package]]
 name = "pm-platform"
-version = "0.3.11-rc.25"
+version = "0.3.11-rc.26"
 dependencies = [
  "base64 0.22.1",
  "hex",
@@ -3038,7 +3038,7 @@ dependencies = [
 
 [[package]]
 name = "pm-proto"
-version = "0.3.11-rc.25"
+version = "0.3.11-rc.26"
 dependencies = [
  "base64 0.22.1",
  "pm-platform",
@@ -3051,7 +3051,7 @@ dependencies = [
 
 [[package]]
 name = "pm-service"
-version = "0.3.11-rc.25"
+version = "0.3.11-rc.26"
 dependencies = [
  "aho-corasick",
  "base64 0.22.1",
@@ -3091,7 +3091,7 @@ dependencies = [
 
 [[package]]
 name = "pm-tui"
-version = "0.3.11-rc.25"
+version = "0.3.11-rc.26"
 dependencies = [
  "pm-crypto",
  "pm-platform",
@@ -3106,7 +3106,7 @@ dependencies = [
 
 [[package]]
 name = "pm-vault"
-version = "0.3.11-rc.25"
+version = "0.3.11-rc.26"
 dependencies = [
  "getrandom 0.3.4",
  "hex",
@@ -3123,7 +3123,7 @@ dependencies = [
 
 [[package]]
 name = "pm-web"
-version = "0.3.11-rc.25"
+version = "0.3.11-rc.26"
 dependencies = [
  "axum",
  "base64 0.22.1",

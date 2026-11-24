@@ -11,6 +11,7 @@
 
 mod agent_instructions;
 mod cli;
+mod dial;
 mod git_proxy;
 mod git_service;
 #[cfg(unix)]

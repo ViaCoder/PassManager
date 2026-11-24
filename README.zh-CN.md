@@ -112,6 +112,9 @@ passmanager show --label laptop                                            # 打
 - **`PassManager run --http <origin>`**（Agent 机器，Unix）：本机程序（OpenAI 兼容的 SDK、CLI、curl）经本机中继调用 HTTPS API；
   服务器按凭据的中继策略（`passmanager relay set`）检查每个请求、加上凭据，把脱敏后的回答流式送回。见
   [docs/DEPLOY-LAN.zh-CN.md](docs/DEPLOY-LAN.zh-CN.md) §3.1.2。
+- **经客户端网络的 SSH**（网页设置）：服务器连不到、Agent 机器连得到的主机，在"主机指纹"页标记出来。对它们的 `ssh`、`scp`
+  由发起请求的客户端建立 TCP 连接并转发 SSH 加密后的字节，握手、主机密钥核对与登录仍在服务器上完成。这类主机的主机密钥
+  在网页上确认，从不首次自动信任。见 [docs/DEPLOY-LAN.zh-CN.md](docs/DEPLOY-LAN.zh-CN.md) §3.4。
 - **托管证书**（服务器，root）：`passmanager cert add` 用服务器的 ACME 账号与 Cloudflare 令牌给别的主机签 Let's Encrypt
   证书，用库里的凭据经 SSH 装上去（文件 0600，安装命令结束后删除），并与服务器自己的证书一起续期。那台主机拿不到令牌。
   见部署说明 §1.3。

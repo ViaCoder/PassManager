@@ -2,7 +2,7 @@
 //!
 //! - 443：网页管理（单层 TLS，见 pm-web）；
 //! - 8443：Agent 通道 = 外层 TLS + 内层 ML-KEM-1024/McEliece 会话，内层包装成 `AsyncRead + AsyncWrite`
-//!   后直接交给现有的 `handle_conn`。网络连接只接受 `Hello::Token` 与 `Hello::Enroll`；
+//!   后直接交给现有的 `handle_conn`。网络连接只接受 `Hello::Token`、`Hello::Dial`（经客户端网络转发 SSH）与 `Hello::Enroll`；
 //!   `Password` / `Setup` / `Root` 一律静默拒绝；来源地址不在允许的网段时连握手都不做。
 
 use std::collections::HashMap;

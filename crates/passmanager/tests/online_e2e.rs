@@ -304,7 +304,7 @@ fn lan_server_end_to_end() {
         Hello::Password { v: PROTO_V, password: "anything".into() },
         Hello::Setup { v: PROTO_V, password: "anything-long".into() },
         Hello::Root { v: PROTO_V },
-        Hello::Token { v: PROTO_V, token: "pm_wrong".into() },
+        Hello::Token { v: PROTO_V, token: "pm_wrong".into(), dial: false },
         Hello::Enroll { v: PROTO_V, code: parsed.code.clone(), host: String::new() },
     ] {
         let stream = pm_net::client::connect(&env.target(), &public).unwrap();
@@ -418,7 +418,7 @@ fn lan_server_end_to_end() {
     let ver = env!("CARGO_PKG_VERSION");
     std::fs::write(ab.join("RELEASE"), format!("{ver} x86_64-unknown-linux-gnu {}\n", hex::encode(pm_crypto::sha256(fake)))).unwrap();
     let stream = pm_net::client::connect(&env.target(), &public).unwrap();
-    let mut c = Client::connect_stream(stream, &Hello::Token { v: PROTO_V, token: token.trim().to_string() }).unwrap();
+    let mut c = Client::connect_stream(stream, &Hello::Token { v: PROTO_V, token: token.trim().to_string(), dial: false }).unwrap();
     let r = c.call(&Request::ClientUpdate { targets: vec!["x86_64-unknown-linux-gnu".into()], have: "0.0.1".into() }).unwrap();
     assert!(r.is_null(), "开发构建的服务器不提供更新：{r}");
     std::fs::remove_dir_all(&ab).unwrap();
@@ -466,5 +466,292 @@ fn lan_server_end_to_end() {
     let _busy = TcpListener::bind(("127.0.0.1", env.web)).unwrap();
     let o = env.run(&["service", "--user"]);
     assert_eq!(o.status.code(), Some(75), "{}", stderr(&o));
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+// ---------- 经客户端网络连接 SSH 主机（服务器连不到、客户端连得到） ----------
+
+const BOX_PW: &str = "ViaClientPw-5d2e!";
+
+/// 测试 SSH 服务器看到的事件（"password 用户"、"exec 命令"）与接受过的 TCP 连接数。
+#[derive(Clone, Default)]
+struct SshLog {
+    events: Arc<std::sync::Mutex<Vec<String>>>,
+    conns: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl SshLog {
+    fn take(&self) -> Vec<String> {
+        std::mem::take(&mut *self.events.lock().unwrap())
+    }
+    fn conns(&self) -> usize {
+        self.conns.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+/// 测试 SSH 服务器：只有口令认证；exec 回显命令。
+struct Box1 {
+    log: SshLog,
+    channels: std::collections::HashMap<russh::ChannelId, russh::Channel<russh::server::Msg>>,
+}
+
+impl russh::server::Handler for Box1 {
+    type Error = russh::Error;
+
+    async fn auth_password(&mut self, u: &str, p: &str) -> Result<russh::server::Auth, Self::Error> {
+        self.log.events.lock().unwrap().push(format!("password {u}"));
+        Ok(if p == BOX_PW { russh::server::Auth::Accept } else { russh::server::Auth::reject() })
+    }
+    async fn channel_open_session(
+        &mut self,
+        channel: russh::Channel<russh::server::Msg>,
+        reply: russh::server::ChannelOpenHandle,
+        _s: &mut russh::server::Session,
+    ) -> Result<(), Self::Error> {
+        self.channels.insert(channel.id(), channel);
+        reply.accept().await;
+        Ok(())
+    }
+    async fn exec_request(
+        &mut self,
+        channel: russh::ChannelId,
+        data: &[u8],
+        session: &mut russh::server::Session,
+    ) -> Result<(), Self::Error> {
+        self.log.events.lock().unwrap().push(format!("exec {}", String::from_utf8_lossy(data)));
+        session.channel_success(channel)?;
+        session.data(channel, format!("target ran: {}\n", String::from_utf8_lossy(data)).into_bytes())?;
+        session.exit_status_request(channel, 0)?;
+        session.eof(channel)?;
+        session.close(channel)?;
+        Ok(())
+    }
+}
+
+/// 在 `port`（0 为随机）上起测试 SSH 服务器，主机密钥取自 `host_key`（OpenSSH 私钥文件）。
+fn ssh_box(rt: &tokio::runtime::Runtime, port: u16, host_key: &Path, log: &SshLog) -> (u16, tokio::task::JoinHandle<()>) {
+    let key = russh::keys::decode_secret_key(&std::fs::read_to_string(host_key).unwrap(), None).unwrap();
+    let cfg = Arc::new(russh::server::Config {
+        keys: vec![key],
+        methods: russh::MethodSet::from(&[russh::MethodKind::Password][..]),
+        auth_rejection_time: Duration::from_millis(10),
+        auth_rejection_time_initial: Some(Duration::from_millis(0)),
+        ..Default::default()
+    });
+    let l = rt.block_on(tokio::net::TcpListener::bind(("127.0.0.1", port))).unwrap();
+    let port = l.local_addr().unwrap().port();
+    let log = log.clone();
+    let task = rt.spawn(async move {
+        loop {
+            let Ok((s, _)) = l.accept().await else { break };
+            log.conns.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let (cfg, h) = (cfg.clone(), Box1 { log: log.clone(), channels: Default::default() });
+            tokio::spawn(async move {
+                if let Ok(r) = russh::server::run_stream(cfg, s, h).await {
+                    let _ = r.await;
+                }
+            });
+        }
+    });
+    (port, task)
+}
+
+/// OpenSSH 主机密钥（ECDSA P-384）与它的 SHA256 指纹。
+fn host_key(dir: &Path, name: &str) -> (PathBuf, String) {
+    let p = dir.join(name);
+    let o = Command::new("ssh-keygen").args(["-q", "-t", "ecdsa", "-b", "384", "-N", "", "-C", "", "-f"]).arg(&p).output().unwrap();
+    assert!(o.status.success(), "{}", stderr(&o));
+    let k = russh::keys::decode_secret_key(&std::fs::read_to_string(&p).unwrap(), None).unwrap();
+    let fp = k.public_key().fingerprint(russh::keys::HashAlg::Sha256).to_string();
+    (p, fp)
+}
+
+#[test]
+fn ssh_via_the_clients_network() {
+    if Command::new("ssh-keygen").arg("-?").output().is_err() {
+        eprintln!("跳过：没有 ssh-keygen");
+        return;
+    }
+    let base = PathBuf::from("/tmp").join(format!("pm-via-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(&base).unwrap();
+    let (cert, key) = pm_net::tls::self_signed(&["pm.test"]);
+    let ca = base.join("ca.pem");
+    std::fs::write(&ca, &cert).unwrap();
+    std::fs::write(base.join("key.pem"), &key).unwrap();
+    let env = Env {
+        home: base.join("server"),
+        agent_dir: base.join("agent"),
+        web: free_port(),
+        agent: free_port(),
+        ca: ca.clone(),
+        ca_pem: cert.clone(),
+    };
+    std::fs::create_dir_all(&env.home).unwrap();
+    let (w, a) = (env.web.to_string(), env.agent.to_string());
+    let o = env.run(&[
+        "init",
+        "--skip-acme",
+        "--no-start",
+        "--domain",
+        "pm.test",
+        "--lan",
+        "127.0.0.1/32",
+        "--bind",
+        "127.0.0.1",
+        "--web-port",
+        &w,
+        "--agent-port",
+        &a,
+        "--acme-directory",
+        "",
+    ]);
+    assert!(o.status.success(), "init: {}{}", stdout(&o), stderr(&o));
+    let o = env.run(&["import-cert", ca.to_str().unwrap(), base.join("key.pem").to_str().unwrap()]);
+    assert!(o.status.success(), "{}", stderr(&o));
+    // 服务日志写进文件（之后检查"经客户端"的记录与有没有泄露口令）
+    let svc_log = base.join("service.log");
+    let mut svc = env.cmd(&["service", "--user"]).stdout(Stdio::null()).stderr(std::fs::File::create(&svc_log).unwrap()).spawn().unwrap();
+    let t0 = Instant::now();
+    while !(TcpStream::connect(("127.0.0.1", env.agent)).is_ok() && TcpStream::connect(("127.0.0.1", env.web)).is_ok()) {
+        assert!(t0.elapsed() < Duration::from_secs(60), "service did not start");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    // 注册客户端
+    let url = stdout(&env.run(&["show", "--label", "laptop", "--url"])).trim().to_string();
+    let addr = format!("127.0.0.1:{a}");
+    let o = env
+        .agent_cmd(&[
+            "enroll",
+            "--no-mcp",
+            "--no-instructions",
+            "--no-git-proxy",
+            "--connect-addr",
+            &addr,
+            "--ca-file",
+            ca.to_str().unwrap(),
+            &url,
+        ])
+        .output()
+        .unwrap();
+    assert!(o.status.success(), "{}{}", stdout(&o), stderr(&o));
+    // 网页登录
+    let link = stdout(&env.run(&["login"])).trim().to_string();
+    let path = link.split_once(&format!("pm.test:{w}")).unwrap().1.to_string();
+    let r = https(&env, "POST", &path, None, Some(""));
+    let cookie = r.header("set-cookie").unwrap().split(';').next().unwrap().strip_prefix("__Host-pm=").unwrap().to_string();
+    let page = https(&env, "GET", "/entries/new", Some(&cookie), None);
+    let i = page.body.find("name=\"csrf\" value=\"").unwrap() + 19;
+    let csrf = page.body[i..].split('"').next().unwrap().to_string();
+
+    // 目标 SSH 服务器与它的口令条目
+    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+    let (k1, fp1) = host_key(&base, "hk1");
+    let (k2, fp2) = host_key(&base, "hk2");
+    let log = SshLog::default();
+    let (port, task) = ssh_box(&rt, 0, &k1, &log);
+    let hp = format!("127.0.0.1:{port}");
+    let target = format!("deploy@{hp}");
+    let form = format!("csrf={csrf}&name=box&domains={}&op_ssh=1&secret={}", enc(&hp), enc(BOX_PW));
+    assert_eq!(https(&env, "POST", "/entries", Some(&cookie), Some(&form)).status, 303);
+    let mut outputs = String::new();
+    // 客户端命令：返回（是否成功, 标准输出 + 标准错误）；调用方把输出记进 outputs 供最后检查
+    let ssh = |args: &[&str]| {
+        let o = env.agent_cmd(args).stdin(Stdio::null()).output().unwrap();
+        (o.status.success(), stdout(&o) + &stderr(&o))
+    };
+
+    // ---- 只能在网页上设置：root 会话被拒；网页要 CSRF ----
+    let mut root = Client::connect_at(&env.home.join("run/passmanager.sock"), &Hello::Root { v: PROTO_V }).unwrap();
+    let e = root.call(&Request::AddViaClientHost { host: hp.clone() }).unwrap_err();
+    assert!(e.code == "FORBIDDEN" && e.message.contains("web UI"), "{}: {}", e.code, e.message);
+    assert_eq!(https(&env, "POST", "/pins/via", Some(&cookie), Some(&format!("csrf=wrong&host={}", enc(&hp)))).status, 403);
+    assert_eq!(https(&env, "POST", "/pins/via", Some(&cookie), Some(&format!("csrf={csrf}&host={}", enc(&hp)))).status, 303);
+    assert!(https(&env, "GET", "/pins", Some(&cookie), None).body.contains(&hp));
+
+    // ---- 第一次经客户端：主机密钥未确认，目标只看到一次 TCP 连接，收不到任何认证 ----
+    let (ok, out) = ssh(&["ssh", &target, "uptime"]);
+    outputs += &out;
+    assert!(!ok && out.contains("HOST_KEY_UNCONFIRMED") && out.contains("Host fingerprints page") && out.contains(&fp1), "{out}");
+    assert_eq!(log.conns(), 1, "客户端替服务器连了一次");
+    assert!(log.take().is_empty(), "主机密钥未确认，目标收不到认证");
+    // 网页：待确认（首次、经客户端），信任后记下的正是这个指纹
+    // 网页转义 `/`（指纹是 base64，常带 `/`）
+    let html = |s: &str| s.replace('/', "&#x2f;");
+    let page = https(&env, "GET", "/pins", Some(&cookie), None).body;
+    assert!(page.contains("首次") && page.contains("经客户端") && page.contains(&html(&fp1)), "{page}");
+    assert_eq!(https(&env, "POST", "/pins/trust", Some(&cookie), Some(&format!("csrf={csrf}&pattern={}", enc(&hp)))).status, 303);
+    let pins: Vec<pm_proto::PinView> = root.call_as(&Request::Pins).unwrap();
+    let pin = pins.iter().find(|p| p.host_port == hp).expect("pin recorded");
+    assert_eq!((pin.algo.as_str(), pin.fingerprint.as_str()), ("ecdsa-sha2-nistp384", fp1.as_str()));
+
+    // ---- 信任后：CLI 与 MCP 都经客户端登录并执行 ----
+    let (ok, out) = ssh(&["ssh", &target, "uptime"]);
+    outputs += &out;
+    assert!(ok && out.contains("target ran: uptime"), "{out}");
+    let ev = log.take();
+    assert!(ev.contains(&"password deploy".to_string()) && ev.contains(&"exec uptime".to_string()), "{ev:?}");
+    assert_eq!(log.conns(), 2);
+    let out = mcp(&env, &[json!({"name": "ssh", "arguments": {"target": target, "command": "id"}})]);
+    let t = tool_text(&out[0]);
+    outputs += &t;
+    assert!(t.contains("target ran: id"), "{t}");
+    assert_eq!(log.conns(), 3);
+    log.take();
+
+    // ---- 不能转发的连接（旧版本客户端）：RELAY_UNAVAILABLE，服务器也没有自己去连 ----
+    let token = std::fs::read_to_string(env.agent_dir.join("token")).unwrap();
+    let parsed = pm_net::enroll::EnrollUrl::parse(&url).unwrap();
+    let public = ServerPublic::from_bundle(&std::fs::read(env.home.join("data/server-keys.pub")).unwrap(), &parsed.fpr).unwrap();
+    let stream = pm_net::client::connect(&env.target(), &public).unwrap();
+    let mut old = Client::connect_stream(stream, &Hello::Token { v: PROTO_V, token: token.trim().to_string(), dial: false }).unwrap();
+    let e = old.call(&Request::Ssh { target: target.clone(), command: "uptime".into() }).unwrap_err();
+    assert_eq!(e.code, "RELAY_UNAVAILABLE", "{}", e.message);
+    assert_eq!(log.conns(), 3, "服务器没有直连");
+
+    // ---- 客户端连不上目标：很快返回 UPSTREAM_ERROR，原因来自客户端 ----
+    let closed = free_port();
+    let hp2 = format!("127.0.0.1:{closed}");
+    let form = format!("csrf={csrf}&name=box2&domains={}&op_ssh=1&secret={}", enc(&hp2), enc(BOX_PW));
+    assert_eq!(https(&env, "POST", "/entries", Some(&cookie), Some(&form)).status, 303);
+    assert_eq!(https(&env, "POST", "/pins/via", Some(&cookie), Some(&format!("csrf={csrf}&host={}", enc(&hp2)))).status, 303);
+    let t0 = Instant::now();
+    let (ok, out) = ssh(&["ssh", &format!("deploy@{hp2}"), "uptime"]);
+    outputs += &out;
+    assert!(!ok && out.contains("UPSTREAM_ERROR") && out.contains(&format!("the client could not connect to {hp2}")), "{out}");
+    assert!(t0.elapsed() < Duration::from_secs(20), "不必等到超时");
+
+    // ---- 主机密钥变化（经客户端）：HOST_KEY_CHANGED，目标收不到认证；信任后记下新指纹 ----
+    task.abort();
+    std::thread::sleep(Duration::from_millis(300));
+    let (_, task2) = ssh_box(&rt, port, &k2, &log);
+    let (ok, out) = ssh(&["ssh", &target, "uptime"]);
+    outputs += &out;
+    assert!(!ok && out.contains("HOST_KEY_CHANGED") && out.contains("client's network") && out.contains(&fp2), "{out}");
+    assert!(log.take().is_empty(), "主机密钥变化后目标收不到认证");
+    assert_eq!(https(&env, "POST", "/pins/trust", Some(&cookie), Some(&format!("csrf={csrf}&pattern={}", enc(&hp)))).status, 303);
+    let (ok, out) = ssh(&["ssh", &target, "uptime"]);
+    outputs += &out;
+    assert!(ok && out.contains("target ran: uptime"), "{out}");
+
+    // ---- 改回直连：服务器自己连，不再经客户端 ----
+    let via_lines = |s: &str| s.matches("ssh via the client's network: ").count();
+    let before = via_lines(&std::fs::read_to_string(&svc_log).unwrap());
+    assert!(before >= 4, "经客户端的每次连接都有记录：{before}");
+    let r = https(&env, "POST", "/pins/via/remove", Some(&cookie), Some(&format!("csrf={csrf}&host_port={}", enc(&hp))));
+    assert_eq!(r.status, 303);
+    let (ok, out) = ssh(&["ssh", &target, "uptime"]);
+    outputs += &out;
+    assert!(ok && out.contains("target ran: uptime"), "{out}");
+    let logtext = std::fs::read_to_string(&svc_log).unwrap();
+    assert_eq!(via_lines(&logtext), before, "直连不经客户端");
+    assert!(logtext.contains(&format!("ssh via the client's network enabled for {hp}")));
+    assert!(logtext.contains(&format!("host key confirmed in the web UI for {hp}")));
+
+    // ---- 口令从不出现在输出与日志里 ----
+    assert!(!outputs.contains(BOX_PW) && !logtext.contains(BOX_PW));
+    drop(task2);
+    svc.kill().unwrap();
+    let _ = svc.wait();
     let _ = std::fs::remove_dir_all(&base);
 }

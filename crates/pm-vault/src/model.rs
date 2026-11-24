@@ -422,6 +422,7 @@ impl From<PayloadV2> for Payload {
             relay: Vec::new(),
             managed_certs: Vec::new(),
             otp: Vec::new(),
+            via_client: Vec::new(),
         }
     }
 }
@@ -445,6 +446,7 @@ impl From<PayloadV3> for Payload {
             relay: Vec::new(),
             managed_certs: Vec::new(),
             otp: Vec::new(),
+            via_client: Vec::new(),
         }
     }
 }
@@ -469,6 +471,7 @@ impl From<PayloadV4> for Payload {
             relay: p.relay,
             managed_certs: Vec::new(),
             otp: Vec::new(),
+            via_client: Vec::new(),
         }
     }
 }
@@ -494,6 +497,7 @@ impl From<PayloadV5> for Payload {
             relay: p.relay,
             managed_certs: p.managed_certs,
             otp: Vec::new(),
+            via_client: Vec::new(),
         }
     }
 }
@@ -522,6 +526,7 @@ impl From<PayloadV1> for Payload {
             relay: Vec::new(),
             managed_certs: Vec::new(),
             otp: Vec::new(),
+            via_client: Vec::new(),
         }
     }
 }
@@ -539,9 +544,52 @@ pub struct Payload {
     pub managed_certs: Vec<crate::managed_cert::ManagedCert>,
     /// 两步验证账户（种子平时不出库，只有网页点"显示密钥"时返回）。v6 新增。
     pub otp: Vec<crate::otp::OtpAccount>,
+    /// 经客户端网络连接的 SSH 主机（服务器连不到、客户端连得到）。v7 新增。
+    pub via_client: Vec<ViaClientHost>,
+}
+
+/// 一台经客户端网络连接的 SSH 主机：服务器请发起请求的客户端替它建立 TCP 连接，
+/// SSH 握手、主机密钥核对与认证仍在服务器上端到端完成，客户端只转发密文。只能在网页上设置。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ViaClientHost {
+    /// `host:port`（主机名已规范化，和主机指纹的写法一样）。
+    pub host_port: String,
+    pub added: u64,
+}
+
+/// v6 载荷（0.3.11-rc.22 起，有两步验证账户时写入），只用于读取：比 v7 少了经客户端连接的主机。
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct PayloadV6 {
+    pub entries: Vec<Entry>,
+    pub pins: Vec<Pin>,
+    pub settings: Settings,
+    pub aliases: Vec<Alias>,
+    pub relay: Vec<crate::relay::RelayPolicy>,
+    pub managed_certs: Vec<crate::managed_cert::ManagedCert>,
+    pub otp: Vec<crate::otp::OtpAccount>,
+}
+
+impl From<PayloadV6> for Payload {
+    fn from(p: PayloadV6) -> Self {
+        Self {
+            entries: p.entries,
+            pins: p.pins,
+            settings: p.settings,
+            aliases: p.aliases,
+            relay: p.relay,
+            managed_certs: p.managed_certs,
+            otp: p.otp,
+            via_client: Vec::new(),
+        }
+    }
 }
 
 impl Payload {
+    /// `host:port` 是否设成了经客户端网络连接。
+    pub fn via_client_host(&self, host_port: &str) -> bool {
+        self.via_client.iter().any(|h| h.host_port == host_port)
+    }
+
     /// 条目的中继策略。
     pub fn relay(&self, entry: &str) -> Option<&crate::relay::RelayPolicy> {
         self.relay.iter().find(|p| p.entry == entry)

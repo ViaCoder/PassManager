@@ -118,7 +118,7 @@ pub fn connect() -> Result<Client, ApiError> {
             "PASSMANAGER_TOKEN is not set. Ask the user to open PassManager → Agent 接入 and connect this agent.",
         ));
     }
-    Client::connect_at(&pm_platform::Layout::detect_client().socket, &Hello::Token { v: PROTO_V, token })
+    Client::connect_at(&pm_platform::Layout::detect_client().socket, &Hello::Token { v: PROTO_V, token, dial: false })
 }
 
 /// scp 风格的远程路径：`[name/]user@host[:port]:/path`（IPv6：`user@[::1]:/path`）。

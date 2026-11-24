@@ -133,6 +133,15 @@ pub fn next_step(code: &str, server: Option<&str>) -> Option<String> {
             None => "tell the user the server's key or certificate changed; they must verify and trust it. Do not retry or work around it."
                 .into(),
         },
+        // 经客户端网络连接的主机：主机密钥不会首次自动信任
+        "HOST_KEY_UNCONFIRMED" => "tell the user this host is reached through their client's network and its SSH host key is not \
+                                   confirmed yet; they must check the fingerprint and trust it on the Host fingerprints page of the \
+                                   PassManager web UI. Do not retry or work around it."
+            .into(),
+        // 主机设成了经客户端连接，但这次的客户端没能转发（旧版本的进程、超时）
+        "RELAY_UNAVAILABLE" => "this host is reached through the network of the machine you run on, and that did not work (see the \
+                                message). Tell the user; do not retry and do not try another route."
+            .into(),
         "AUTH_REJECTED" | "AUTH_FAILED" | "BAD_CREDENTIAL" => {
             "the target rejected the stored credential. Do not retry and do not try other names; tell the user which target \
              rejected it."
@@ -644,6 +653,10 @@ mod tests {
         let h = next_step("HOST_KEY_CHANGED", Some("pm.example.com")).unwrap();
         assert!(h.contains("Host fingerprints page") && h.contains("web UI") && !h.contains("PassManager trust"), "{h}");
         assert!(next_step("HOST_KEY_CHANGED", None).unwrap().contains("verify and trust"));
+        // 经客户端网络连接：首次的主机密钥只能在网页上确认；转发不可用时不重试
+        let u = next_step("HOST_KEY_UNCONFIRMED", Some("pm.example.com")).unwrap();
+        assert!(u.contains("Host fingerprints page") && u.contains("Do not retry"), "{u}");
+        assert!(next_step("RELAY_UNAVAILABLE", None).unwrap().contains("do not retry"));
         assert!(next_step("INTERNAL", None).is_none());
     }
 

@@ -184,6 +184,8 @@ The MCP server speaks newline-delimited JSON-RPC 2.0 over stdio, supports protoc
 | `AMBIGUOUS` | This host has several secrets; their reference names are listed |
 | `UNKNOWN_CREDENTIAL` | The given reference name does not exist |
 | `HOST_KEY_CHANGED` | SSH host key / self-signed certificate fingerprint changed, **nothing was sent**: stand-alone `Ask the user to run: PassManager trust <host>`; server mode: trust it on the Host fingerprints page of the web UI |
+| `HOST_KEY_UNCONFIRMED` | A host reached through the client's network whose host key is not confirmed in the web UI yet, **nothing was sent**: check it and trust it on the Host fingerprints page |
+| `RELAY_UNAVAILABLE` | The host is reached through the client's network, but this client cannot relay (an older process) or did not open the relay connection in time; no fallback to a direct connection |
 | `AUTH_FAILED` / `AUTH_REJECTED` / `UPSTREAM_ERROR` / `BAD_REQUEST` / `FORBIDDEN` | Other errors |
 
 ### 5.3 Output redaction
@@ -196,6 +198,7 @@ For each secret, variants are generated: the raw value, the value with whitespac
 - When a fingerprint changes, the connection is aborted **before authentication / during the TLS handshake**, no credentials are sent, the change is added to a "pending" list, and `HOST_KEY_CHANGED` is returned.
 - The user runs `PassManager trust db1.example.com` (no port needed; it clears the records for all ports of that host; `*.example.com` works in bulk; `host:port` clears just one port). A single-purpose dialog shows the old and new fingerprints, the user enters the password and confirms, and the program exits. The command requires a real TTY and refuses to run inside an agent session.
 - In server mode there is no TUI and no `trust` command: the server refuses it, and accepts `TrustPins` only from a web session, so the user trusts the new fingerprint on the Host fingerprints page (`/pins`) of the web UI. Root's command line cannot do it either. Enrolled clients have no TUI as well and point to `passmanager web`.
+- SSH hosts reached through the client's network (set on the web UI's Host fingerprints page, vault payload v7): while handling the request, the server sends the requesting client a relay request (host, port, a 128-bit single-use ticket bound to the same token, waited for at most 25 s). The client accepts only the request's own first hop, connects to the target from its own network and brings the bytes over a second double-encrypted connection (`Hello::Dial`); the SSH handshake, host key check and authentication still run end to end on the server. Such hosts are never trusted on first use and changes are never accepted automatically: an unconfirmed or changed host key goes to the pending list (marked as via the client), and when the user trusts it in the web UI the server records exactly the fingerprint shown.
 
 ---
 

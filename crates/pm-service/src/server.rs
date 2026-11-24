@@ -2,6 +2,9 @@
 //! 网络连接经双层加密后同样交给这里的 `handle_conn`。
 //!
 //! 每条连接的第一帧必须是握手；失败时随机延迟后直接断开，不返回任何内容（防探测）。
+//!
+//! 经客户端网络连接 SSH 主机（见 `dial.rs`）：声明了 `dial` 的网络 Agent 连接上，SSH 类请求处理期间服务器可以
+//! 往这条连接写 `{"dial": ...}` 帧；客户端另开一条 `Hello::Dial` 连接送来转发的字节。
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -62,9 +65,33 @@ pub(crate) async fn handle_conn<S: AsyncRead + AsyncWrite + Unpin + Send + 'stat
         _ => None,
     };
     let server_mode = shared.online.is_some();
+    // 能替服务器连 SSH 主机的连接：网络上的 Agent，握手时声明了 dial（记下令牌 id，票据只认它）
+    let mut dial_id: Option<String> = None;
     let session = match hello {
-        Some(Hello::Token { v, token }) if v == PROTO_V && token_allowed(&shared, &peer) && shared.verify_token(&token) => {
+        Some(Hello::Token { v, token, dial }) if v == PROTO_V && token_allowed(&shared, &peer) && shared.verify_token(&token) => {
+            if dial && peer.network {
+                dial_id = shared.token_id(&token);
+            }
             Some(Session::Agent)
+        }
+        // 转发连接：只在网络上、令牌有效、票据属于同一个令牌时接受
+        Some(Hello::Dial { v, token, ticket, error }) if v == PROTO_V && peer.network && token_allowed(&shared, &peer) => {
+            let Some(id) = shared.token_id(&token) else {
+                silent_reject().await;
+                return;
+            };
+            if !error.is_empty() {
+                // 客户端没连上目标：把原因交给等待方，连接关闭
+                let _ = shared.dials.deliver(&ticket, &id, Err(crate::dial::clean_reason(&error)));
+                return;
+            }
+            // 先确认（客户端收到后才开始转发），再把这条连接交给等待中的 SSH 连接
+            if shared.dials.has(&ticket, &id) && write_frame(&mut s, br#"{"ok":true}"#).await.is_ok() {
+                let _ = shared.dials.deliver(&ticket, &id, Ok(Box::new(s)));
+                return;
+            }
+            silent_reject().await;
+            return;
         }
         // 网络上只接受令牌与注册；口令、首次设置、root 会话一律静默拒绝。
         Some(Hello::Password { .. } | Hello::Setup { .. } | Hello::Root { .. }) if peer.network => None,
@@ -131,6 +158,24 @@ pub(crate) async fn handle_conn<S: AsyncRead + AsyncWrite + Unpin + Send + 'stat
             },
             // 上游 HTTP 不限时：等待期间同时读这条连接。Agent 断开（或按一问一答本不该来的新帧）时
             // 丢弃这个请求，上游连接随之关闭，服务器上不会留下没人等的请求。
+            // 能转发的连接上的 SSH 类请求：处理期间把转发要求写回这条连接（只写不读，不打乱一问一答）
+            Ok(req) if dial_id.is_some() && req.ssh_target().is_some() => {
+                let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+                let ctx = crate::dial::DialCtx { token_id: dial_id.clone().unwrap_or_default(), asks: tx };
+                let work = crate::dial::DIALER.scope(ctx, shared.dispatch(&session, req));
+                tokio::pin!(work);
+                loop {
+                    tokio::select! {
+                        r = &mut work => break r,
+                        Some(ask) = rx.recv() => {
+                            let frame = serde_json::to_vec(&pm_proto::DialFrame { dial: ask }).unwrap_or_default();
+                            if write_frame(&mut s, &frame).await.is_err() {
+                                return;
+                            }
+                        }
+                    }
+                }
+            }
             Ok(req) if req.waits_unbounded() => {
                 tokio::select! {
                     r = shared.dispatch(&session, req) => r,

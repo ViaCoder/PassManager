@@ -27,6 +27,8 @@ struct Mock {
     otp_reveals: Mutex<u32>,
     /// 中继策略（与服务端一样按条目名整条替换）。
     relays: Mutex<Vec<pm_proto::RelayPolicyView>>,
+    /// 经客户端网络连接的 SSH 主机。
+    via: Mutex<Vec<pm_proto::ViaClientView>>,
 }
 
 type OtpImports = Vec<(Vec<String>, Option<String>, Option<String>)>;
@@ -290,6 +292,20 @@ impl Backend for Mock {
                     let before = l.len();
                     l.retain(|p| p.entry != entry);
                     if l.len() == before { Resp::err("UNKNOWN_CREDENTIAL", "没有中继策略") } else { Resp::ok("deleted") }
+                }
+                Req::ViaClientHosts => Resp::ok(self.via.lock().unwrap().clone()),
+                // 替身：和服务端一样只收 host 或 host:port，默认端口 22
+                Req::AddViaClientHost { host } if host.contains('@') => Resp::err("BAD_REQUEST", "write the host as host or host:port"),
+                Req::AddViaClientHost { host } => {
+                    let host_port = if host.contains(':') { host } else { format!("{host}:22") };
+                    self.via.lock().unwrap().push(pm_proto::ViaClientView { host_port, added: 0 });
+                    Resp::ok("added")
+                }
+                Req::RemoveViaClientHost { host_port } => {
+                    let mut l = self.via.lock().unwrap();
+                    let before = l.len();
+                    l.retain(|v| v.host_port != host_port);
+                    if l.len() == before { Resp::err("UNKNOWN_CREDENTIAL", "not reached through the client") } else { Resp::ok("removed") }
                 }
                 other => Resp::err("FORBIDDEN", format!("unexpected {other:?}")),
             }
@@ -720,6 +736,38 @@ async fn tokens_show_enroll_command_and_revoke() {
     assert!(!r.body.contains("<script") && !r.body.contains("&lt;script"));
 }
 
+/// 主机指纹页：经客户端网络连接的主机，加、列出、改回直连都要会话与 CSRF；错误显示在页面上。
+#[tokio::test]
+async fn via_client_hosts_on_the_pins_page() {
+    let (st, mock) = state();
+    let (cookie, csrf) = login(&st).await;
+    // CSRF 不对：拒绝，不改任何东西
+    let r = send(&st, Method::POST, "/pins/via", Some(&cookie), Some("csrf=wrong&host=db1.example.com"), &[]).await;
+    assert_eq!(r.status, StatusCode::FORBIDDEN);
+    assert!(mock.via.lock().unwrap().is_empty());
+    // 加一台：跳回主机指纹页，提示去确认主机密钥
+    let r = send(&st, Method::POST, "/pins/via", Some(&cookie), Some(&format!("csrf={csrf}&host=db1.example.com")), &[]).await;
+    assert_eq!(r.status, StatusCode::SEE_OTHER);
+    assert_eq!(r.headers.get(header::LOCATION).unwrap(), "/pins?done=via-added");
+    let r = send(&st, Method::GET, "/pins?done=via-added", Some(&cookie), None, &[]).await;
+    assert!(r.body.contains("db1.example.com:22") && r.body.contains("改回直连") && r.body.contains("在本页确认"), "{}", r.body);
+    assert!(r.body.contains(r#"action="/pins/via/remove""#) && r.body.contains(r#"action="/pins/via""#));
+    // 服务端拒绝的写法：错误显示在页面上；空的：提示输入
+    let r = send(&st, Method::POST, "/pins/via", Some(&cookie), Some(&format!("csrf={csrf}&host=root%40db1.example.com")), &[]).await;
+    assert!(r.body.contains("host or host:port"), "{}", r.body);
+    let r = send(&st, Method::POST, "/pins/via", Some(&cookie), Some(&format!("csrf={csrf}&host=")), &[]).await;
+    assert!(r.body.contains("请输入主机"));
+    // 改回直连
+    let r =
+        send(&st, Method::POST, "/pins/via/remove", Some(&cookie), Some(&format!("csrf={csrf}&host_port=db1.example.com%3A22")), &[]).await;
+    assert_eq!(r.headers.get(header::LOCATION).unwrap(), "/pins?done=via-removed");
+    assert!(mock.via.lock().unwrap().is_empty());
+    // 没登录：去登录页，不调用后端
+    let r = send(&st, Method::POST, "/pins/via", None, Some(&format!("csrf={csrf}&host=db2.example.com")), &[]).await;
+    assert_ne!(r.status, StatusCode::OK);
+    assert!(mock.via.lock().unwrap().is_empty());
+}
+
 #[test]
 fn templates_compile_and_civil_date() {
     let env = templates();
@@ -833,7 +881,8 @@ fn every_template_escapes_injected_values() {
             "max_requests_run": P, "max_bytes_run": P, "max_requests_day": P, "max_bytes_day": P},
         "relay_shown": true, "relay_error": P, "relays": {P: [P, P]},
         "tokens": [{"id": P, "label": P, "created": 0, "last_used": 0}], "pending": [{"id": P, "label": P, "expires_in_secs": 70,
-            "kind": P, "host_port": P, "old_fingerprint": P, "new_fingerprint": P, "seen_at": 0}],
+            "kind": P, "host_port": P, "old_fingerprint": P, "new_fingerprint": P, "seen_at": 0, "algo": P, "via_client": true}],
+        "via": [{"host_port": P, "added": 0}],
         "pins": [{"kind": P, "host_port": P, "algo": P, "fingerprint": P, "first_seen": 0}],
         "settings": {"auto_lock_hours": P},
         "a": {"name": P, "issuer": P, "account": P, "kind": P, "alg": P, "digits": 6, "period": 30, "created": 0},

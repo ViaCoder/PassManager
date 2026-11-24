@@ -100,6 +100,32 @@ fn double_layer_roundtrip_and_key_fetch() {
     assert_eq!(split_echo(&got), big);
 }
 
+/// 异步双层连接（经客户端网络转发 SSH 用）：同一个回显服务，读和写可以同时进行；服务端公钥不对时内层握手失败。
+#[test]
+fn async_connect_is_full_duplex() {
+    let s = start_server();
+    let t = target(&s);
+    rt().block_on(async {
+        let c = client::connect_async(&t, &public()).await.unwrap();
+        // 拆成读、写两半，分别放在两个任务里：阻塞式的 InnerStream 做不到这一点
+        let (mut r, mut w) = tokio::io::split(c);
+        let reader = tokio::spawn(async move {
+            let mut b = [0u8; 9];
+            r.read_exact(&mut b).await.unwrap();
+            b
+        });
+        // 读端已经在等的时候再写：回显必须照常到达
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        w.write_all(b"ping").await.unwrap();
+        w.flush().await.unwrap();
+        assert_eq!(&reader.await.unwrap(), b"echo:ping");
+        // 服务端公钥包换成另一把：内层握手认证失败，不会建立会话
+        let other = ServerKeys::generate().unwrap();
+        let wrong = ServerPublic::from_bundle(other.bundle(), &other.fingerprint()).unwrap();
+        assert!(client::connect_async(&t, &wrong).await.is_err());
+    });
+}
+
 #[test]
 fn long_wait_lifts_and_restores_the_read_timeout() {
     let s = start_server();
