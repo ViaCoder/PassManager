@@ -4,6 +4,26 @@ English | [简体中文](CHANGELOG.zh-CN.md)
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.3.11-rc.27] - 2026-11-25
+
+### Changed
+
+- **SSH goes through the client only on an explicit request.** The MCP `ssh` and `scp` tools take `"via_client": true`, and
+  `passmanager ssh` / `scp` take `--via-client`; agents set it only after the user explicitly agrees. Without it the server
+  always connects itself. The protocol carries it as a `via_client` wrapper around the ssh, upload or download request.
+- **Host keys seen through the client are trusted on first use**, the same as for direct connections, and a changed key is
+  refused with `HOST_KEY_CHANGED` as before.
+
+### Removed
+
+- The web UI's list of hosts reached through the client (rc.26) and its confirmation step for first-seen host keys, with the
+  `HOST_KEY_UNCONFIRMED` error code.
+
+### Upgrading
+
+- A vault in which rc.26 marked hosts still opens; the list is no longer used. Clients update themselves; an agent process
+  older than the server gets `RELAY_UNAVAILABLE` for `via_client` requests until it restarts.
+
 ## [0.3.11-rc.26] - 2026-11-24
 
 ### Added

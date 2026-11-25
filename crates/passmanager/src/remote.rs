@@ -118,7 +118,7 @@ pub fn connect_in(d: &Path, cfg: &RemoteConfig) -> Result<Client, ApiError> {
     })?;
     // 上游 HTTP 请求等待回复时不设读超时（拿不到开关时保留 600 秒的读超时，连接照常可用）
     let long = pm_net::client::read_timeout_control(&stream).ok();
-    // dial：服务器连不到、这台机器连得到的 SSH 主机（在网页上设置），由这台机器建立 TCP 连接并转发（见 dial.rs）
+    // dial：服务器连不到、这台机器连得到的 SSH 主机（Agent 显式要求经客户端时），由这台机器建立 TCP 连接并转发（见 dial.rs）
     let c = Client::connect_stream(stream, &Hello::Token { v: PROTO_V, token: token.to_string(), dial: true })?
         .with_dialer(crate::dial::dialer(target, public, token));
     Ok(match long {

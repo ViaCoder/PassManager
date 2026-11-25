@@ -1,4 +1,5 @@
-//! 经客户端网络连接 SSH 主机（服务器连不到、客户端连得到）。
+//! 经客户端网络连接 SSH 主机（服务器连不到、客户端连得到）。只在 Agent 显式要求时（`Request::ViaClient`，
+//! 用户明确同意后才这样做）；没有包装的请求一律由服务器直接连接。
 //!
 //! 1. 请求处理到一半，服务器在原来的 Agent 连接上发一帧 [`DialAsk`]（主机、端口、一次性票据）。
 //! 2. 客户端从自己的网络连上目标，再开一条 Agent 连接，用同一个令牌和这张票据握手（[`pm_proto::Hello::Dial`]）。
@@ -40,8 +41,15 @@ pub(crate) struct DialCtx {
 }
 
 tokio::task_local! {
-    /// 正在处理的请求来自哪条连接（只在能转发的连接上、SSH 类请求期间设置）。
+    /// 正在处理的请求来自哪条连接（只在能转发的连接上、经客户端的请求期间设置）。
     pub(crate) static DIALER: DialCtx;
+    /// Agent 显式要求这个请求经客户端（`Request::ViaClient`，只在处理里面那个请求期间为 true）。
+    pub(crate) static VIA_CLIENT: bool;
+}
+
+/// 这个请求是不是 Agent 显式要求经客户端的。没有包装的请求从不经客户端。
+pub(crate) fn requested() -> bool {
+    VIA_CLIENT.try_with(|v| *v).unwrap_or(false)
 }
 
 /// 等待中的一张票据。
@@ -182,6 +190,7 @@ mod tests {
     async fn request_stream_needs_a_relaying_connection() {
         let d = Dials::default();
         // 不在能转发的连接上：RELAY_UNAVAILABLE，不登记票据
+        assert!(!requested());
         let e = request_stream(&d, "h.example.com", 22).await.err().unwrap();
         assert_eq!(e.code, "RELAY_UNAVAILABLE");
         assert_eq!(d.len(), 0);
@@ -203,6 +212,8 @@ mod tests {
                 assert!(d2.deliver(&ask.ticket, "tok", r));
             }
         });
+        // 只在显式要求经客户端的请求里为真
+        assert!(VIA_CLIENT.scope(true, async { requested() }).await && !requested());
         DIALER
             .scope(ctx, async {
                 assert!(request_stream(&d, "h.example.com", 2222).await.is_ok());

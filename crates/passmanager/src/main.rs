@@ -170,6 +170,9 @@ enum Cmd {
         /// 跳板（同 ssh -J）：jumpuser@jumphost[:port]，跳板与目标各用自己保存的凭据
         #[arg(short = 'J', long = "jump")]
         jump: Option<String>,
+        /// 经这台机器的网络连接（服务器连不到的主机；用户明确同意后才用）
+        #[arg(long = "via-client")]
+        via_client: bool,
         /// 兼容 ssh 的常见选项（忽略）
         #[arg(short = 'o', hide = true)]
         _options: Vec<String>,
@@ -551,6 +554,9 @@ enroll 已把它装成开机 / 登录时自动启动的用户服务（Linux：sy
         /// 跳板（同 scp -J）：jumpuser@jumphost[:port]
         #[arg(short = 'J', long = "jump")]
         jump: Option<String>,
+        /// 经这台机器的网络连接（服务器连不到的主机；用户明确同意后才用）
+        #[arg(long = "via-client")]
+        via_client: bool,
         /// 兼容 scp 的常见选项（忽略）
         #[arg(short = 'q', hide = true)]
         _quiet: bool,
@@ -767,8 +773,8 @@ fn run_cli() -> ExitCode {
         Some(Cmd::Lookup { target, use_ }) => cli::tool("lookup", serde_json::json!({"target": target, "use": use_})),
         Some(Cmd::List) => cli::tool("list", serde_json::json!({})),
         Some(Cmd::Http { args, request, headers, data, json, .. }) => cli::http(args, request, headers, data, json),
-        Some(Cmd::Ssh { port, login, jump, target, command, .. }) => cli::ssh(port, login, jump, target, command),
-        Some(Cmd::Scp { port, jump, source, destination, .. }) => cli::scp(port, jump, source, destination),
+        Some(Cmd::Ssh { port, login, jump, via_client, target, command, .. }) => cli::ssh(port, login, jump, via_client, target, command),
+        Some(Cmd::Scp { port, jump, via_client, source, destination, .. }) => cli::scp(port, jump, via_client, source, destination),
         Some(Cmd::Init {
             domain,
             lan,

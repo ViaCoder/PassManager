@@ -4,6 +4,24 @@
 
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.3.11-rc.27] - 2026-11-25
+
+### 变更
+
+- **只有显式要求时 SSH 才经客户端。** MCP 的 `ssh`、`scp` 工具带 `"via_client": true`，`passmanager ssh` / `scp` 带
+  `--via-client`；Agent 只在用户明确同意后才这样做。不带时一律由服务器自己连。协议上是把 ssh、上传或下载请求包在
+  `via_client` 里。
+- **经客户端看到的主机密钥首次自动信任**，和直连一样；主机密钥变化时照旧以 `HOST_KEY_CHANGED` 拒绝。
+
+### 移除
+
+- rc.26 网页上"经客户端连接的主机"列表，以及首次主机密钥要在网页上确认的那一步和错误码 `HOST_KEY_UNCONFIRMED`。
+
+### 升级
+
+- rc.26 标记过主机的库照常能打开，那张表不再使用。客户端会自己更新；比服务器旧的 Agent 进程发 `via_client` 请求会得到
+  `RELAY_UNAVAILABLE`，重启后就好。
+
 ## [0.3.11-rc.26] - 2026-11-24
 
 ### 新增

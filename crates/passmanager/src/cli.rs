@@ -113,8 +113,24 @@ pub fn with_jump(jump: Option<&str>, target: String) -> String {
     }
 }
 
-pub fn ssh(port: Option<u16>, login: Option<String>, jump: Option<String>, target: String, command: Vec<String>) -> ExitCode {
-    tool("ssh", json!({"target": with_jump(jump.as_deref(), ssh_target(port, login, &target)), "command": command.join(" ")}))
+/// `--via-client`：工具参数里写上 `"via_client": true`（经这台机器的网络连接）；没给时不写。
+pub fn via_arg(mut args: Value, via_client: bool) -> Value {
+    if via_client {
+        args["via_client"] = json!(true);
+    }
+    args
+}
+
+pub fn ssh(
+    port: Option<u16>,
+    login: Option<String>,
+    jump: Option<String>,
+    via_client: bool,
+    target: String,
+    command: Vec<String>,
+) -> ExitCode {
+    let args = json!({"target": with_jump(jump.as_deref(), ssh_target(port, login, &target)), "command": command.join(" ")});
+    tool("ssh", via_arg(args, via_client))
 }
 
 /// scp 风格：-P 端口与 -J 跳板加到远程一侧。
@@ -132,9 +148,9 @@ pub fn scp_spec(port: Option<u16>, jump: Option<&str>, spec: &str) -> String {
     }
 }
 
-pub fn scp(port: Option<u16>, jump: Option<String>, source: String, destination: String) -> ExitCode {
+pub fn scp(port: Option<u16>, jump: Option<String>, via_client: bool, source: String, destination: String) -> ExitCode {
     let j = jump.as_deref();
-    tool("scp", json!({"source": scp_spec(port, j, &source), "destination": scp_spec(port, j, &destination)}))
+    tool("scp", via_arg(json!({"source": scp_spec(port, j, &source), "destination": scp_spec(port, j, &destination)}), via_client))
 }
 
 #[cfg(test)]
@@ -176,6 +192,19 @@ mod tests {
     }
 
     #[test]
+    fn via_client_flag_becomes_the_argument() {
+        use clap::Parser;
+        // 给了 --via-client 才写上，其余参数不变；没给时不写
+        assert_eq!(via_arg(json!({"target": "u@h"}), true), json!({"target": "u@h", "via_client": true}));
+        assert_eq!(via_arg(json!({"target": "u@h"}), false), json!({"target": "u@h"}));
+        // 解析：--via-client 落到 ssh 的开关上
+        match crate::Cli::try_parse_from(["PassManager", "ssh", "--via-client", "deploy@db1", "uptime"]).unwrap().cmd {
+            Some(crate::Cmd::Ssh { via_client, .. }) => assert!(via_client),
+            _ => panic!("not ssh"),
+        }
+    }
+
+    #[test]
     fn clap_parses_common_forms() {
         use clap::Parser;
         for argv in [
@@ -187,6 +216,8 @@ mod tests {
             vec!["PassManager", "scp", "-P", "2222", "a.txt", "deploy@db1:/tmp/a.txt"],
             vec!["PassManager", "ssh", "-J", "root@198.51.100.1", "deploy@db1", "uptime"],
             vec!["PassManager", "scp", "-J", "root@198.51.100.1", "a.txt", "deploy@db1:/tmp/a.txt"],
+            vec!["PassManager", "ssh", "--via-client", "deploy@db1", "uptime"],
+            vec!["PassManager", "scp", "--via-client", "a.txt", "deploy@db1:/tmp/a.txt"],
             vec!["PassManager", "list"],
             vec!["PassManager", "lookup", "https://api.github.com/user"],
             vec!["PassManager", "lookup", "root@db1", "--use", "scp"],

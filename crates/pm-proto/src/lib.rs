@@ -313,15 +313,11 @@ pub enum Request {
     TrustPins {
         pattern: String,
     },
-    /// 经客户端网络连接的 SSH 主机（只限网页），返回 [`ViaClientView`] 列表。
-    ViaClientHosts,
-    /// 加一台经客户端网络连接的 SSH 主机：`host` 写成 `host` 或 `host:port`（默认 22）。只限网页。
-    AddViaClientHost {
-        host: String,
-    },
-    /// 去掉一台经客户端网络连接的主机（`host:port`）。只限网页。
-    RemoveViaClientHost {
-        host_port: String,
+    /// 经发起请求的客户端的网络执行一个 SSH 类请求（`ssh` / scp 上传 / scp 下载）：服务器连不到、这台机器连得到的主机。
+    /// 只有 Agent 显式这样包装时才经客户端（用户明确同意后才这样做）；不包装的请求一律由服务器直接连接。
+    /// 里面不是 SSH 类请求时拒绝。
+    ViaClient {
+        request: Box<Request>,
     },
     Tokens,
     CreateToken {
@@ -380,17 +376,19 @@ impl Request {
         matches!(self, Request::Http { .. })
     }
 
-    /// SSH 类请求（ssh / scp 上传 / scp 下载）的目标；只有它们可能经客户端网络连接。
+    /// SSH 类请求（ssh / scp 上传 / scp 下载）的目标；经客户端包装时是里面那个请求的目标。
     pub fn ssh_target(&self) -> Option<&str> {
         match self {
             Request::Ssh { target, .. } | Request::Upload { target, .. } | Request::Download { target, .. } => Some(target),
+            // 只包一层：里面再包的不算
+            Request::ViaClient { request } if !matches!(**request, Request::ViaClient { .. }) => request.ssh_target(),
             _ => None,
         }
     }
 
-    /// 管理"经客户端网络连接的主机"的请求：只有网页会话能用。
-    pub fn is_via_client_admin(&self) -> bool {
-        matches!(self, Request::ViaClientHosts | Request::AddViaClientHost { .. } | Request::RemoveViaClientHost { .. })
+    /// 是否是合法的经客户端请求（里面是 SSH 类请求）。
+    pub fn via_client(&self) -> bool {
+        matches!(self, Request::ViaClient { .. }) && self.ssh_target().is_some()
     }
 
     /// 是否允许令牌会话（Agent）执行。
@@ -425,7 +423,7 @@ impl Request {
                 | Request::Relay { .. }
                 | Request::RelayClose { .. }
                 | Request::ClientUpdate { .. }
-        )
+        ) || self.via_client()
     }
 }
 
@@ -696,19 +694,6 @@ pub struct PendingPinView {
     pub old_fingerprint: String,
     pub new_fingerprint: String,
     pub seen_at: u64,
-    /// 新指纹的算法（经客户端网络看到的主机，信任时直接记下它）。
-    #[serde(default)]
-    pub algo: String,
-    /// 经客户端网络看到的指纹：信任时记下表中的新指纹（不会再首次信任）；`old_fingerprint` 为空表示首次。
-    #[serde(default)]
-    pub via_client: bool,
-}
-
-/// 一台经客户端网络连接的 SSH 主机。
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct ViaClientView {
-    pub host_port: String,
-    pub added: u64,
 }
 
 /// 服务器在一个 SSH 类请求处理到一半时发给客户端的一帧（`{"dial": {...}}`）：
@@ -1190,7 +1175,7 @@ mod tests {
     }
 
     #[test]
-    fn ssh_target_and_via_client_admin() {
+    fn ssh_target_and_via_client() {
         // 三种 SSH 类请求都给出目标，其他请求没有
         let ssh = Request::Ssh { target: "a>root@h".into(), command: "true".into() };
         assert_eq!(ssh.ssh_target(), Some("a>root@h"));
@@ -1198,15 +1183,17 @@ mod tests {
         assert_eq!(up.ssh_target(), Some("u@h:2222"));
         assert_eq!(Request::Download { target: "h".into(), path: "/p".into() }.ssh_target(), Some("h"));
         assert_eq!(Request::Status.ssh_target(), None);
-        // 管理经客户端连接的主机：只属于网页，不是 Agent 能用的操作
-        for r in [
-            Request::ViaClientHosts,
-            Request::AddViaClientHost { host: "h".into() },
-            Request::RemoveViaClientHost { host_port: "h:22".into() },
-        ] {
-            assert!(r.is_via_client_admin() && !r.is_usage(), "{r:?}");
+        // 经客户端包装：线上格式；目标是里面请求的目标；是 Agent 能用的操作
+        let via = Request::ViaClient { request: Box::new(Request::Ssh { target: "a>root@h".into(), command: "true".into() }) };
+        let wire = serde_json::to_string(&via).unwrap();
+        assert!(wire.starts_with(r#"{"op":"via_client","request":{"op":"ssh""#), "{wire}");
+        assert_eq!(serde_json::from_str::<Request>(&wire).unwrap().ssh_target(), Some("a>root@h"));
+        assert!(via.via_client() && via.is_usage() && !ssh.via_client());
+        // 里面不是 SSH 类请求、或者包了两层：不合法，Agent 也不能用
+        let twice = Request::ViaClient { request: Box::new(via) };
+        for bad in [Request::ViaClient { request: Box::new(Request::Status) }, twice] {
+            assert!(!bad.via_client() && !bad.is_usage() && bad.ssh_target().is_none(), "{bad:?}");
         }
-        assert!(!ssh.is_via_client_admin() && !Request::TrustPins { pattern: "h".into() }.is_via_client_admin());
     }
 
     /// 能在测试里取回客户端写出内容的管道。

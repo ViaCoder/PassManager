@@ -313,19 +313,20 @@ the config directory (0600) so other local programs cannot borrow the proxy.
 ### 3.4 SSH hosts reached through the client's network
 
 Some hosts are out of the server's reach but reachable from the agent machine (for example, only on the agent machine's network).
-Mark such a host on the web UI's Host fingerprints page as reached through the client (`host` or `host:port`). From then on, `ssh`
-and `scp` to it use a TCP connection made by the requesting client: the client connects to the target from its own network, opens
-a second double-encrypted connection to the server with the same token, and copies bytes between the two. The SSH handshake, the
-host key check and authentication still run end to end on the server; the client only relays SSH's own encrypted data and never
-sees passwords, key signatures or command output.
+For those, `ssh` and `scp` can use a TCP connection made by the requesting client: the MCP tools take `"via_client": true`, and the
+CLI takes `passmanager ssh --via-client …` / `passmanager scp --via-client …`. Only such an explicit request goes through the
+client, and agents ask for it only after the user explicitly agrees; a request without it is always connected by the server, and
+fails if the server cannot reach the host, with no automatic fallback to the client.
 
-The host key of such a host is never trusted on first use, and a changed key is never accepted automatically (the entry's
-auto-accept option does not apply): on the first connection the server only reads the host key and sends no authentication, the
-agent gets `HOST_KEY_UNCONFIRMED`, and the fingerprint waits on the Host fingerprints page. Check it on that host
-(`ssh-keygen -lf /etc/ssh/ssh_host_ecdsa_key.pub`) and press Trust; the server records exactly the fingerprint shown. The client
-connects only to the request's own first hop (the jump host, or the target when there is none), so the server cannot use it to
-reach other addresses. Hosts with an alias cannot be used this way, because the client must know the real address. A client that
-cannot relay (a process older than the server) gets `RELAY_UNAVAILABLE`, and the server does not fall back to a direct connection.
+The client connects to the target from its own network, opens a second double-encrypted connection to the server with the same
+token and a single-use ticket, and copies bytes between the two. The SSH handshake, the host key check and authentication still
+run end to end on the server; the client only relays SSH's own encrypted data and never sees passwords, key signatures or command
+output. The client connects only to the request's own first hop (the jump host, or the target when there is none), so the server
+cannot use it to reach other addresses. Host keys work as for direct connections: recorded on the first connection, refused when
+they change (`HOST_KEY_CHANGED`, trusted on the Host fingerprints page). Because the first use is trusted automatically, a first
+connection impersonated by someone on the client's network would receive the password of a password-login host; key logins never
+expose the key. Hosts with an alias cannot be used this way. A client that cannot relay (a process older than the server) gets
+`RELAY_UNAVAILABLE`.
 
 ## 4. TPM (L3)
 

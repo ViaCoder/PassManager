@@ -62,7 +62,8 @@ fn tools() -> Value {
                 "type": "object",
                 "properties": {
                     "target": {"type": "string", "description": "user@host or user@host:port (name/user@host to pick a credential; jumpuser@jumphost>user@host through one jump host)"},
-                    "command": {"type": "string"}
+                    "command": {"type": "string"},
+                    "via_client": {"type": "boolean", "description": "Only after the user explicitly allows it: connect from this machine's network, for a host the PassManager server cannot reach"}
                 },
                 "required": ["target", "command"]
             },
@@ -76,7 +77,8 @@ fn tools() -> Value {
                 "type": "object",
                 "properties": {
                     "source": {"type": "string"},
-                    "destination": {"type": "string"}
+                    "destination": {"type": "string"},
+                    "via_client": {"type": "boolean", "description": "As for ssh"}
                 },
                 "required": ["source", "destination"]
             },
@@ -182,6 +184,19 @@ fn headers_of(v: Option<Value>) -> Vec<(String, String)> {
 }
 
 /// 把各种常见写法规范成 (工具名, 标准参数)。旧工具名与参数别名都接受，但不出现在工具列表中。
+/// 改写后的参数带上 `via_client`（只在显式为 true 时）：经客户端转发必须是 Agent 明确要求的。
+fn keep_via(mut v: Value, args: &Value) -> Value {
+    if args["via_client"].as_bool() == Some(true) {
+        v["via_client"] = json!(true);
+    }
+    v
+}
+
+/// 请求包成"经客户端"（只在参数里显式为 true 时），见 `Request::ViaClient`。
+fn via_wrap(req: Request, args: &Value) -> Request {
+    if args["via_client"].as_bool() == Some(true) { Request::ViaClient { request: Box::new(req) } } else { req }
+}
+
 pub fn normalize(name: &str, args: &Value) -> Result<(&'static str, Value), ApiError> {
     let n = name.trim().to_ascii_lowercase().replace('-', "_");
     let str_of = |keys: &[&str]| first(args, keys).map(|v| as_text(&v));
@@ -230,7 +245,7 @@ pub fn normalize(name: &str, args: &Value) -> Result<(&'static str, Value), ApiE
             if first(args, &["sudo"]).and_then(|v| v.as_bool()).unwrap_or(false) && !command.trim_start().starts_with("sudo ") {
                 command = format!("sudo {command}");
             }
-            Ok(("ssh", json!({"target": target, "command": command})))
+            Ok(("ssh", keep_via(json!({"target": target, "command": command}), args)))
         }
         "scp" | "copy" | "sftp" | "ssh_upload" | "ssh_download" | "upload" | "download" => {
             let mut source = str_of(&["source", "src", "from"]);
@@ -253,7 +268,7 @@ pub fn normalize(name: &str, args: &Value) -> Result<(&'static str, Value), ApiE
                 (source, destination) = if n.contains("download") { (Some(remote), Some(local)) } else { (Some(local), Some(remote)) };
             }
             match (source, destination) {
-                (Some(s), Some(d)) => Ok(("scp", json!({"source": s, "destination": d}))),
+                (Some(s), Some(d)) => Ok(("scp", keep_via(json!({"source": s, "destination": d}), args))),
                 _ => Err(ApiError::new("BAD_REQUEST", "missing \"source\" or \"destination\" (remote side: user@host:/path)")),
             }
         }
@@ -274,7 +289,7 @@ pub fn call_tool(name: &str, args: &Value) -> Result<Value, ApiError> {
             let headers: Vec<(String, String)> = serde_json::from_value(args["headers"].clone()).unwrap_or_default();
             Request::Http { method: need(args, "method")?, url: need(args, "url")?, headers, body: s(args, "body") }
         }
-        "ssh" => Request::Ssh { target: need(args, "target")?, command: need(args, "command")? },
+        "ssh" => via_wrap(Request::Ssh { target: need(args, "target")?, command: need(args, "command")? }, args),
         "scp" => {
             let (src, dst) = (need(args, "source")?, need(args, "destination")?);
             return match (split_remote(&src), split_remote(&dst)) {
@@ -283,10 +298,10 @@ pub fn call_tool(name: &str, args: &Value) -> Result<Value, ApiError> {
                     if data.len() > pm_proto::MAX_FILE {
                         return Err(ApiError::new("TOO_LARGE", "file exceeds 64 MiB"));
                     }
-                    connect()?.call(&Request::Upload { target, path, data_base64: STANDARD.encode(data) })
+                    connect()?.call(&via_wrap(Request::Upload { target, path, data_base64: STANDARD.encode(data) }, args))
                 }
                 (Some((target, path)), None) => {
-                    let r: DownloadResult = connect()?.call_as(&Request::Download { target, path })?;
+                    let r: DownloadResult = connect()?.call_as(&via_wrap(Request::Download { target, path }, args))?;
                     let data = STANDARD.decode(r.data_base64).map_err(|_| ApiError::new("INTERNAL", "bad data"))?;
                     std::fs::write(&dst, &data).map_err(|e| ApiError::new("BAD_REQUEST", format!("cannot write {dst}: {e}")))?;
                     Ok(json!({"saved": dst, "size": data.len(), "redactions": r.redactions}))
@@ -404,7 +419,24 @@ mod tests {
         assert_eq!(v, json!({"source": "u@db1:/etc/a", "destination": "a"}));
         let (_, v) = n("scp", json!({"from": "a.txt", "to": "u@db1:/tmp/a.txt"}));
         assert_eq!(v["destination"], "u@db1:/tmp/a.txt");
+        // 经客户端：只在显式为 true 时带上；false 或没写时没有这一项
+        let (_, v) = n("ssh", json!({"target": "deploy@db1", "command": "id", "via_client": true}));
+        assert_eq!(v["via_client"], true);
+        let (_, v) = n("scp", json!({"source": "a", "destination": "u@db1:/a", "via_client": false}));
+        assert_eq!(v, json!({"source": "a", "destination": "u@db1:/a"}));
         assert!(normalize("nope", &json!({})).is_err());
+    }
+
+    #[test]
+    fn via_client_is_explicit() {
+        let ssh = || Request::Ssh { target: "u@h".into(), command: "id".into() };
+        // 显式 true：包成经客户端；false、字符串或没写：原样
+        assert!(via_wrap(ssh(), &json!({"via_client": true})).via_client());
+        for a in [json!({"via_client": false}), json!({"via_client": "true"}), json!({})] {
+            assert!(matches!(via_wrap(ssh(), &a), Request::Ssh { .. }), "{a}");
+        }
+        assert_eq!(keep_via(json!({"a": 1}), &json!({"via_client": true})), json!({"a": 1, "via_client": true}));
+        assert_eq!(keep_via(json!({"a": 1}), &json!({"via_client": 1})), json!({"a": 1}));
     }
 
     #[test]

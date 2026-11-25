@@ -660,95 +660,82 @@ fn ssh_via_the_clients_network() {
         let o = env.agent_cmd(args).stdin(Stdio::null()).output().unwrap();
         (o.status.success(), stdout(&o) + &stderr(&o))
     };
-
-    // ---- 只能在网页上设置：root 会话被拒；网页要 CSRF ----
+    let via_lines = || std::fs::read_to_string(&svc_log).unwrap().matches("ssh via the client's network: ").count();
     let mut root = Client::connect_at(&env.home.join("run/passmanager.sock"), &Hello::Root { v: PROTO_V }).unwrap();
-    let e = root.call(&Request::AddViaClientHost { host: hp.clone() }).unwrap_err();
-    assert!(e.code == "FORBIDDEN" && e.message.contains("web UI"), "{}: {}", e.code, e.message);
-    assert_eq!(https(&env, "POST", "/pins/via", Some(&cookie), Some(&format!("csrf=wrong&host={}", enc(&hp)))).status, 403);
-    assert_eq!(https(&env, "POST", "/pins/via", Some(&cookie), Some(&format!("csrf={csrf}&host={}", enc(&hp)))).status, 303);
-    assert!(https(&env, "GET", "/pins", Some(&cookie), None).body.contains(&hp));
+    let pin_of = |root: &mut Client| -> Option<String> {
+        let pins: Vec<pm_proto::PinView> = root.call_as(&Request::Pins).unwrap();
+        pins.into_iter().find(|p| p.host_port == hp).map(|p| p.fingerprint)
+    };
 
-    // ---- 第一次经客户端：主机密钥未确认，目标只看到一次 TCP 连接，收不到任何认证 ----
-    let (ok, out) = ssh(&["ssh", &target, "uptime"]);
-    outputs += &out;
-    assert!(!ok && out.contains("HOST_KEY_UNCONFIRMED") && out.contains("Host fingerprints page") && out.contains(&fp1), "{out}");
-    assert_eq!(log.conns(), 1, "客户端替服务器连了一次");
-    assert!(log.take().is_empty(), "主机密钥未确认，目标收不到认证");
-    // 网页：待确认（首次、经客户端），信任后记下的正是这个指纹
-    // 网页转义 `/`（指纹是 base64，常带 `/`）
-    let html = |s: &str| s.replace('/', "&#x2f;");
-    let page = https(&env, "GET", "/pins", Some(&cookie), None).body;
-    assert!(page.contains("首次") && page.contains("经客户端") && page.contains(&html(&fp1)), "{page}");
-    assert_eq!(https(&env, "POST", "/pins/trust", Some(&cookie), Some(&format!("csrf={csrf}&pattern={}", enc(&hp)))).status, 303);
-    let pins: Vec<pm_proto::PinView> = root.call_as(&Request::Pins).unwrap();
-    let pin = pins.iter().find(|p| p.host_port == hp).expect("pin recorded");
-    assert_eq!((pin.algo.as_str(), pin.fingerprint.as_str()), ("ecdsa-sha2-nistp384", fp1.as_str()));
-
-    // ---- 信任后：CLI 与 MCP 都经客户端登录并执行 ----
+    // ---- 不带参数：服务器自己连，不经客户端 ----
     let (ok, out) = ssh(&["ssh", &target, "uptime"]);
     outputs += &out;
     assert!(ok && out.contains("target ran: uptime"), "{out}");
-    let ev = log.take();
-    assert!(ev.contains(&"password deploy".to_string()) && ev.contains(&"exec uptime".to_string()), "{ev:?}");
-    assert_eq!(log.conns(), 2);
-    let out = mcp(&env, &[json!({"name": "ssh", "arguments": {"target": target, "command": "id"}})]);
-    let t = tool_text(&out[0]);
-    outputs += &t;
-    assert!(t.contains("target ran: id"), "{t}");
-    assert_eq!(log.conns(), 3);
+    assert_eq!(via_lines(), 0, "没有要求就不经客户端");
+    assert_eq!(pin_of(&mut root).as_deref(), Some(fp1.as_str()), "直连首次记下主机密钥");
+    // 清掉记录，下面看经客户端的首次连接
+    assert_eq!(https(&env, "POST", "/pins/trust", Some(&cookie), Some(&format!("csrf={csrf}&pattern={}", enc(&hp)))).status, 303);
+    assert_eq!(pin_of(&mut root), None);
     log.take();
 
-    // ---- 不能转发的连接（旧版本客户端）：RELAY_UNAVAILABLE，服务器也没有自己去连 ----
+    // ---- --via-client：经客户端，第一次就登录（主机密钥和直连一样首次记下） ----
+    let c0 = log.conns();
+    let (ok, out) = ssh(&["ssh", "--via-client", &target, "uptime"]);
+    outputs += &out;
+    assert!(ok && out.contains("target ran: uptime"), "{out}");
+    assert_eq!(via_lines(), 1, "经客户端的连接有记录");
+    assert_eq!(log.conns() - c0, 1, "只有客户端那一个连接");
+    let ev = log.take();
+    assert!(ev.contains(&"password deploy".to_string()) && ev.contains(&"exec uptime".to_string()), "{ev:?}");
+    assert_eq!(pin_of(&mut root).as_deref(), Some(fp1.as_str()), "经客户端首次记下主机密钥");
+    // MCP：via_client 为 true 时同样经客户端
+    let out = mcp(&env, &[json!({"name": "ssh", "arguments": {"target": target, "command": "id", "via_client": true}})]);
+    let t = tool_text(&out[0]);
+    outputs += &t;
+    assert!(t.contains("target ran: id") && via_lines() == 2, "{t}");
+    log.take();
+
+    // ---- 不能转发的连接（旧版本客户端）要求经客户端：RELAY_UNAVAILABLE，服务器也不自己去连 ----
     let token = std::fs::read_to_string(env.agent_dir.join("token")).unwrap();
     let parsed = pm_net::enroll::EnrollUrl::parse(&url).unwrap();
     let public = ServerPublic::from_bundle(&std::fs::read(env.home.join("data/server-keys.pub")).unwrap(), &parsed.fpr).unwrap();
     let stream = pm_net::client::connect(&env.target(), &public).unwrap();
     let mut old = Client::connect_stream(stream, &Hello::Token { v: PROTO_V, token: token.trim().to_string(), dial: false }).unwrap();
-    let e = old.call(&Request::Ssh { target: target.clone(), command: "uptime".into() }).unwrap_err();
+    let c1 = log.conns();
+    let wrap = |r: Request| Request::ViaClient { request: Box::new(r) };
+    let e = old.call(&wrap(Request::Ssh { target: target.clone(), command: "uptime".into() })).unwrap_err();
     assert_eq!(e.code, "RELAY_UNAVAILABLE", "{}", e.message);
-    assert_eq!(log.conns(), 3, "服务器没有直连");
+    assert_eq!(log.conns(), c1, "服务器没有直连");
+    // 只能包 SSH 类请求
+    assert_eq!(old.call(&wrap(Request::Status)).unwrap_err().code, "FORBIDDEN");
 
-    // ---- 客户端连不上目标：很快返回 UPSTREAM_ERROR，原因来自客户端 ----
+    // ---- 客户端也连不上目标：很快返回 UPSTREAM_ERROR，原因来自客户端 ----
     let closed = free_port();
     let hp2 = format!("127.0.0.1:{closed}");
     let form = format!("csrf={csrf}&name=box2&domains={}&op_ssh=1&secret={}", enc(&hp2), enc(BOX_PW));
     assert_eq!(https(&env, "POST", "/entries", Some(&cookie), Some(&form)).status, 303);
-    assert_eq!(https(&env, "POST", "/pins/via", Some(&cookie), Some(&format!("csrf={csrf}&host={}", enc(&hp2)))).status, 303);
     let t0 = Instant::now();
-    let (ok, out) = ssh(&["ssh", &format!("deploy@{hp2}"), "uptime"]);
+    let (ok, out) = ssh(&["ssh", "--via-client", &format!("deploy@{hp2}"), "uptime"]);
     outputs += &out;
     assert!(!ok && out.contains("UPSTREAM_ERROR") && out.contains(&format!("the client could not connect to {hp2}")), "{out}");
     assert!(t0.elapsed() < Duration::from_secs(20), "不必等到超时");
 
-    // ---- 主机密钥变化（经客户端）：HOST_KEY_CHANGED，目标收不到认证；信任后记下新指纹 ----
+    // ---- 主机密钥变化（经客户端）：HOST_KEY_CHANGED，目标收不到认证；网页上清除后再连，记下新指纹 ----
     task.abort();
     std::thread::sleep(Duration::from_millis(300));
     let (_, task2) = ssh_box(&rt, port, &k2, &log);
-    let (ok, out) = ssh(&["ssh", &target, "uptime"]);
+    let (ok, out) = ssh(&["ssh", "--via-client", &target, "uptime"]);
     outputs += &out;
-    assert!(!ok && out.contains("HOST_KEY_CHANGED") && out.contains("client's network") && out.contains(&fp2), "{out}");
+    assert!(!ok && out.contains("HOST_KEY_CHANGED") && out.contains(&fp2), "{out}");
     assert!(log.take().is_empty(), "主机密钥变化后目标收不到认证");
     assert_eq!(https(&env, "POST", "/pins/trust", Some(&cookie), Some(&format!("csrf={csrf}&pattern={}", enc(&hp)))).status, 303);
-    let (ok, out) = ssh(&["ssh", &target, "uptime"]);
+    let (ok, out) = ssh(&["ssh", "--via-client", &target, "uptime"]);
     outputs += &out;
     assert!(ok && out.contains("target ran: uptime"), "{out}");
-
-    // ---- 改回直连：服务器自己连，不再经客户端 ----
-    let via_lines = |s: &str| s.matches("ssh via the client's network: ").count();
-    let before = via_lines(&std::fs::read_to_string(&svc_log).unwrap());
-    assert!(before >= 4, "经客户端的每次连接都有记录：{before}");
-    let r = https(&env, "POST", "/pins/via/remove", Some(&cookie), Some(&format!("csrf={csrf}&host_port={}", enc(&hp))));
-    assert_eq!(r.status, 303);
-    let (ok, out) = ssh(&["ssh", &target, "uptime"]);
-    outputs += &out;
-    assert!(ok && out.contains("target ran: uptime"), "{out}");
-    let logtext = std::fs::read_to_string(&svc_log).unwrap();
-    assert_eq!(via_lines(&logtext), before, "直连不经客户端");
-    assert!(logtext.contains(&format!("ssh via the client's network enabled for {hp}")));
-    assert!(logtext.contains(&format!("host key confirmed in the web UI for {hp}")));
+    assert_eq!(pin_of(&mut root).as_deref(), Some(fp2.as_str()));
 
     // ---- 口令从不出现在输出与日志里 ----
+    let logtext = std::fs::read_to_string(&svc_log).unwrap();
     assert!(!outputs.contains(BOX_PW) && !logtext.contains(BOX_PW));
     drop(task2);
     svc.kill().unwrap();

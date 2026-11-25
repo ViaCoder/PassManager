@@ -118,10 +118,10 @@ What else 0.2.0 adds on top of `http` / `ssh` / `scp`:
 - **`PassManager run --http <origin>`** (agent machine, Unix): local programs (OpenAI-compatible SDKs, CLIs, curl) call an HTTPS
   API through a loopback relay; the server checks each request against the credential's relay policy (`passmanager relay set`),
   adds the credential and streams back a redacted answer. See [docs/DEPLOY-LAN.md](docs/DEPLOY-LAN.md) §3.1.2.
-- **SSH through the client's network** (web UI): hosts the server cannot reach but the agent machine can are marked on the Host
-  fingerprints page. For `ssh` and `scp` to them, the requesting client makes the TCP connection and relays SSH's encrypted bytes;
-  the handshake, host key check and login still run on the server. Their host keys are confirmed in the web UI, never on first
-  use. See [docs/DEPLOY-LAN.md](docs/DEPLOY-LAN.md) §3.4.
+- **SSH through the client's network** (on request): for a host the server cannot reach, an agent that has the user's explicit
+  OK sets `via_client` on `ssh` / `scp` (CLI `--via-client`). The requesting client makes the TCP connection and relays SSH's
+  encrypted bytes; the handshake, host key check and login still run on the server. Without it the server always connects
+  itself. See [docs/DEPLOY-LAN.md](docs/DEPLOY-LAN.md) §3.4.
 - **Managed certificates** (server, root): `passmanager cert add` issues a Let's Encrypt certificate for another host with the
   server's ACME account and Cloudflare token, installs it over SSH with a vault credential (files 0600, deleted after the install
   command) and renews it with the server's own certificate. The host never sees the token. See §1.3 of the deployment guide.

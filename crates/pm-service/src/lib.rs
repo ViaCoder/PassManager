@@ -637,10 +637,6 @@ impl Shared {
             _ if matches!(req, Request::TrustPins { .. }) && !trust_session_ok(server, session) => {
                 Err(err("FORBIDDEN", "in server mode new fingerprints can only be trusted in the web UI (Host fingerprints page)"))
             }
-            // 哪些主机经客户端网络连接，只能在网页上设置（root 命令行、TUI 和 Agent 都不行）。
-            _ if req.is_via_client_admin() && !matches!(session, Session::Web) => {
-                Err(err("FORBIDDEN", "hosts reached through the client's network can only be set in the web UI (Host fingerprints page)"))
-            }
             // 服务器模式：密钥只写不读；没有口令；令牌只能通过注册码经双层加密通道发放。
             _ if server && matches!(req, Request::Reveal { .. }) => Err(err("FORBIDDEN", "secrets are write-only in server mode")),
             _ if server && matches!(req, Request::ChangePassword { .. }) => Err(err("BAD_REQUEST", "server mode has no password")),
@@ -683,7 +679,17 @@ impl Shared {
             {
                 Err(err("NOT_READY", "安全检查未通过，库保持锁定。请查看\"安全状态\"（passmanager status）。"))
             }
-            _ => self.handle(req).await,
+            _ => match req {
+                // Agent 显式要求经客户端：在这个作用域里处理里面的 SSH 类请求（见 dial.rs）。只包 SSH 类请求，
+                // 其他请求包起来会绕过上面针对它们的检查，直接拒绝。
+                Request::ViaClient { request }
+                    if matches!(*request, Request::Ssh { .. } | Request::Upload { .. } | Request::Download { .. }) =>
+                {
+                    dial::VIA_CLIENT.scope(true, self.handle(*request)).await
+                }
+                Request::ViaClient { .. } => Err(err("BAD_REQUEST", "via_client wraps one ssh, upload or download request")),
+                req => self.handle(req).await,
+            },
         };
         let mut resp = match r {
             Ok(v) => Response { ok: true, data: Some(v), code: None, message: None },
@@ -1288,9 +1294,6 @@ impl Shared {
             Request::PendingPins => ok(self.inner.lock().await.pending.clone()),
             Request::TrustPins { pattern } => {
                 let pat = pattern.trim().to_ascii_lowercase();
-                // 经客户端网络看到的待确认指纹：信任时直接记下表中的新指纹（这类主机不会首次信任）
-                let confirmed: Vec<PendingPinView> =
-                    self.inner.lock().await.pending.iter().filter(|p| p.via_client && pin_matches(&pat, &p.host_port)).cloned().collect();
                 let mut removed = Vec::new();
                 self.mutate(|v| {
                     v.payload.pins.retain(|p| {
@@ -1300,66 +1303,14 @@ impl Shared {
                         }
                         !m
                     });
-                    for c in &confirmed {
-                        v.payload.pins.push(Pin {
-                            kind: PinKind::Ssh,
-                            host_port: c.host_port.clone(),
-                            algo: c.algo.clone(),
-                            fingerprint: c.new_fingerprint.clone(),
-                            first_seen: pm_vault::now(),
-                        });
-                    }
                     Ok(())
                 })
                 .await?;
-                for c in &confirmed {
-                    log(&format!("host key confirmed in the web UI for {} (via the client's network)", c.host_port));
-                }
                 self.inner.lock().await.pending.retain(|p| !pin_matches(&pat, &p.host_port));
                 ok(removed)
             }
-            Request::ViaClientHosts => {
-                let inner = self.inner.lock().await;
-                let v = inner.vault.as_ref().ok_or_else(|| self.locked_err())?;
-                let mut list: Vec<ViaClientView> =
-                    v.payload.via_client.iter().map(|h| ViaClientView { host_port: h.host_port.clone(), added: h.added }).collect();
-                list.sort_by(|a, b| a.host_port.cmp(&b.host_port));
-                ok(list)
-            }
-            Request::AddViaClientHost { host } => {
-                let hp = via_client_host_port(&host)?;
-                let mut added = false;
-                self.mutate(|v| {
-                    // 设了别名的主机只能经别名使用，不能让客户端知道它的真实地址
-                    http::alias_guard(&v.payload, hp.rsplit_once(':').map(|(h, _)| h).unwrap_or(hp.as_str()))?;
-                    if !v.payload.via_client_host(&hp) {
-                        v.payload.via_client.push(pm_vault::ViaClientHost { host_port: hp.clone(), added: pm_vault::now() });
-                        added = true;
-                    }
-                    Ok(())
-                })
-                .await?;
-                if added {
-                    log(&format!("ssh via the client's network enabled for {hp}"));
-                }
-                ok(if added { "added" } else { "exists" })
-            }
-            Request::RemoveViaClientHost { host_port } => {
-                let hp = host_port.trim().to_ascii_lowercase();
-                let mut removed = false;
-                self.mutate(|v| {
-                    let before = v.payload.via_client.len();
-                    v.payload.via_client.retain(|h| h.host_port != hp);
-                    removed = v.payload.via_client.len() != before;
-                    Ok(())
-                })
-                .await?;
-                if !removed {
-                    return Err(err("UNKNOWN_CREDENTIAL", format!("{hp} is not reached through the client's network")));
-                }
-                log(&format!("ssh via the client's network disabled for {hp}"));
-                ok("removed")
-            }
+            // 经客户端的请求在 dispatch 里拆开；到这里的是包了两层的
+            Request::ViaClient { .. } => Err(err("BAD_REQUEST", "via_client wraps one ssh, upload or download request")),
             Request::Tokens => {
                 let t = self.tokens.lock().unwrap();
                 ok(t.list()
@@ -1659,8 +1610,6 @@ impl Shared {
             old_fingerprint: old.into(),
             new_fingerprint: new.into(),
             seen_at: pm_vault::now(),
-            algo: String::new(),
-            via_client: false,
         });
         log(&format!("host key changed for {display}"));
         let what = if kind == PinKind::Ssh { "SSH host key" } else { "TLS certificate" };
@@ -1706,73 +1655,37 @@ impl Shared {
         }
     }
 
-    /// 经客户端网络看到、但还不能用的主机密钥：记进"待确认"（信任时直接记下这个指纹），返回给 Agent 的错误。
-    /// `old` 为空表示首次见到。
-    async fn via_client_pending(&self, host_port: &str, old: &str, algo: &str, new: &str) -> ApiErr {
-        let mut inner = self.inner.lock().await;
-        inner.pending.retain(|p| p.host_port != host_port);
-        inner.pending.push(PendingPinView {
-            kind: pin_kind_str(PinKind::Ssh).into(),
-            host_port: host_port.into(),
-            old_fingerprint: old.into(),
-            new_fingerprint: new.into(),
-            seen_at: pm_vault::now(),
-            algo: algo.into(),
-            via_client: true,
-        });
-        let hint = "Ask the user to check it and trust it on the Host fingerprints page of the PassManager web UI.";
-        if old.is_empty() {
-            log(&format!("host key not confirmed yet for {host_port} (via the client's network)"));
-            return err(
-                "HOST_KEY_UNCONFIRMED",
-                format!(
-                    "{host_port} is reached through the client's network and its SSH host key ({algo} {new}) is not confirmed yet. \
-                     Nothing was sent. {hint}"
-                ),
-            );
-        }
-        log(&format!("host key changed for {host_port} (via the client's network)"));
-        err(
-            "HOST_KEY_CHANGED",
-            format!(
-                "The SSH host key fingerprint of {host_port} changed (old {old}, new {new}); the host is reached through the client's \
-                 network. Nothing was sent. {hint}"
-            ),
-        )
-    }
-
-    /// 第一跳怎么连：设成经客户端网络的主机，要发起请求的客户端送来转发连接；否则服务器直连。
-    async fn first_hop(&self, t: &ssh::Target, via_client: bool) -> Result<ssh::Via<'static>, ApiErr> {
-        if !via_client {
+    /// 第一跳怎么连：Agent 显式要求经客户端（见 [`dial::requested`]）时，请发起请求的客户端去连；否则服务器直接连。
+    async fn first_hop(&self, t: &ssh::Target) -> Result<ssh::Via<'static>, ApiErr> {
+        if !dial::requested() {
             return Ok(ssh::Via::Direct);
         }
         let stream = dial::request_stream(&self.dials, &t.host, t.port).await?;
         log(&format!("ssh via the client's network: {}", t.host_port()));
-        Ok(ssh::Via::Client(stream))
+        Ok(ssh::Via::Stream(stream, " via the client's network"))
     }
 
     /// 打开 SSH 会话；目标写成 `跳板>目标` 时先登录跳板，再经跳板登录目标（两跳各用自己绑定的凭据与主机密钥记录）。
-    /// 第一跳（跳板，或没有跳板时的目标）设成经客户端网络时，由发起请求的客户端建立 TCP 连接。
+    /// Agent 要求经客户端时，第一跳（跳板，或没有跳板时的目标）由发起请求的客户端建立 TCP 连接。
     async fn ssh_session(&self, target: &str) -> Result<(ssh::Session, ssh::Target, Arc<Redactor>), ApiErr> {
         let (jump, dest) = ssh::parse_route(target)?;
-        let (jump, (target, expected, via_client), redactor) = {
+        let (jump, (target, expected), redactor) = {
             let inner = self.inner.lock().await;
             let v = inner.vault.as_ref().ok_or_else(|| self.locked_err())?;
-            let hop = |d: &ssh::Dest| -> Result<(ssh::Target, Option<String>, bool), ApiErr> {
+            let hop = |d: &ssh::Dest| -> Result<(ssh::Target, Option<String>), ApiErr> {
                 http::alias_guard(&v.payload, &d.host)?;
                 let (key, pw) = http::ssh_credentials(&v.payload, d.name.as_deref(), &d.host, d.port)?;
                 let t = ssh::Target::from_entries(key.as_ref(), pw.as_ref(), &d.host, d.port, &d.user);
                 let expected = v.payload.pin(PinKind::Ssh, &t.host_port()).map(|p| p.fingerprint.clone());
-                let via_client = v.payload.via_client_host(&t.host_port());
-                Ok((t, expected, via_client))
+                Ok((t, expected))
             };
             (jump.as_ref().map(hop).transpose()?, hop(&dest)?, inner.redactor.clone())
         };
-        let Some((jt, jexp, jvia)) = jump else {
-            let via = self.first_hop(&target, via_client).await?;
+        let Some((jt, jexp)) = jump else {
+            let via = self.first_hop(&target).await?;
             return Ok((ssh::Session::new(self.ssh_hop(&target, expected, via).await?, None), target, redactor));
         };
-        let via = self.first_hop(&jt, jvia).await?;
+        let via = self.first_hop(&jt).await?;
         let jh = self.ssh_hop(&jt, jexp, via).await?;
         match self.ssh_hop(&target, expected, ssh::Via::Jump(&jh, &jt.host_port())).await {
             Ok(h) => Ok((ssh::Session::new(h, Some(jh)), target, redactor)),
@@ -1791,13 +1704,8 @@ impl Shared {
         expected: Option<String>,
         via: ssh::Via<'_>,
     ) -> Result<russh::client::Handle<ssh::Checker>, ApiErr> {
-        let client = matches!(via, ssh::Via::Client(_));
         match ssh::connect_on(t, expected.clone(), via).await? {
-            ssh::Connected::Unconfirmed { algo, observed } => Err(self.via_client_pending(&t.host_port(), "", &algo, &observed).await),
-            ssh::Connected::PinMismatch { algo, observed } if client => {
-                Err(self.via_client_pending(&t.host_port(), expected.as_deref().unwrap_or("?"), &algo, &observed).await)
-            }
-            ssh::Connected::PinMismatch { observed, .. } => {
+            ssh::Connected::PinMismatch { observed } => {
                 Err(self.pin_mismatch(PinKind::Ssh, &t.host_port(), &t.host_port(), expected.as_deref().unwrap_or("?"), &observed).await)
             }
             ssh::Connected::Session { handle, observed } => {
@@ -2199,20 +2107,6 @@ fn trust_session_ok(server: bool, session: &Session) -> bool {
     matches!(session, Session::Web) || !server
 }
 
-/// 网页上填的经客户端网络连接的主机：`host` 或 `host:port`（IPv6 写成 `[::1]:22`），省略端口时为 22。
-/// 返回和主机指纹同样写法的 `host:port`（主机名已规范化）。不接受用户名、引用名和跳板：这里只说主机在哪个网络。
-fn via_client_host_port(input: &str) -> Result<String, ApiErr> {
-    let bad = || err("BAD_REQUEST", "write the host as host or host:port");
-    let t = input.trim();
-    // 只要主机：带 @（用户名）、/（引用名）、>（跳板）或空白的都不是
-    if t.is_empty() || t.contains(['@', '/', '>']) || t.chars().any(char::is_whitespace) {
-        return Err(bad());
-    }
-    // 借用 SSH 目标的解析（同样的主机名校验与规范化）
-    let d = ssh::parse_target(t).map_err(|_| bad())?;
-    Ok(format!("{}:{}", d.host, d.port))
-}
-
 /// 指纹变化时附在错误里的做法：服务器模式只能在网页"主机指纹"页信任，单机模式用 `PassManager trust <主机>`。
 fn trust_hint(server: bool, host: &str) -> String {
     if server {
@@ -2492,20 +2386,6 @@ mod otp_tests {
         let s = trust_hint(true, "db1.example.com");
         assert!(s.contains("web UI") && s.contains("Host fingerprints") && !s.contains("PassManager trust"), "{s}");
         assert!(trust_hint(false, "db1.example.com").ends_with("PassManager trust db1.example.com"));
-    }
-
-    #[test]
-    fn via_client_hosts_are_plain_host_ports() {
-        // 默认端口 22；主机名转小写，去掉首尾空白
-        assert_eq!(via_client_host_port("DB1.Example.com").unwrap(), "db1.example.com:22");
-        assert_eq!(via_client_host_port(" 198.51.100.7:2222 ").unwrap(), "198.51.100.7:2222");
-        assert_eq!(via_client_host_port("[2001:db8::1]:22").unwrap(), "2001:db8::1:22");
-        // 用户名、引用名、跳板、空白、空的、端口不对：都拒绝
-        for bad in ["root@db1.example.com", "name/db1.example.com", "a>b", "db1 example", "", "db1.example.com:x"] {
-            assert_eq!(via_client_host_port(bad).unwrap_err().code, "BAD_REQUEST", "{bad}");
-        }
-        // 管理请求只属于网页，不是 Agent 能用的操作
-        assert!(Request::AddViaClientHost { host: "h".into() }.is_via_client_admin());
     }
 
     #[test]

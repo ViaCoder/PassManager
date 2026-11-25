@@ -544,12 +544,13 @@ pub struct Payload {
     pub managed_certs: Vec<crate::managed_cert::ManagedCert>,
     /// 两步验证账户（种子平时不出库，只有网页点"显示密钥"时返回）。v6 新增。
     pub otp: Vec<crate::otp::OtpAccount>,
-    /// 经客户端网络连接的 SSH 主机（服务器连不到、客户端连得到）。v7 新增。
+    /// 经客户端网络连接的 SSH 主机。v7 新增（rc.26）；rc.27 起不再使用，只为读写 rc.26 的库保留。
     pub via_client: Vec<ViaClientHost>,
 }
 
 /// 一台经客户端网络连接的 SSH 主机：服务器请发起请求的客户端替它建立 TCP 连接，
-/// SSH 握手、主机密钥核对与认证仍在服务器上端到端完成，客户端只转发密文。只能在网页上设置。
+/// SSH 握手、主机密钥核对与认证仍在服务器上端到端完成，客户端只转发密文。0.3.11-rc.26 在网页上设置；
+/// rc.27 起改为 Agent 在请求里显式要求，这张表不再使用，只为能照常打开 rc.26 写过的库而保留。
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ViaClientHost {
     /// `host:port`（主机名已规范化，和主机指纹的写法一样）。

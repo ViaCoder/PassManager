@@ -31,7 +31,7 @@ use axum::routing::{get, post};
 use minijinja::value::Serde;
 use minijinja::{Environment, Value, context};
 use pm_proto::{EntryInput, EntryView, PendingEnrollView, PendingPinView, PinView, Request as Req, Response as Resp};
-use pm_proto::{FieldInput, RelayPolicyView, SecurityView, ServerStatusView, SettingsView, TokenView, ViaClientView};
+use pm_proto::{FieldInput, RelayPolicyView, SecurityView, ServerStatusView, SettingsView, TokenView};
 use serde::de::DeserializeOwned;
 
 pub use front::ConnInfo;
@@ -471,8 +471,6 @@ pub fn router(st: St) -> Router {
         .route("/enrollments/{id}/cancel", post(enroll_cancel))
         .route("/pins", get(pins))
         .route("/pins/trust", post(pins_trust))
-        .route("/pins/via", post(pins_via_add))
-        .route("/pins/via/remove", post(pins_via_remove))
         .route("/settings", get(settings).post(settings_post))
         .route("/security", get(security))
         .route("/a/{code}", get(boot_script))
@@ -785,9 +783,7 @@ fn done_text(code: Option<&str>) -> Option<&'static str> {
         "renamed" => "已改名。",
         "revoked" => "令牌已吊销，立即失效。",
         "cancelled" => "注册码已作废。",
-        "trusted" => "已清除记录，下次连接时重新记录指纹；经客户端网络连接的主机直接记下了待确认表里的新指纹。",
-        "via-added" => "已设为经客户端网络连接。第一次连接后，在本页确认它的 SSH 主机密钥。",
-        "via-removed" => "已改回由服务器直接连接。",
+        "trusted" => "已清除记录，下次连接时重新记录指纹。",
         "locked" => "已锁定。",
         "unlocked" => "已解锁。",
         _ => return None,
@@ -1633,16 +1629,9 @@ async fn enroll_cancel(
 async fn pins_page(st: &AppState, c: &Ctx, extra: Value) -> Response {
     let pins: Result<Vec<PinView>, _> = call(st, Req::Pins).await;
     let pending: Vec<PendingPinView> = call(st, Req::PendingPins).await.unwrap_or_default();
-    // 经客户端网络连接的 SSH 主机（库锁定时为空）
-    let via: Vec<ViaClientView> = call(st, Req::ViaClientHosts).await.unwrap_or_default();
     match pins {
-        Ok(p) => page(st, c, "pins.html", context! { pins => sv(&p), pending => sv(&pending), via => sv(&via), ..extra }),
-        Err(e) => page(
-            st,
-            c,
-            "pins.html",
-            context! { pins => sv(Vec::<PinView>::new()), pending => sv(&pending), via => sv(&via), ..err_flash(&e) },
-        ),
+        Ok(p) => page(st, c, "pins.html", context! { pins => sv(&p), pending => sv(&pending), ..extra }),
+        Err(e) => page(st, c, "pins.html", context! { pins => sv(Vec::<PinView>::new()), pending => sv(&pending), ..err_flash(&e) }),
     }
 }
 
@@ -1670,45 +1659,6 @@ async fn pins_trust(
     }
     match call::<serde_json::Value>(&st, Req::TrustPins { pattern }).await {
         Ok(_) => done("/pins", "trusted"),
-        Err(e) => pins_page(&st, &c, err_flash(&e)).await,
-    }
-}
-
-/// 设一台 SSH 主机经客户端网络连接（`host` 或 `host:port`）。
-async fn pins_via_add(
-    State(st): State<St>,
-    h: HeaderMap,
-    conn: Option<Extension<ConnInfo>>,
-    Form(f): Form<HashMap<String, String>>,
-) -> Response {
-    let c = match require_post(&st, &h, &conn, &f) {
-        Ok(c) => c,
-        Err(r) => return r,
-    };
-    let host = f.get("host").map(|s| s.trim().to_string()).unwrap_or_default();
-    if host.is_empty() {
-        return pins_page(&st, &c, context! { flash => "请输入主机。", flash_kind => "err" }).await;
-    }
-    match call::<serde_json::Value>(&st, Req::AddViaClientHost { host }).await {
-        Ok(_) => done("/pins", "via-added"),
-        Err(e) => pins_page(&st, &c, err_flash(&e)).await,
-    }
-}
-
-/// 改回由服务器直接连接。
-async fn pins_via_remove(
-    State(st): State<St>,
-    h: HeaderMap,
-    conn: Option<Extension<ConnInfo>>,
-    Form(f): Form<HashMap<String, String>>,
-) -> Response {
-    let c = match require_post(&st, &h, &conn, &f) {
-        Ok(c) => c,
-        Err(r) => return r,
-    };
-    let host_port = f.get("host_port").map(|s| s.trim().to_string()).unwrap_or_default();
-    match call::<serde_json::Value>(&st, Req::RemoveViaClientHost { host_port }).await {
-        Ok(_) => done("/pins", "via-removed"),
         Err(e) => pins_page(&st, &c, err_flash(&e)).await,
     }
 }

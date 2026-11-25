@@ -158,8 +158,8 @@ pub(crate) async fn handle_conn<S: AsyncRead + AsyncWrite + Unpin + Send + 'stat
             },
             // 上游 HTTP 不限时：等待期间同时读这条连接。Agent 断开（或按一问一答本不该来的新帧）时
             // 丢弃这个请求，上游连接随之关闭，服务器上不会留下没人等的请求。
-            // 能转发的连接上的 SSH 类请求：处理期间把转发要求写回这条连接（只写不读，不打乱一问一答）
-            Ok(req) if dial_id.is_some() && req.ssh_target().is_some() => {
+            // 能转发的连接上、Agent 显式要求经客户端的请求：处理期间把转发要求写回这条连接（只写不读，不打乱一问一答）
+            Ok(req) if dial_id.is_some() && req.via_client() => {
                 let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
                 let ctx = crate::dial::DialCtx { token_id: dial_id.clone().unwrap_or_default(), asks: tx };
                 let work = crate::dial::DIALER.scope(ctx, shared.dispatch(&session, req));
