@@ -4,6 +4,18 @@ English | [简体中文](CHANGELOG.zh-CN.md)
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.3.11-rc.28] - 2026-11-26
+
+### Changed
+
+- **Web forms line up on one column.** In every form card the inputs, hints, group dividers and the controls at the top
+  right of a card (such as "Show all" or the relay policy badge) share the same 40rem width. The upload area on the 2FA
+  import page and the label and language fields on the Agent tokens page follow it too. Drop-downs are as tall as text
+  inputs.
+- **Relay policy card spacing.** The card's hint, the expanded "More rules and limits" section, the Save and Delete buttons
+  and the main form's Save button above the card are spaced apart, and the four limits sit in two columns (one on narrow
+  screens).
+
 ## [0.3.11-rc.27] - 2026-11-25
 
 ### Changed

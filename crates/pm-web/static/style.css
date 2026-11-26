@@ -150,7 +150,8 @@ legend{font-weight:650;font-size:var(--fs-md);padding:0 var(--s2) 0 0}
 .field{margin:0 0 var(--s4);min-width:0}
 .field>label,.field-label{display:block;font-weight:600;font-size:var(--fs-sm);margin:0 0 .35rem}
 .opt{font-weight:400;color:var(--muted);font-size:var(--fs-sm)}
-.hint{color:var(--muted);font-size:var(--fs-sm);margin:.4rem 0 0;max-width:72ch}
+/* 说明文字与输入框同宽（40rem），换行位置和输入框右边对齐 */
+.hint{color:var(--muted);font-size:var(--fs-sm);margin:.4rem 0 0;max-width:40rem}
 .hint .i{width:1em;height:1em;margin-right:.25rem}
 ul.hint{padding-left:1.2em}
 ul.hint li{margin:.15rem 0}
@@ -197,6 +198,29 @@ input[type=checkbox]{width:1.05rem;height:1.05rem;margin:0;flex:none;accent-colo
 .input-unit span{color:var(--muted)}
 .form-actions{display:flex;flex-wrap:wrap;gap:var(--s2);align-items:center;margin-top:var(--s4)}
 .form>.form-actions{margin-top:0}
+/* 对齐：表单卡片里的内容都在同一条 40rem 宽的栏里 */
+/* 卡片右上角的按钮或标记（"全部显示"、"未设置"）和输入框右边对齐，不贴到卡片最右边 */
+.card:has(.field)>.card-head{max-width:40rem}
+/* 分组的分隔线和输入框一样长 */
+.form fieldset{max-width:40rem}
+/* 卡片标题下面紧跟的说明：和下面的第一个输入项隔开 */
+:is(.card-head,.card-title)+.hint{margin:0 0 var(--s4)}
+/* 折叠说明（例如"更多规则与上限"）后面的按钮：留出和输入项之间一样的距离 */
+details.help+.form-actions{margin-top:var(--s4)}
+/* 主表单的"保存/取消"和后面另一张卡片（例如中继策略）隔开 */
+form.form+.card{margin-top:var(--s5)}
+/* 下拉框和输入框一样高（Chrome 的下拉框不按行高撑开）：行高 1.6em + 上下内边距 1rem + 边框 2px */
+select{min-height:calc(1.6em + 1rem + 2px)}
+/* 中继策略的四个上限：两栏并排，窄屏自动变成一栏 */
+#relay details fieldset{display:grid;grid-template-columns:repeat(auto-fill,minmax(14rem,1fr));gap:var(--s3) var(--s4)}
+#relay details fieldset>.field{margin:0}
+/* 展开的折叠说明：标题和里面第一个输入项隔开 */
+details.help>summary+.field{margin-top:var(--s3)}
+/* 表单下面单独的"删除"确认（例如"删除策略"）：和"保存"按钮隔开 */
+.form+details.confirm{margin-top:var(--s3)}
+/* 并排的输入项（例如令牌页的标签和说明语言）：整行 40rem，输入框填满自己那一格，不在中间留空 */
+.field-row{max-width:40rem}
+.field-row>.field>:is(input,select){max-width:none}
 /* 按类型隐藏不相关的输入（:has 不支持时全部显示，服务端按类型忽略无关字段） */
 .form:has(#f-kind option[value=password]:checked) :is(.k-fields,.k-ssh){display:none}
 .form:has(#f-kind option[value=ssh-key]:checked) .k-fields{display:none}
@@ -353,7 +377,8 @@ td.actions-cell .row{justify-content:flex-end;flex-wrap:nowrap;align-items:flex-
 .rename-row input[name=new_name]{flex:1 1 16rem;min-width:0}
 details.confirm.danger-zone{display:block;margin-top:var(--s4);padding-top:var(--s4);border-top:1px solid var(--line)}
 /* 导入：拖放区 */
-.drop{border:2px dashed var(--line2);border-radius:var(--radius);padding:var(--s5);text-align:center;background:var(--surface2);transition:border-color .15s,background .15s}
+/* 上传区和输入框同宽（40rem） */
+.drop{max-width:40rem;border:2px dashed var(--line2);border-radius:var(--radius);padding:var(--s5);text-align:center;background:var(--surface2);transition:border-color .15s,background .15s}
 .drop.over{border-color:var(--acc);background:var(--acc-soft)}
 .drop-title{font-weight:600;margin:0 0 var(--s3)}
 .drop input[type=file]{max-width:100%}
