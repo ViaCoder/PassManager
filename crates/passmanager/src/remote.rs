@@ -143,10 +143,8 @@ fn write_private(path: &Path, data: &[u8]) -> Result<(), String> {
 
 #[derive(Clone, Debug, Default)]
 pub struct EnrollOpts {
-    /// 不写入 Agent 的 MCP 配置（只保存远程配置与令牌；也不写使用规则）。
+    /// 不写入 Agent 的 MCP 配置（只保存远程配置与令牌）。
     pub no_mcp: bool,
-    /// 不把使用规则写入 Agent 的全局指令文件。
-    pub no_instructions: bool,
     /// 不安装 git-proxy 服务、不写 git 的 insteadOf。
     pub no_git_proxy: bool,
     /// git-proxy 服务的监听地址（默认 127.0.0.1:7878）。
@@ -203,16 +201,11 @@ pub fn enroll_cmd(url: &str, o: EnrollOpts) -> ExitCode {
                 if !any {
                     println!("  · 没有检测到已安装的 Agent。MCP 配置：{{\"command\": \"{bin}\", \"args\": [\"mcp\"]}}");
                 }
-                if !o.no_instructions {
-                    let block = pm_proto::agent_text::instruction_block(pm_proto::agent_text::Lang::En);
-                    for (name, path, r) in crate::agent_instructions::install_detected(&block) {
-                        match r {
-                            Ok(crate::agent_instructions::Change::Unchanged) => {
-                                println!("  · {name}：使用规则已是最新（{}）", path.display())
-                            }
-                            Ok(_) => println!("  · {name}：已写入使用规则（{}）", path.display()),
-                            Err(e) => println!("  · {name}：未写入使用规则（{e}）"),
-                        }
+                // Agent 只从 MCP 了解 PassManager：旧版本写进全局指令文件的规则块在这里删除（只做一次，见 agent_instructions）
+                for (name, path, r) in crate::agent_instructions::migrate_once_in(&d, &crate::agent_instructions::home()) {
+                    match r {
+                        Ok(_) => println!("  · {name}：已删除旧的使用规则（{}，原文件备份为 .passmanager.bak）", path.display()),
+                        Err(e) => println!("  · {name}：没能删除旧的使用规则（{e}）"),
                     }
                 }
                 if !o.no_git_proxy {

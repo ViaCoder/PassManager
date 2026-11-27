@@ -13,25 +13,25 @@ use serde_json::{Value, json};
 
 const SUPPORTED: &[&str] = &["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
 
-/// 服务器级说明（逐步披露的第一层，≤ 5 行）：只讲固定流程与边界。具体写法由 lookup 的 `how` 给出，错误处理由 `Next:` 给出。
-const INSTRUCTIONS: &str = "PassManager lets you use stored secrets without ever seeing them.
-1. Call lookup with the URL or user@host you need.
-2. Copy its `how` into http, ssh or scp; replace only the <...> parts.
-Never ask for, print or store a secret, and never try to reveal one.
-If a result is an error, do exactly what its Next: line says; do not retry the same call.";
+/// 服务器级说明：只有最基本的用法（2 行），不规定 Agent 的做法（不限重试、不要求"照做"），尽量不影响 Agent 本来的判断。
+/// 安全边界由服务器执行；具体写法由 lookup 的 `how` 给出，出错时错误后面附 `Next:` 提示。
+/// 这和工具描述是 Agent 了解 PassManager 的唯一入口：0.3.11-rc.29 起不再往全局指令文件里写规则。
+const INSTRUCTIONS: &str = "PassManager uses stored secrets for you without showing them.
+Call lookup with the URL or user@host you need, then make the call its `how` returns.";
 
-/// 工具（第二层）：每个 2~3 句加一个最小示例；只靠这些描述也能正确使用（不是每个客户端都读全局指令文件）。
+/// 工具：每个只有一句用法加一个最小示例；功能入口（alias://、tang、跳板、via_client）各留最短的一句，
+/// 其余细节在 lookup 的 how 与错误的 Next: 里，用到时才出现。
 fn tools() -> Value {
     json!([
         {
             "name": "lookup",
             "title": "Find credential",
-            "description": "Call this first. Finds the stored credential for one target and returns `how`: a ready-to-copy http, ssh or scp call with the right placeholders. target is the URL, user@host or host you will use (or {{name}} when the user names a credential; alias://<name> for an address the user aliased; or tang to keep a secret file on a remote host encrypted at rest). Example: {\"target\":\"https://api.github.com/user\"}",
+            "description": "Returns `how`, a ready http, ssh or scp call for a URL, user@host or host (alias://<name> and tang work too). Example: {\"target\":\"https://api.github.com/user\"}",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "target": {"type": "string", "description": "URL, user@host[:port] or host"},
-                    "use": {"type": "string", "enum": ["http", "ssh", "scp", "git"], "description": "optional; guessed from target"}
+                    "use": {"type": "string", "enum": ["http", "ssh", "scp", "git"], "description": "optional"}
                 },
                 "required": ["target"],
                 "additionalProperties": false
@@ -41,12 +41,12 @@ fn tools() -> Value {
         {
             "name": "http",
             "title": "HTTPS request",
-            "description": "Send one HTTPS request. Write placeholders exactly as lookup's how shows (e.g. {{secret}}); PassManager fills them in and redacts secrets from the response. A placeholder goes only where the API reads a credential (a credential header, or the whole value of a key/token query parameter or JSON/form field); anywhere else, and paths that create or manage keys or tokens, are refused. Example: {\"method\":\"GET\",\"url\":\"https://api.github.com/user\",\"headers\":{\"Authorization\":\"Bearer {{secret}}\"}}",
+            "description": "Sends one HTTPS request; placeholders from lookup's how, such as {{secret}}, are filled in on the server. Example: {\"method\":\"GET\",\"url\":\"https://api.github.com/user\",\"headers\":{\"Authorization\":\"Bearer {{secret}}\"}}",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "method": {"type": "string", "description": "GET, POST, PUT, PATCH, DELETE ..."},
-                    "url": {"type": "string", "description": "https:// URL, or {{name.base_url}}/path when lookup says so"},
+                    "method": {"type": "string"},
+                    "url": {"type": "string"},
                     "headers": {"type": "object", "additionalProperties": {"type": "string"}},
                     "body": {"type": "string"}
                 },
@@ -57,13 +57,13 @@ fn tools() -> Value {
         {
             "name": "ssh",
             "title": "Run SSH command",
-            "description": "Run one shell command on user@host[:port] with the stored password or key; output is redacted. A command starting with \"sudo \" gets the password automatically (only sudo reads it); placeholders for credentials are never put into commands. To go through a jump host write jumpuser@jumphost>user@host; each hop uses its own stored credential. Example: {\"target\":\"root@192.0.2.10\",\"command\":\"uptime\"}",
+            "description": "Runs one shell command on user@host with the stored credential. Example: {\"target\":\"root@192.0.2.10\",\"command\":\"uptime\"}",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "target": {"type": "string", "description": "user@host or user@host:port (name/user@host to pick a credential; jumpuser@jumphost>user@host through one jump host)"},
+                    "target": {"type": "string", "description": "user@host[:port]; jumpuser@jumphost>user@host through a jump host"},
                     "command": {"type": "string"},
-                    "via_client": {"type": "boolean", "description": "Only after the user explicitly allows it: connect from this machine's network, for a host the PassManager server cannot reach"}
+                    "via_client": {"type": "boolean", "description": "Only after the user explicitly allows it: connect from this machine's network"}
                 },
                 "required": ["target", "command"]
             },
@@ -72,7 +72,7 @@ fn tools() -> Value {
         {
             "name": "scp",
             "title": "Copy file over SSH",
-            "description": "Copy one file (max 64 MiB) to or from a host. Exactly one side is remote, written user@host:/path (or jumpuser@jumphost>user@host:/path through one jump host); downloaded content is redacted. Example: {\"source\":\"./app.conf\",\"destination\":\"root@192.0.2.10:/etc/app.conf\"}",
+            "description": "Copies one file to or from a host; the remote side is user@host:/path. Example: {\"source\":\"./app.conf\",\"destination\":\"root@192.0.2.10:/etc/app.conf\"}",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -475,21 +475,32 @@ mod tests {
         assert_eq!(lines[2]["error"]["code"], -32601);
     }
 
-    /// 不臃肿：4 个工具、说明 ≤ 5 行、整个工具列表有大小上限；每个工具都有示例与 annotations。
+    /// 只有最基本的用法：4 个工具、说明 ≤ 2 行、整个工具列表 ≤ 2300 字节（rc.28 是 3600）；每个工具都有示例与 annotations；
+    /// 没有限制 Agent 做法的话（不限重试、不要求"照做"）。
     #[test]
     fn surface_stays_small() {
         let t = tools();
         let names: Vec<&str> = t.as_array().unwrap().iter().map(|x| x["name"].as_str().unwrap()).collect();
         assert_eq!(names, ["lookup", "http", "ssh", "scp"]);
         let size = serde_json::to_string(&t).unwrap().len();
-        assert!(size <= 3600, "tools/list is {size} bytes");
-        assert!(INSTRUCTIONS.lines().count() <= 5);
+        assert!(size <= 2300, "tools/list is {size} bytes");
+        assert!(INSTRUCTIONS.lines().count() <= 2);
+        assert!(INSTRUCTIONS.contains("lookup") && INSTRUCTIONS.contains("`how`") && !INSTRUCTIONS.contains("list"));
         for x in t.as_array().unwrap() {
-            assert!(x["description"].as_str().unwrap().contains("Example: {"), "{x}");
+            let d = x["description"].as_str().unwrap();
+            assert!(d.contains("Example: {"), "{x}");
+            // 每个描述只有一句用法加示例
+            assert_eq!(d.split("Example:").next().unwrap().trim_end().matches(". ").count(), 0, "{d}");
             assert!(x["annotations"]["readOnlyHint"].is_boolean(), "{x}");
         }
         assert_eq!(t[0]["annotations"]["readOnlyHint"], true);
-        assert!(!INSTRUCTIONS.contains("list"));
+        // 说明与描述里都没有限制 Agent 做法的话（via_client 的"用户明确允许后"是用户要求的，不算）
+        let all =
+            format!("{INSTRUCTIONS} {}", t.as_array().unwrap().iter().map(|x| x["description"].as_str().unwrap()).collect::<String>());
+        let low = all.to_ascii_lowercase();
+        for bad in ["retry", "do not", "don't", "never", "exactly", "at most", "only once", "must", "first"] {
+            assert!(!low.contains(bad), "{bad}: {all}");
+        }
     }
 
     #[test]

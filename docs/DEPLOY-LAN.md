@@ -120,7 +120,7 @@ Stored keys are never shown by default: the list has no key information and the 
 ```sh
 ssh root@pm.example.com passmanager show --label laptop --lang en   # Chinese is the default
 ssh root@pm.example.com passmanager show --label laptop --url       # only the pm-enroll:// code (for a source-built client)
-passmanager show [--rules]                                          # anywhere: the public guide without a code / only the rules
+passmanager show                                                    # anywhere: the public guide without a code
 ```
 
 `show --label` prints one block of text; give it to the AI agent on the agent machine (the web UI's "Agent 令牌" page shows the same
@@ -135,11 +135,13 @@ enrolled machine it also names the server. The block contains a one-time enrollm
 2. if that fails at the TLS handshake (curl without ML-KEM, e.g. macOS or older distributions) or on Windows: build the client
    from the release tag and commit pinned in the block (`cargo build --release -p passmanager`; needs Rust, cmake, a C compiler,
    libclang) and run its `enroll`. A development build of the server prints a note instead of a pin;
-3. the usage rules for the AI.
+3. restart the agent so that it loads the PassManager MCP server; the MCP server instructions, tool descriptions, lookup's
+   `how` and the `Next:` hint after an error are all the agent is told.
 
 `enroll` verifies the pinned server key fingerprint, stores the token in a private file, writes the MCP config of detected
-agents (without the token) and the usage rules between `<!-- passmanager:begin -->` / `<!-- passmanager:end -->` in their global
-instruction files (backup `*.passmanager.bak`; `--no-instructions` skips this), and sets up git over HTTPS (`--no-git-proxy` skips
+agents (without the token), writes nothing into their global instruction files (it removes the rules block that versions up to
+0.3.11-rc.28 put between `<!-- passmanager:begin -->` / `<!-- passmanager:end -->`, backup `*.passmanager.bak`; an enrolled
+client does the same once on its first command after updating), and sets up git over HTTPS (`--no-git-proxy` skips
 this): it installs `passmanager git-proxy` as a per-user service — `~/.config/systemd/user/passmanager-git-proxy.service`
 (`systemctl --user enable` + restart; it tries `loginctl enable-linger` without prompting so the proxy starts at boot, otherwise
 it starts at login and the output says to run `sudo loginctl enable-linger <user>`), a LaunchAgent
@@ -155,7 +157,7 @@ it is one atomic step, so of concurrent attempts exactly one succeeds). Failed e
 (10 failures in 10 minutes → 15 minutes lockout, during which even a valid code is refused and not consumed). The audit log records
 only the label, the source address and the result, never the code. Fetching the script does not consume the code; `enroll` does.
 Unknown or expired codes return 404; `/a/` requests are rate-limited, audited and, like the whole web port, only accepted from the
-configured CIDRs. `passmanager unenroll` removes the configuration, MCP entries, rules and the git-proxy service from the agent
+configured CIDRs. `passmanager unenroll` removes the configuration, MCP entries and the git-proxy service from the agent
 machine; revoke the token in the web UI or with `passmanager token revoke <id>` (pending codes are listed by `token list` and can
 be revoked the same way).
 

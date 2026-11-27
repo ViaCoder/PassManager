@@ -82,15 +82,17 @@ Give the printed block to the AI agent on the machine that should use PassManage
 (10 minutes, single use) and tells the agent to run one command —
 `sh -c "$(curl --proto '=https' --tlsv1.3 -fsSL https://pm.example.com/a/<code> || echo "exit $?")"` (works in sh, bash and zsh,
 and fails loudly with curl's exit code) — which installs the client (SHA-256 verified),
-enrolls it, configures the MCP server for the detected agents (Claude Code, Codex, Cursor, Gemini CLI, VS Code, Windsurf) and
-adds the usage rules to their global instruction files (`~/.claude/CLAUDE.md`, `~/.codex/AGENTS.md`, …), and sets up git over
-HTTPS: `git-proxy` becomes a per-user service that starts at boot or login (systemd user unit; LaunchAgent on macOS; manual steps
+enrolls it, configures the MCP server for the detected agents (Claude Code, Codex, Cursor, Gemini CLI, VS Code, Windsurf), and sets up git over
+HTTPS. Agents learn how to use PassManager only from MCP (the server instructions, the tool descriptions, lookup's `how` and the
+`Next:` hint after an error); nothing is written into their global instruction files, and the rules block that versions up to
+0.3.11-rc.28 put into `~/.claude/CLAUDE.md`, `~/.codex/AGENTS.md`, … is removed once (backup `*.passmanager.bak`) by the next
+command after the client updates itself. `git-proxy` becomes a per-user service that starts at boot or login (systemd user unit; LaunchAgent on macOS; manual steps
 on Windows) and every host of an entry with the `git` op (GitHub, a self-hosted forge, …) gets an `insteadOf` line, so plain
 `git clone https://…` works while the token stays on the server. If the agent's curl cannot do post-quantum TLS (exit code 35),
 the block tells it to build the client from the pinned release source and run `enroll` instead, which does the same.
 
 `passmanager show` is the one onboarding command: `show --label NAME` (root on the server) prints the full guide with a fresh code,
-`show --label NAME --url` only the `pm-enroll://` code, `show --rules` only the rules, and plain `show` (or any non-root user) the
+`show --label NAME --url` only the `pm-enroll://` code, and plain `show` (or any non-root user) the
 public guide without a code — on an enrolled machine it also names the server. `passmanager token list|revoke` manage tokens and
 pending codes; `passmanager unenroll` removes everything again (including the git-proxy service and the `insteadOf` lines).
 
@@ -114,7 +116,7 @@ What else 0.2.0 adds on top of `http` / `ssh` / `scp`:
 - **`PassManager run <command>`** (agent machine, Unix): forwarded authentication for one command, with nothing installed or
   configured: `passmanager run git push`, `passmanager run ssh deploy@db1`, `passmanager run rsync …`. It opens a loopback relay
   (random port, one-time path token, handed to git only through `GIT_CONFIG_*` environment variables) and a temporary agent
-  socket (`SSH_AUTH_SOCK`), and removes both when the command exits. Tokens and keys stay on the server. The agent rules use it.
+  socket (`SSH_AUTH_SOCK`), and removes both when the command exits. Tokens and keys stay on the server. The MCP server instructions mention it.
 - **`PassManager run --http <origin>`** (agent machine, Unix): local programs (OpenAI-compatible SDKs, CLIs, curl) call an HTTPS
   API through a loopback relay; the server checks each request against the credential's relay policy (`passmanager relay set`),
   adds the credential and streams back a redacted answer. See [docs/DEPLOY-LAN.md](docs/DEPLOY-LAN.md) §3.1.2.

@@ -78,14 +78,16 @@ passmanager show --label laptop                                            # 打
 把打印出的整段文字交给要使用 PassManager 的那台机器上的 AI Agent。其中有一个一次性注册码（10 分钟、只能用一次），
 并让 Agent 执行一条命令——`sh -c "$(curl --proto '=https' --tlsv1.3 -fsSL https://pm.example.com/a/<注册码> || echo "exit $?")"`（在 sh、bash、zsh 中都能运行，
 下载失败时以 curl 的退出码报错）——它安装客户端（校验 SHA-256）、
-注册、为检测到的 Agent（Claude Code、Codex、Cursor、Gemini CLI、VS Code、Windsurf）配置 MCP 服务，并把使用规则写入它们的
-全局指令文件（`~/.claude/CLAUDE.md`、`~/.codex/AGENTS.md` 等），并配置基于 HTTPS 的 git：`git-proxy` 成为开机或登录时自动启动的
+注册、为检测到的 Agent（Claude Code、Codex、Cursor、Gemini CLI、VS Code、Windsurf）配置 MCP 服务，并配置基于 HTTPS 的 git。
+Agent 只从 MCP 了解 PassManager 的用法（服务器说明、工具描述、lookup 的 `how` 与错误后面的 `Next:` 提示），不往它们的全局指令
+文件里写任何东西；0.3.11-rc.28 及以前写进 `~/.claude/CLAUDE.md`、`~/.codex/AGENTS.md` 等的规则块，会在客户端自动更新后的下一条
+命令里删除一次（备份为 `*.passmanager.bak`）。`git-proxy` 成为开机或登录时自动启动的
 用户服务（systemd 用户单元；macOS 上是 LaunchAgent；Windows 上打印手动步骤），每个有 `git` 用途条目的主机（GitHub、自建的 git
 服务器等）都写入一行 `insteadOf`，普通的 `git clone https://…` 即可使用，令牌留在服务器上。Agent 的 curl 不支持后量子 TLS
 （退出码 35）时，这段文字会让它从固定的发布源码构建客户端再运行 `enroll`，效果相同。
 
 `passmanager show` 是唯一的接入命令：`show --label 名称`（服务器上的 root）打印带新注册码的完整说明，`show --label 名称 --url`
-只打印 `pm-enroll://` 注册码，`show --rules` 只打印使用规则，不带参数的 `show`（或任何非 root 用户）打印不含注册码的公开说明——
+只打印 `pm-enroll://` 注册码，不带参数的 `show`（或任何非 root 用户）打印不含注册码的公开说明——
 在已注册的机器上还会写出连接的服务器。`passmanager token list|revoke` 管理令牌与未使用的注册码；`passmanager unenroll`
 全部移除（包括 git-proxy 服务与 `insteadOf` 行）。
 
@@ -108,7 +110,7 @@ passmanager show --label laptop                                            # 打
 - **`PassManager run <命令>`**（Agent 机器，Unix）：只为一条命令提供经服务器转发的认证，不装服务、不改配置：
   `passmanager run git push`、`passmanager run ssh deploy@db1`、`passmanager run rsync …`。它开一个本机转发口（随机端口、
   一次性路径令牌，只经 `GIT_CONFIG_*` 环境变量交给 git）和一个临时 agent 套接字（`SSH_AUTH_SOCK`），命令结束就都删除。
-  令牌和私钥留在服务器上。Agent 使用规则采用这种方式。
+  令牌和私钥留在服务器上。MCP 的服务器说明里提到这种用法。
 - **`PassManager run --http <origin>`**（Agent 机器，Unix）：本机程序（OpenAI 兼容的 SDK、CLI、curl）经本机中继调用 HTTPS API；
   服务器按凭据的中继策略（`passmanager relay set`）检查每个请求、加上凭据，把脱敏后的回答流式送回。见
   [docs/DEPLOY-LAN.zh-CN.md](docs/DEPLOY-LAN.zh-CN.md) §3.1.2。

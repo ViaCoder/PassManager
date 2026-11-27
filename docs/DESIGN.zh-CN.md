@@ -169,7 +169,7 @@ SealedPayload = { ct_mlkem, ct_mce, nonce_a, nonce_b, c2 }
 
 兼容性：`list`（以及 `list_credentials`）不再列出任何内容，返回 `USE_LOOKUP`。MCP 工具同时接受旧名称（`http_request`、`ssh_exec`、`ssh_upload`/`ssh_download`）和常见参数写法（headers 为对象 / 数组 / `"K: V"` 文本，body 为 JSON 对象，ssh 分开写 `host`/`user`/`port`，scp 用 `from`/`to`），但工具列表只公开上面 4 个；CLI 兼容 curl、OpenSSH、scp 的常用选项，并忽略 `-s`、`-L`、`-t`、`-o …` 等无关选项。客户端定位本地服务不依赖环境变量（Linux 用 `/run/user/<uid>`，Windows 用用户 SID 生成管道名），因此在环境变量很少的 MCP 子进程中同样可用。
 
-MCP 服务器为 stdio、按行分隔的 JSON-RPC 2.0，支持协议版本 2025-11-25 / 2025-06-18 / 2025-03-26 / 2024-11-05，使用说明逐步披露：`instructions`（最多 5 行：先 lookup、照抄 `how`、不泄露秘密、按 `Next:` 做）→ 工具描述（每个 2~3 句加一个最小示例，并带 `readOnlyHint`/`destructiveHint`/`openWorldHint` 标注；测试限制整个工具列表的大小）→ `lookup` 的 `how` → 按错误码附在每个错误后面的 `Next:` 行（`pm_proto::agent_text::next_step`）。错误信息不列出条目绑定的域名或允许的用途：
+MCP 服务器为 stdio、按行分隔的 JSON-RPC 2.0，支持协议版本 2025-11-25 / 2025-06-18 / 2025-03-26 / 2024-11-05，使用说明逐步披露：`instructions`（2 行最基本的用法：秘密替你使用、你看不到；先 lookup，再照它返回的 `how` 调用；不限制重试，也不要求 Agent 照做）→ 工具描述（每个一句加一个最小示例，功能入口 alias://、tang、跳板写法与 `via_client` 各留最短的一句；并带 `readOnlyHint`/`destructiveHint`/`openWorldHint` 标注；测试限制整个工具列表的大小）→ `lookup` 的 `how` → 按错误码附在每个错误后面的 `Next:` 行（`pm_proto::agent_text::next_step`）。错误信息不列出条目绑定的域名或允许的用途：
 
 | 代码 | 含义 |
 |---|---|
@@ -333,9 +333,9 @@ v2 文件头 = v1 的字段 + 模式字节（device-only）；文件头哈希仍
 | 服务器（root） | `passmanager status` / `lock` / `unlock` / `reseal` | 状态、锁定、解锁、L2 → L3 |
 | 服务器（root） | `passmanager import --name <名称> [--domain …] [--kind ssh-key] [--fields a,b] [--replace]` | 从标准输入导入密钥 |
 | 服务器（root） | `passmanager show --label 名称 [--url] [--lang en]` | 一次性注册码 + 给 AI Agent 的整段文字（`--url`：只有注册码） |
-| 任何机器 | `passmanager show [--rules] [--lang en]` | 不含注册码的公开说明（已注册时写出服务器）/ 只打印使用规则 |
-| Agent 机器 | `passmanager enroll 'pm-enroll://…' [--no-instructions] [--no-git-proxy]` | 接入服务器；配置 MCP、使用规则与 git-proxy 服务 |
-| Agent 机器 | `passmanager unenroll` | 移除配置、使用规则与 git-proxy 服务 |
+| 任何机器 | `passmanager show [--lang en]` | 不含注册码的公开说明（已注册时写出服务器） |
+| Agent 机器 | `passmanager enroll 'pm-enroll://…' [--no-git-proxy]` | 接入服务器；配置 MCP 与 git-proxy 服务 |
+| Agent 机器 | `passmanager unenroll` | 移除配置与 git-proxy 服务 |
 | Agent 机器 | `passmanager ssh-agent [--socket 路径]` | OpenSSH agent 桥（Unix） |
 | Agent 机器 | `passmanager git-proxy [--listen 127.0.0.1:端口] [--install \| --uninstall]` | git 凭据注入代理；`--install`：用户服务 + `insteadOf` |
 | 服务器 | `scripts/install-server.sh` | 服务器一键安装（`DRY_RUN=1` 用于测试） |
@@ -384,9 +384,11 @@ v2 文件头 = v1 的字段 + 模式字节（device-only）；文件头哈希仍
 - 回退：TLS 不支持 X25519MLKEM768 的客户端根本连不上（有意如此）。这时文字让 Agent 按运行中的服务器的发布标签与提交从源码构建客户端
   （构建时嵌入：CI 的 `GITHUB_*`、`PASSMANAGER_RELEASE_TAG`/`PASSMANAGER_RELEASE_COMMIT`，或位于标签 `v<版本>` 的干净检出），
   `git rev-parse HEAD` 不一致时拒绝。开发构建只给出说明，不给无法核对的固定值。
-- `enroll` 把使用规则写入检测到的 Agent 的全局指令文件（Claude Code `~/.claude/CLAUDE.md`、Codex `~/.codex/AGENTS.md`、
-  Gemini CLI `~/.gemini/GEMINI.md`、Windsurf `global_rules.md`）中 `<!-- passmanager:begin -->` 与 `<!-- passmanager:end -->` 之间：
-  原地更新、不重复，原内容保存为 `*.passmanager.bak`，标记损坏时拒绝修改，`unenroll` / `uninstall` 时移除。
+- Agent 只从 MCP 了解 PassManager，不往它们的全局指令文件里写任何东西：常驻在那里的规则会让 Agent 过于保守。0.3.11-rc.28 及以前
+  在 `<!-- passmanager:begin -->` 与 `<!-- passmanager:end -->` 之间写过规则块（Claude Code `~/.claude/CLAUDE.md`、Codex
+  `~/.codex/AGENTS.md`、Gemini CLI `~/.gemini/GEMINI.md`、Windsurf `global_rules.md`）。已注册的客户端在自动更新后的第一条命令里
+  删除一次（配置目录里的标记文件 `instructions-removed` 记下已经做过），`enroll`、`unenroll`、`uninstall` 也会删除：只删这个块，
+  用户自己的内容保留，原文件保存为 `*.passmanager.bak`，标记损坏时只报告、不修改。
 - `enroll`（一行命令与源码构建的回退方式都一样）还让基于 HTTPS 的 git 对 Agent 能使用的每个有 `git` 用途的条目直接可用——GitHub、
   自建的 git 服务器等一视同仁：把 `git-proxy` 装成用户服务（systemd 用户单元，`Restart=on-failure`、`RestartPreventExitStatus=78`；
   以 `--no-ask-password` 尝试 `loginctl enable-linger`，没有权限时给出说明；macOS 上是 LaunchAgent；Windows 上打印 `schtasks` 步骤），

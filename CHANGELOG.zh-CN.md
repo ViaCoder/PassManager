@@ -4,6 +4,19 @@
 
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.3.11-rc.29] - 2026-11-27
+
+### 变更
+
+- **Agent 只从 MCP 了解 PassManager。** 注册时不再往 Agent 的全局指令文件（`~/.claude/CLAUDE.md`、`~/.codex/AGENTS.md`、
+  `~/.gemini/GEMINI.md`、Windsurf 的 `global_rules.md`）写规则块：常驻在那里的规则会影响每一件任务，让 Agent 过于保守。以前版本写的块
+  会在已注册的客户端自动更新后的第一条命令里自动删除一次（重新注册时也会）；只删这个块，文件的其他内容不变，原文件保存为 `*.passmanager.bak`。
+  `show --rules` 与 `enroll --no-instructions` 仍然接受，但不再起作用；`show --rules --write` 立即删除旧块。
+- **MCP 提示只留最基本的用法，错误提示只陈述事实。** MCP 服务器说明只有 2 行最基本的用法（先 lookup，再照它返回的 `how` 调用），每个工具的描述
+  只有一句加一个示例；功能入口（alias://、tang、跳板写法、`via_client`）各留最短的一句，其他细节在用到时出现在 lookup 的 `how` 里。
+  工具列表从 3404 字节减到约 2230 字节。`Next:` 提示只说明发生了什么、怎样补救，去掉了"不要重试""最多重试一次""不要试别的名称"
+  之类的限制；多个凭据都匹配时，Agent 先按上下文选，说不清时才问用户。所有限制仍由服务器执行。
+
 ## [0.3.11-rc.28] - 2026-11-26
 
 ### 变更

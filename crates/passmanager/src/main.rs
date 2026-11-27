@@ -364,7 +364,6 @@ enum Cmd {
   ssh root@server passmanager show --label laptop              # 完整的接入说明（含一行安装命令）
   ssh root@server passmanager show --label laptop --lang en    # 英文
   ssh root@server passmanager show --label laptop --url        # 只打印 pm-enroll://… 注册码
-  passmanager show --rules                                     # 只打印使用规则
   passmanager show                                             # 公开的接入说明")]
     Show {
         /// 标签（例如机器名或 Agent 名）：为这台 Agent 机器生成一次性注册码（需要服务器上的 root）
@@ -373,17 +372,17 @@ enum Cmd {
         /// 只打印 pm-enroll://… 注册码（需要 --label；在 Agent 机器上用 passmanager enroll '<注册码>' 注册）
         #[arg(long, requires = "label")]
         url: bool,
-        /// 只打印给 AI Agent 的使用规则（enroll 时会写入 Agent 的全局指令文件）
-        #[arg(long, conflicts_with_all = ["label", "url"])]
+        /// 旧参数（0.3.11-rc.29 起没有使用规则，Agent 只用 MCP 的说明）：只打印这句说明
+        #[arg(long, hide = true, conflicts_with_all = ["label", "url"])]
         rules: bool,
-        /// 与 --rules 一起：把规则写入本机已检测到的 Agent 的全局指令文件（原地更新，与 enroll 时相同，英文）
-        #[arg(long, requires = "rules")]
+        /// 旧参数，与 --rules 一起：立即删除旧版本写进本机各 Agent 全局指令文件的规则块
+        #[arg(long, hide = true, requires = "rules")]
         write: bool,
         /// 说明语言：zh（默认）或 en
         #[arg(long, default_value = "zh")]
         lang: String,
     },
-    /// [Agent 机器] 取消注册：删除远程配置与令牌、移除 MCP 配置与写入的使用规则
+    /// [Agent 机器] 取消注册：删除远程配置与令牌、移除 MCP 配置（以及旧版本写入的使用规则）
     Unenroll,
     /// [Agent 机器] 立即检查并安装服务器确认的正式发布（平时运行前最多每 10 分钟自动检查一次）
     #[command(after_help = "\
@@ -428,19 +427,19 @@ enum Cmd {
 示例：
   passmanager reseal")]
     Reseal,
-    /// [Agent 机器] 用一次性注册码接入服务器：核对指纹、保存令牌（0600）、写入 Claude Code / Codex 等的 MCP 配置、
-    /// 使用规则与 git 凭据代理服务
+    /// [Agent 机器] 用一次性注册码接入服务器：核对指纹、保存令牌（0600）、写入 Claude Code / Codex 等的 MCP 配置
+    /// 与 git 凭据代理服务
     #[command(
         after_help = "注册码由服务器上的 root 生成：passmanager show --label <名称> --url（或完整说明：show --label <名称>）。\n\n示例：\n  passmanager enroll 'pm-enroll://pm.example.com:8443/<注册码>#<指纹>'\n  passmanager enroll --no-git-proxy 'pm-enroll://…'   # 不安装 git 代理服务\n  passmanager enroll --no-mcp 'pm-enroll://…'         # 只保存令牌，不改 Agent 与 git 的配置"
     )]
     Enroll {
         /// 注册码（pm-enroll://主机:端口/注册码#指纹）
         code: String,
-        /// 不写入 Agent 的 MCP 配置（也不写使用规则、不安装 git 代理服务）
+        /// 不写入 Agent 的 MCP 配置（也不安装 git 代理服务）
         #[arg(long)]
         no_mcp: bool,
-        /// 不把使用规则写入 Agent 的全局指令文件（CLAUDE.md、AGENTS.md 等）
-        #[arg(long)]
+        /// 旧参数，不再起作用（0.3.11-rc.29 起不往 Agent 的全局指令文件写规则）；保留是为了旧脚本照样能运行
+        #[arg(long, hide = true)]
         no_instructions: bool,
         /// 不安装 git 凭据代理服务，也不写 git 的 insteadOf 配置
         #[arg(long)]
@@ -739,6 +738,10 @@ fn run_cli() -> ExitCode {
     if auto_update_before(&cli.cmd) && !server_mode() {
         self_update::before_run();
     }
+    // 已注册的客户端：删除旧版本写进 Agent 全局指令文件的规则块，只做一次（自动更新后的第一条命令就会做；所有平台）
+    if auto_update_before(&cli.cmd) && !server_mode() {
+        agent_instructions::migrate_once();
+    }
     // 服务器和已注册的客户端没有 TUI：管理只在网页上做（单机模式照常打开 TUI）
     let server = server_mode();
     if opens_tui(&cli.cmd, server)
@@ -834,8 +837,8 @@ fn run_cli() -> ExitCode {
         Some(Cmd::Status) => server::status(),
         Some(Cmd::Lock) => server::lock(false),
         Some(Cmd::Reseal) => server::reseal(),
-        Some(Cmd::Enroll { code, no_mcp, no_instructions, no_git_proxy, git_proxy_listen, connect_addr, ca_file }) => {
-            remote::enroll_cmd(&code, remote::EnrollOpts { no_mcp, no_instructions, no_git_proxy, git_proxy_listen, connect_addr, ca_file })
+        Some(Cmd::Enroll { code, no_mcp, no_instructions: _, no_git_proxy, git_proxy_listen, connect_addr, ca_file }) => {
+            remote::enroll_cmd(&code, remote::EnrollOpts { no_mcp, no_git_proxy, git_proxy_listen, connect_addr, ca_file })
         }
         Some(Cmd::Show { label, url, rules, write, lang }) => show(label, url, rules, write, &lang),
         Some(Cmd::Unenroll) => remote::unenroll(),
@@ -904,34 +907,31 @@ fn run_cli() -> ExitCode {
 /// `passmanager show`：服务器上的 root 加 `--label` 时生成一次性注册码（完整说明或只有 URL）；
 /// 否则打印不含注册码的公开说明（已注册的机器说明连接的服务器）。说明文字只来自 `pm_proto::agent_text`。
 fn show(label: Option<String>, url: bool, rules: bool, write: bool, lang: &str) -> ExitCode {
-    use pm_proto::agent_text::{Lang, instruction_block, public_text};
+    use pm_proto::agent_text::{Lang, public_text};
     let l = match Lang::parse(lang) {
         Ok(l) => l,
         Err(e) => return install::fail(e),
     };
     if write {
-        // 与 enroll 写入的一致（英文），升级客户端后运行一次即可更新各 Agent 的规则块。
-        let block = instruction_block(Lang::En);
+        // 旧的"写入规则"：现在删除旧版本写进各 Agent 全局指令文件的块（与自动迁移相同，立即执行）
         let mut ok = true;
-        let mut any = false;
-        for (name, path, r) in agent_instructions::install_detected(&block) {
-            any = true;
+        for (name, path, r) in agent_instructions::remove_all() {
             match r {
-                Ok(agent_instructions::Change::Unchanged) => println!("{name}：使用规则已是最新（{}）", path.display()),
-                Ok(_) => println!("{name}：已更新使用规则（{}）", path.display()),
+                Ok(true) => println!("{name}：已删除旧的使用规则（{}，原文件备份为 .passmanager.bak）", path.display()),
+                Ok(false) => {}
                 Err(e) => {
                     ok = false;
-                    println!("{name}：未写入使用规则（{e}）")
+                    println!("{name}：没能删除旧的使用规则（{e}）")
                 }
             }
         }
-        if !any {
-            println!("没有检测到支持全局指令文件的 Agent。");
-        }
+        println!("PassManager 不再往 Agent 的全局指令文件写规则：Agent 只用 MCP 的说明。");
         return if ok { ExitCode::SUCCESS } else { ExitCode::from(1) };
     }
     if rules {
-        print!("{}", instruction_block(l));
+        // 旧的"打印规则"：说明现在怎样工作
+        println!("PassManager 不再有写给 Agent 的使用规则：Agent 只用 MCP 的说明（服务器说明、工具描述、lookup 的 how 与错误的 Next:）。");
+        println!("删除旧版本写进全局指令文件的块：passmanager show --rules --write（已注册的客户端也会自动删除一次）。");
         return ExitCode::SUCCESS;
     }
     let admin = server_mode() && server::is_admin();
@@ -952,7 +952,6 @@ fn show(label: Option<String>, url: bool, rules: bool, write: bool, lang: &str) 
 }
 
 /// 运行前要检查自动更新的命令：Agent 机器上经服务器工作的那些（注册、管理、内部命令不检查）。
-#[cfg_attr(not(unix), allow(dead_code))]
 fn auto_update_before(cmd: &Option<Cmd>) -> bool {
     matches!(
         cmd,

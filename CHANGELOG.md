@@ -4,6 +4,23 @@ English | [简体中文](CHANGELOG.zh-CN.md)
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.3.11-rc.29] - 2026-11-27
+
+### Changed
+
+- **Agents learn PassManager only from MCP.** Enrollment no longer writes a rules block into the agents' global instruction
+  files (`~/.claude/CLAUDE.md`, `~/.codex/AGENTS.md`, `~/.gemini/GEMINI.md`, Windsurf `global_rules.md`). Standing rules
+  there weighed on every task and made agents overly cautious. The block written by earlier versions is removed once,
+  automatically, on an enrolled client's first command after it updates itself (or on `enroll`). Only the block goes, the
+  rest of the file stays, and the previous file is kept as `*.passmanager.bak`. `show --rules` and `enroll
+  --no-instructions` are still accepted but no longer do anything; `show --rules --write` removes the old blocks at once.
+- **Minimal MCP prompts and factual error hints.** The MCP server instructions are two lines of basic usage (lookup, then
+  make the call its `how` returns), and each tool description is one sentence plus an example; the feature entry points
+  (alias://, tang, the jump-host form, `via_client`) keep the shortest mention, and the rest appears in lookup's `how` when
+  it applies. The tool list shrank from 3404 to about 2230 bytes. The `Next:` hints now say what happened and how to fix it, without "do not retry", "retry once at most" or
+  "do not try other names". With several matching credentials the agent picks one from context and asks the user only when
+  it cannot tell. The server still enforces every limit.
+
 ## [0.3.11-rc.28] - 2026-11-26
 
 ### Changed

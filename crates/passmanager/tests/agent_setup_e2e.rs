@@ -1,5 +1,5 @@
 //! 一键接入端到端（Linux）：root 的 `show --label` → 服务器的 `/a/<注册码>` 安装脚本 → 系统 curl | sh →
-//! 校验 SHA-256、安装、`enroll`（配置 MCP、使用规则与 git 凭据代理服务）。
+//! 校验 SHA-256、安装、`enroll`（配置 MCP 与 git 凭据代理服务，删除旧版本写入的使用规则）。
 //!
 //! 服务器只接受后量子 TLS 组，系统 curl（OpenSSL 3.0）不支持，所以测试里用一个经典 TLS 的本地代理（测试 CA，经
 //! `CURL_CA_BUNDLE` 交给 curl）把请求原样转给真实服务器（后量子 TLS）。覆盖：
@@ -239,9 +239,9 @@ fn run_agent_setup(single: bool) {
     let o = not_root(&["show", "--label", "laptop", "--url"], &fresh);
     assert!(!o.status.success() && !stdout(&o).contains("pm-enroll://"), "{}", stdout(&o));
     assert_eq!(stdout(&env.run(&["token", "list"])), pending_before, "公开说明不生成注册码");
+    // 旧参数 show --rules：不再打印规则块，只说明 Agent 只用 MCP 的说明
     let o = env.run(&["show", "--rules", "--lang", "en"]);
-    assert_eq!(stdout(&o), pm_proto::agent_text::instruction_block(pm_proto::agent_text::Lang::En));
-    assert!(stdout(&env.run(&["show", "--rules"])).contains("Agent 使用规则"), "默认中文");
+    assert!(o.status.success() && stdout(&o).contains("只用 MCP") && !stdout(&o).contains(pm_proto::agent_text::BEGIN), "{}", stdout(&o));
 
     // ---- show --label --url：只有一行 pm-enroll:// 注册码 ----
     let o = env.run(&["show", "--label", "url-only", "--url"]);
@@ -268,7 +268,9 @@ fn run_agent_setup(single: bool) {
     assert_eq!(code.len(), 43);
     assert_eq!(text.matches(&code).count(), 1, "开发构建只在一行命令里出现注册码");
     assert!(text.contains("development build") && !text.contains("git clone"), "{text}");
-    assert!(text.contains("MCP tools") && text.contains("`lookup`") && text.contains("Next:") && text.contains("git-proxy"));
+    // 用法只来自 MCP：说明的最后一步是重启 Agent，没有规则块，也没有 Next: 之类的规则
+    assert!(text.contains("MCP server") && text.contains("its tools describe how to use it") && text.contains("git-proxy"), "{text}");
+    assert!(!text.contains(pm_proto::agent_text::BEGIN) && !text.contains("Next:"), "{text}");
     assert!(!text.contains("install-agent.sh") && !text.contains("pm_"), "没有其他安装方式，也没有令牌");
     assert!(stdout(&env.run(&["build-info"])).contains("development build"), "测试构建不是发布标签构建");
     let zh = env.run(&["show", "--label", "laptop-zh"]);
@@ -296,22 +298,30 @@ fn run_agent_setup(single: bool) {
     assert_eq!(pq_get(&env, "GET", &format!("/a/{code}")).0, 200, "失败的安装不消耗注册码");
     tamper.store(false, Ordering::SeqCst);
 
-    // ---- 正常安装：安装、注册、MCP 与使用规则 ----
+    // ---- 正常安装：安装、注册、MCP；旧版本写进 CLAUDE.md 的规则块被删除，用户自己的内容保留 ----
+    let old_block = format!(
+        "{}\n## PassManager (agent instructions v7)\n\n- Use the PassManager MCP tools.\n{}\n",
+        pm_proto::agent_text::BEGIN,
+        pm_proto::agent_text::END
+    );
     let h2 = env.base.join("h2");
     std::fs::create_dir_all(h2.join(".codex")).unwrap();
     std::fs::write(h2.join(".claude.json"), "{}").unwrap();
     std::fs::create_dir_all(h2.join(".claude")).unwrap();
-    std::fs::write(h2.join(".claude/CLAUDE.md"), "# my own rules\n").unwrap();
+    let with_block = format!("# my own rules\n\n{old_block}");
+    std::fs::write(h2.join(".claude/CLAUDE.md"), &with_block).unwrap();
     let o = sh(&path, &h2, &pca, &cmd);
     outputs += &(stdout(&o) + &stderr(&o));
     assert!(o.status.success(), "{}{}", stdout(&o), stderr(&o));
     assert_eq!(std::fs::read_to_string(h2.join(".local/bin/PassManager")).unwrap(), wrapper);
     assert!(h2.join(".local/bin/passmanager").exists());
     assert!(h2.join(".config/passmanager/remote.toml").exists(), "{}", stdout(&o));
-    let claude_md = std::fs::read_to_string(h2.join(".claude/CLAUDE.md")).unwrap();
-    assert!(claude_md.starts_with("# my own rules\n") && claude_md.matches("<!-- passmanager:begin -->").count() == 1, "{claude_md}");
-    assert!(std::fs::read_to_string(h2.join(".codex/AGENTS.md")).unwrap().contains("<!-- passmanager:end -->"));
-    assert_eq!(std::fs::read_to_string(h2.join(".claude/CLAUDE.md.passmanager.bak")).unwrap(), "# my own rules\n");
+    // Agent 只用 MCP：不写规则块，旧块删除（原文件在 .bak），并记下迁移已完成
+    assert_eq!(std::fs::read_to_string(h2.join(".claude/CLAUDE.md")).unwrap(), "# my own rules\n");
+    assert!(!h2.join(".codex/AGENTS.md").exists(), "不再写规则");
+    assert_eq!(std::fs::read_to_string(h2.join(".claude/CLAUDE.md.passmanager.bak")).unwrap(), with_block);
+    assert!(h2.join(".config/passmanager/instructions-removed").exists());
+    assert!(stdout(&o).contains("已删除旧的使用规则"), "{}", stdout(&o));
     assert!(std::fs::read_to_string(h2.join(".claude.json")).unwrap().contains("passmanager"), "MCP 配置");
     // git 代理服务：单元已写入，经（替身）systemctl 启用；服务器上还没有 git 条目时不写 insteadOf，并说明之后怎么做。
     assert!(h2.join(".config/systemd/user/passmanager-git-proxy.service").exists(), "{}", stdout(&o));
@@ -462,7 +472,7 @@ fn run_agent_setup(single: bool) {
     let o = direct(&h3, &enroll_url);
     assert!(!o.status.success(), "已用过的注册码不能再直接 enroll");
 
-    // ---- 直接 enroll（自行构建的客户端）同样配置使用规则，并消耗注册码 → /a/ 404 ----
+    // ---- 直接 enroll（自行构建的客户端）同样不写规则，并消耗注册码 → /a/ 404 ----
     let o = env.run(&["show", "--label", "source-build"]);
     let (_, code2) = one_liner(&stdout(&o));
     codes.push(code2.clone());
@@ -473,13 +483,32 @@ fn run_agent_setup(single: bool) {
     let o = direct(&h4, &url2);
     outputs += &(stdout(&o) + &stderr(&o));
     assert!(o.status.success(), "{}{}", stdout(&o), stderr(&o));
-    assert!(
-        std::fs::read_to_string(h4.join(".gemini/GEMINI.md"))
-            .unwrap()
-            .contains(&format!("PassManager (agent instructions v{})", pm_proto::agent_text::INSTRUCTIONS_VERSION))
-    );
+    assert!(!h4.join(".gemini/GEMINI.md").exists(), "不再写规则");
     assert_eq!(pq_get(&env, "GET", &format!("/a/{code2}")).0, 404);
-    // --no-instructions：不写规则。
+    // 自动更新后的第一条命令（这里用 status）：还没迁移过的客户端删除旧块，只做一次
+    std::fs::remove_file(h4.join(".config/passmanager/instructions-removed")).unwrap();
+    std::fs::write(h4.join(".gemini/GEMINI.md"), &old_block).unwrap();
+    let status = || {
+        Command::new(BIN)
+            .arg("status")
+            .env("HOME", &h4)
+            .env("PATH", &path)
+            .env_remove("PASSMANAGER_CONFIG_DIR")
+            .env_remove("XDG_CONFIG_HOME")
+            .env_remove("PASSMANAGER_HOME")
+            .output()
+            .unwrap()
+    };
+    let o = status();
+    assert!(stderr(&o).contains("已从 Gemini CLI 的全局指令文件删除旧的使用规则"), "{}{}", stdout(&o), stderr(&o));
+    assert!(!h4.join(".gemini/GEMINI.md").exists(), "只有旧块的文件删除");
+    assert_eq!(std::fs::read_to_string(h4.join(".gemini/GEMINI.md.passmanager.bak")).unwrap(), old_block);
+    assert!(h4.join(".config/passmanager/instructions-removed").exists());
+    std::fs::write(h4.join(".gemini/GEMINI.md"), &old_block).unwrap();
+    let o = status();
+    assert!(!stderr(&o).contains("旧的使用规则"), "只迁移一次：{}", stderr(&o));
+    assert_eq!(std::fs::read_to_string(h4.join(".gemini/GEMINI.md")).unwrap(), old_block);
+    // --no-instructions：旧参数照样接受（不再起作用）。
     let o = env.run(&["show", "--label", "noinstr"]);
     let (_, code3) = one_liner(&stdout(&o));
     codes.push(code3.clone());
@@ -504,6 +533,7 @@ fn run_agent_setup(single: bool) {
         .unwrap();
     assert!(o.status.success(), "{}", stderr(&o));
     assert!(!h5.join(".gemini/GEMINI.md").exists());
+    assert!(h5.join(".config/passmanager/remote.toml").exists());
 
     // ---- 打印出来的一行命令在 bash 与 zsh 中也能直接运行（zsh 会展开未加引号的 =https）----
     for bin in ["bash", "zsh"] {
@@ -531,7 +561,7 @@ fn run_agent_setup(single: bool) {
         assert!(!o.status.success() && stderr(&o).contains("not found"), "{}", stderr(&o));
     }
 
-    // ---- unenroll：移除规则（恢复用户原来的内容）、MCP 配置与远程配置 ----
+    // ---- unenroll：移除 MCP 配置与远程配置；用户自己的指令文件内容不变 ----
     let o = Command::new(BIN).arg("unenroll").env("HOME", &h2).env("PATH", &path).env_remove("PASSMANAGER_CONFIG_DIR").output().unwrap();
     assert!(o.status.success(), "{}", stderr(&o));
     assert!(!h2.join(".config/systemd/user/passmanager-git-proxy.service").exists(), "git-proxy 服务已移除");

@@ -1,7 +1,11 @@
-//! 把 PassManager 的使用规则写入 AI Agent 的全局指令文件（`enroll` 时默认写入，`--no-instructions` 跳过；
-//! `unenroll` / `uninstall` 时移除）。
+//! 删除旧版本（≤ 0.3.11-rc.28）写进 AI Agent 全局指令文件的 PassManager 规则块。
 //!
-//! - 只写在 `<!-- passmanager:begin -->` 与 `<!-- passmanager:end -->` 之间：已有块时原地更新，不会重复；
+//! 0.3.11-rc.29 起 Agent 只从 MCP 了解 PassManager（服务器说明、工具描述、lookup 的 how、错误的 Next:），
+//! 不再往 CLAUDE.md、AGENTS.md 等文件里写规则：常驻的规则会过度影响 Agent 的判断。
+//!
+//! - 已注册的客户端第一次运行会检查自动更新的命令时（自动更新换上新程序后的第一条命令就是），
+//!   调用 [`migrate_once`] 删除旧块，然后在配置目录里留下标记，以后不再检查；`enroll`、`unenroll`、`uninstall` 也会删除；
+//! - 只删除 `<!-- passmanager:begin -->` 与 `<!-- passmanager:end -->` 之间的内容，文件里用户自己写的部分保持不变；
 //! - 修改前把原文件保存为 `<文件>.passmanager.bak`；
 //! - 标记损坏（只有开始没有结束等）时不修改文件，报告错误。
 
@@ -9,208 +13,236 @@ use std::path::{Path, PathBuf};
 
 use pm_proto::agent_text::{BEGIN, END};
 
-/// 支持全局指令文件的 Agent：（适配器 ID，名称，相对主目录的文件）。
-pub const FILES: &[(&str, &str, &str)] = &[
-    ("claude", "Claude Code", ".claude/CLAUDE.md"),
-    ("codex", "Codex CLI", ".codex/AGENTS.md"),
-    ("gemini", "Gemini CLI", ".gemini/GEMINI.md"),
-    ("windsurf", "Windsurf", ".codeium/windsurf/memories/global_rules.md"),
+/// 旧版本写过规则块的文件：（名称，相对主目录的文件）。
+pub const FILES: &[(&str, &str)] = &[
+    ("Claude Code", ".claude/CLAUDE.md"),
+    ("Codex CLI", ".codex/AGENTS.md"),
+    ("Gemini CLI", ".gemini/GEMINI.md"),
+    ("Windsurf", ".codeium/windsurf/memories/global_rules.md"),
 ];
 
-#[derive(Debug, PartialEq, Eq)]
-pub enum Change {
-    Added,
-    Updated,
-    Unchanged,
-}
+/// 迁移完成的标记文件（放在客户端配置目录里）。
+pub const DONE_FILE: &str = "instructions-removed";
 
 /// 找到块的位置：Ok(None) 表示没有；标记不成对时报错。
 fn span(text: &str) -> Result<Option<(usize, usize)>, String> {
+    // 开始与结束标记第一次出现的位置
     let b = text.find(BEGIN);
     let e = text.find(END);
     match (b, e) {
+        // 两个都没有：没有块
         (None, None) => Ok(None),
+        // 成对且顺序正确
         (Some(b), Some(e)) if e > b => {
+            // 结束标记之后不能再有标记（多个块时不猜，交给用户）
             let rest = &text[e + END.len()..];
             if rest.contains(BEGIN) || rest.contains(END) {
                 return Err("有多个 PassManager 块，请手动整理".into());
             }
+            // 块的结尾包含结束标记后面的一个换行
             let end = e + END.len() + usize::from(rest.starts_with('\n'));
             Ok(Some((b, end)))
         }
+        // 只有一个标记，或者顺序反了
         _ => Err("PassManager 块的标记不完整，请手动修复".into()),
-    }
-}
-
-/// 计算插入或更新后的内容。
-pub fn upsert_text(old: &str, block: &str) -> Result<(String, Change), String> {
-    let block = if block.ends_with('\n') { block.to_string() } else { format!("{block}\n") };
-    match span(old)? {
-        Some((b, e)) => {
-            let new = format!("{}{}{}", &old[..b], block, &old[e..]);
-            let c = if new == old { Change::Unchanged } else { Change::Updated };
-            Ok((new, c))
-        }
-        None if old.trim().is_empty() => Ok((block, Change::Added)),
-        None => {
-            let sep = if old.ends_with("\n\n") {
-                ""
-            } else if old.ends_with('\n') {
-                "\n"
-            } else {
-                "\n\n"
-            };
-            Ok((format!("{old}{sep}{block}"), Change::Added))
-        }
     }
 }
 
 /// 计算移除块后的内容（None 表示没有块）。
 pub fn remove_text(old: &str) -> Result<Option<String>, String> {
+    // 没有块：不改
     let Some((b, e)) = span(old)? else { return Ok(None) };
+    // 块前面的部分
     let mut head = old[..b].to_string();
-    // 去掉插入时加的空行。
+    // 去掉插入时加的空行
     if head.ends_with("\n\n") {
         head.pop();
     }
+    // 块前面 + 块后面
     Ok(Some(format!("{head}{}", &old[e..])))
 }
 
-fn write_with_backup(path: &Path, old: Option<&str>, new: &str) -> Result<(), String> {
-    if let Some(old) = old {
-        let bak = PathBuf::from(format!("{}.passmanager.bak", path.display()));
-        std::fs::write(&bak, old).map_err(|e| format!("备份 {} 失败：{e}", path.display()))?;
-    }
-    if let Some(d) = path.parent() {
-        std::fs::create_dir_all(d).map_err(|e| format!("创建 {} 失败：{e}", d.display()))?;
-    }
-    let tmp = PathBuf::from(format!("{}.passmanager.tmp", path.display()));
-    std::fs::write(&tmp, new).map_err(|e| format!("写入 {} 失败：{e}", path.display()))?;
-    #[cfg(unix)]
-    if let Ok(md) = std::fs::metadata(path) {
-        let _ = std::fs::set_permissions(&tmp, md.permissions());
-    }
-    std::fs::rename(&tmp, path).map_err(|e| format!("写入 {} 失败：{e}", path.display()))
-}
-
-/// 插入或更新一个文件中的块。
-pub fn upsert(path: &Path, block: &str) -> Result<Change, String> {
-    let old = match std::fs::read_to_string(path) {
-        Ok(s) => Some(s),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-        Err(e) => return Err(format!("读取 {} 失败：{e}", path.display())),
-    };
-    let (new, change) = upsert_text(old.as_deref().unwrap_or(""), block)?;
-    if change != Change::Unchanged {
-        write_with_backup(path, old.as_deref(), &new)?;
-    }
-    Ok(change)
-}
-
-/// 移除一个文件中的块；返回是否有改动。移除后文件为空时删除文件。
+/// 移除一个文件中的块；返回是否有改动。移除后文件为空时删除文件（原内容留在 .passmanager.bak）。
 pub fn remove(path: &Path) -> Result<bool, String> {
+    // 文件不存在或读不了：没有可删的
     let Ok(old) = std::fs::read_to_string(path) else { return Ok(false) };
+    // 没有块：不改
     let Some(new) = remove_text(&old)? else { return Ok(false) };
+    // 先备份原文件
+    let bak = PathBuf::from(format!("{}.passmanager.bak", path.display()));
+    std::fs::write(&bak, &old).map_err(|e| format!("备份 {} 失败：{e}", path.display()))?;
     if new.trim().is_empty() {
-        std::fs::write(PathBuf::from(format!("{}.passmanager.bak", path.display())), &old).map_err(|e| e.to_string())?;
+        // 文件里只有这个块：删除文件
         std::fs::remove_file(path).map_err(|e| format!("删除 {} 失败：{e}", path.display()))?;
     } else {
-        write_with_backup(path, Some(&old), &new)?;
+        // 先写临时文件，保留原来的权限，再原子地换过去
+        let tmp = PathBuf::from(format!("{}.passmanager.tmp", path.display()));
+        std::fs::write(&tmp, &new).map_err(|e| format!("写入 {} 失败：{e}", path.display()))?;
+        #[cfg(unix)]
+        if let Ok(md) = std::fs::metadata(path) {
+            let _ = std::fs::set_permissions(&tmp, md.permissions());
+        }
+        std::fs::rename(&tmp, path).map_err(|e| format!("写入 {} 失败：{e}", path.display()))?;
     }
     Ok(true)
 }
 
-fn home() -> PathBuf {
+/// 主目录（HOME，Windows 上是 USERPROFILE）。
+pub fn home() -> PathBuf {
     std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."))
 }
 
-/// 为检测到的 Agent 写入规则，返回每个文件的结果（名称，路径，结果）。
-pub fn install_detected(block: &str) -> Vec<(&'static str, PathBuf, Result<Change, String>)> {
-    let h = home();
+/// 从 `home` 下所有支持的文件中移除旧块，返回每个文件的结果（名称，路径，是否有改动）。
+pub fn remove_all_in(home: &Path) -> Vec<(&'static str, PathBuf, Result<bool, String>)> {
     FILES
         .iter()
-        .filter(|(id, _, _)| pm_tui::agents::ADAPTERS.iter().any(|a| a.id == *id && a.detected()))
-        .map(|(_, name, rel)| {
-            let p = h.join(rel);
-            let r = upsert(&p, block);
-            (*name, p, r)
-        })
-        .collect()
-}
-
-/// 从所有支持的文件中移除规则（不管是否检测到对应的 Agent）。
-pub fn remove_all() -> Vec<(&'static str, PathBuf, Result<bool, String>)> {
-    let h = home();
-    FILES
-        .iter()
-        .map(|(_, name, rel)| {
-            let p = h.join(rel);
+        .map(|(name, rel)| {
+            // 每个文件单独处理，一个失败不影响其他文件
+            let p = home.join(rel);
             let r = remove(&p);
             (*name, p, r)
         })
         .collect()
 }
 
+/// 从当前用户主目录下所有支持的文件中移除旧块（`enroll`、`unenroll`、`uninstall` 用）。
+pub fn remove_all() -> Vec<(&'static str, PathBuf, Result<bool, String>)> {
+    remove_all_in(&home())
+}
+
+/// 只做一次的迁移：配置目录 `config` 里还没有标记时删除 `home` 下的旧块并写下标记。
+/// 返回每个有改动或出错的文件（没有改动的不列出）；已经迁移过时返回空列表。
+pub fn migrate_once_in(config: &Path, home: &Path) -> Vec<(&'static str, PathBuf, Result<bool, String>)> {
+    // 已经迁移过：什么都不做
+    let done = config.join(DONE_FILE);
+    if done.exists() {
+        return Vec::new();
+    }
+    // 删除旧块，只留下有改动或出错的结果
+    let out: Vec<_> = remove_all_in(home).into_iter().filter(|(_, _, r)| !matches!(r, Ok(false))).collect();
+    // 写下标记（标记损坏的文件也不再重试：错误只报告这一次，用户可以手动整理）
+    let _ = pm_platform::paths::write_atomic(&done, b"1\n", 0o600);
+    out
+}
+
+/// 运行时调用：已注册的客户端（有配置目录）迁移一次，结果写到标准错误输出（MCP 的标准输出不受影响）。
+pub fn migrate_once() {
+    // 只处理已经注册的客户端：规则块只在注册时写过
+    let d = crate::remote::dir();
+    if crate::remote::load_in(&d).is_none() {
+        return;
+    }
+    for (name, path, r) in migrate_once_in(&d, &home()) {
+        match r {
+            Ok(_) => eprintln!(
+                "PassManager：已从 {name} 的全局指令文件删除旧的使用规则（{}，原文件备份为 .passmanager.bak）；Agent 改为只用 MCP 的说明。",
+                path.display()
+            ),
+            Err(e) => eprintln!("PassManager：没能从 {name} 的全局指令文件删除旧的使用规则（{e}）。"),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pm_proto::agent_text::{Lang, instruction_block};
 
-    #[test]
-    fn insert_update_remove_is_idempotent() {
-        let b1 = instruction_block(Lang::En);
-        // 空文件、已有内容（有无结尾换行）。
-        let (a, c) = upsert_text("", &b1).unwrap();
-        assert_eq!((a.as_str(), c), (b1.as_str(), Change::Added));
-        for user in ["# My rules\n- be nice\n", "# My rules\n- be nice", "# My rules\n\n"] {
-            let (t, c) = upsert_text(user, &b1).unwrap();
-            assert_eq!(c, Change::Added);
-            assert!(t.starts_with(user.trim_end()) && t.contains(&b1));
-            let (t2, c2) = upsert_text(&t, &b1).unwrap();
-            assert_eq!((t2.as_str(), c2), (t.as_str(), Change::Unchanged), "重复写入不变");
-            assert_eq!(t2.matches(BEGIN).count(), 1);
-            // 新版本原地更新，块后面的用户内容保留。
-            let with_after = format!("{t}\n# after\n");
-            let cur = format!("instructions v{}", pm_proto::agent_text::INSTRUCTIONS_VERSION);
-            let b2 = b1.replace(&cur, "instructions v999");
-            let (t3, c3) = upsert_text(&with_after, &b2).unwrap();
-            assert_eq!(c3, Change::Updated);
-            assert!(t3.contains("v999") && !t3.contains(&cur) && t3.ends_with("# after\n") && t3.matches(BEGIN).count() == 1);
-            // 移除后回到用户原来的内容。
-            let removed = remove_text(&t).unwrap().unwrap();
-            assert_eq!(removed.trim_end(), user.trim_end());
-        }
-        assert_eq!(remove_text("no block here").unwrap(), None);
-        // 标记损坏：不修改。
-        assert!(upsert_text(&format!("x\n{BEGIN}\nhalf"), &b1).is_err());
-        assert!(upsert_text(&format!("{END}\n{BEGIN}"), &b1).is_err());
-        assert!(upsert_text(&format!("{b1}{b1}"), &b1).is_err());
-        assert!(remove_text(&format!("{BEGIN} only")).is_err());
+    /// 旧版本写入的块（形状与 ≤ rc.28 的 instruction_block 相同）。
+    fn old_block() -> String {
+        format!("{BEGIN}\n## PassManager (agent instructions v7)\n\n- Use the PassManager MCP tools.\n{END}\n")
+    }
+
+    /// 测试用的临时目录（每个测试一个，避免并行冲突）。
+    fn tmp(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("pm-instr-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
     }
 
     #[test]
-    fn files_backup_and_removal() {
-        let d = std::env::temp_dir().join(format!("pm-instr-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        let b = instruction_block(Lang::En);
-        // 新文件（含上级目录）。
+    fn remove_text_restores_user_content() {
+        let b = old_block();
+        // 块在前（旧版本写在空文件里或用户内容前）、块在后（追加在用户内容后面，中间有空行）
+        assert_eq!(remove_text(&b).unwrap().unwrap(), "");
+        assert_eq!(remove_text(&format!("{b}# after\n")).unwrap().unwrap(), "# after\n");
+        for user in ["# My rules\n- be nice\n", "# My rules\n\n"] {
+            let sep = if user.ends_with("\n\n") { "" } else { "\n" };
+            let t = format!("{user}{sep}{b}");
+            assert_eq!(remove_text(&t).unwrap().unwrap().trim_end(), user.trim_end());
+        }
+        assert_eq!(remove_text("no block here").unwrap(), None);
+        // 标记损坏：不修改
+        assert!(remove_text(&format!("{BEGIN} only")).is_err());
+        assert!(remove_text(&format!("{END}\n{BEGIN}")).is_err());
+        assert!(remove_text(&format!("{b}{b}")).is_err());
+    }
+
+    #[test]
+    fn remove_backs_up_and_deletes_empty_files() {
+        let d = tmp("rm");
+        let b = old_block();
+        // 只有块的文件：删除，原内容在备份里
         let f = d.join(".claude/CLAUDE.md");
-        assert_eq!(upsert(&f, &b).unwrap(), Change::Added);
-        assert_eq!(upsert(&f, &b).unwrap(), Change::Unchanged);
-        assert!(!PathBuf::from(format!("{}.passmanager.bak", f.display())).exists(), "新文件没有原内容可备份");
+        std::fs::create_dir_all(f.parent().unwrap()).unwrap();
+        std::fs::write(&f, &b).unwrap();
         assert!(remove(&f).unwrap());
-        assert!(!f.exists(), "只有块的文件移除后删除");
-        // 已有文件：备份原内容。
+        assert!(!f.exists());
+        assert_eq!(std::fs::read_to_string(format!("{}.passmanager.bak", f.display())).unwrap(), b);
+        // 有用户内容的文件：只删块
         let g = d.join(".codex/AGENTS.md");
         std::fs::create_dir_all(g.parent().unwrap()).unwrap();
-        std::fs::write(&g, "# team rules\n").unwrap();
-        assert_eq!(upsert(&g, &b).unwrap(), Change::Added);
-        let bak = PathBuf::from(format!("{}.passmanager.bak", g.display()));
-        assert_eq!(std::fs::read_to_string(&bak).unwrap(), "# team rules\n");
+        std::fs::write(&g, format!("{b}# team rules\n")).unwrap();
         assert!(remove(&g).unwrap());
         assert_eq!(std::fs::read_to_string(&g).unwrap(), "# team rules\n");
-        assert!(!remove(&g).unwrap(), "没有块时不改动");
+        // 再删一次、不存在的文件：没有改动
+        assert!(!remove(&g).unwrap());
         assert!(!remove(&d.join("missing.md")).unwrap());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn remove_all_in_covers_every_file() {
+        let d = tmp("all");
+        // 4 个文件都有旧块，其中一个有用户内容
+        for (_, rel) in FILES {
+            let p = d.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, old_block()).unwrap();
+        }
+        std::fs::write(d.join(".claude/CLAUDE.md"), format!("# mine\n\n{}", old_block())).unwrap();
+        let r = remove_all_in(&d);
+        assert_eq!(r.len(), FILES.len());
+        assert!(r.iter().all(|(_, _, x)| matches!(x, Ok(true))), "{r:?}");
+        assert_eq!(std::fs::read_to_string(d.join(".claude/CLAUDE.md")).unwrap(), "# mine\n");
+        assert!(!d.join(".codex/AGENTS.md").exists());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn migrate_once_runs_only_once() {
+        let d = tmp("mig");
+        let (cfg, home) = (d.join("cfg"), d.join("home"));
+        std::fs::create_dir_all(&cfg).unwrap();
+        let f = home.join(".claude/CLAUDE.md");
+        std::fs::create_dir_all(f.parent().unwrap()).unwrap();
+        std::fs::write(&f, format!("# mine\n\n{}", old_block())).unwrap();
+        // 第一次：删除旧块，只列出有改动的文件，写下标记
+        let r = migrate_once_in(&cfg, &home);
+        assert_eq!(r.len(), 1, "{r:?}");
+        assert!(matches!(r[0].2, Ok(true)) && r[0].0 == "Claude Code");
+        assert_eq!(std::fs::read_to_string(&f).unwrap(), "# mine\n");
+        assert!(cfg.join(DONE_FILE).exists());
+        // 之后即使又出现旧块也不再动（只迁移一次，不跟用户手动加的内容作对）
+        std::fs::write(&f, format!("# mine\n\n{}", old_block())).unwrap();
+        assert!(migrate_once_in(&cfg, &home).is_empty());
+        assert!(std::fs::read_to_string(&f).unwrap().contains(BEGIN));
+        // 标记损坏的文件：报告一次错误，也写下标记
+        let cfg2 = d.join("cfg2");
+        std::fs::create_dir_all(&cfg2).unwrap();
+        std::fs::write(&f, format!("{BEGIN} only")).unwrap();
+        let r = migrate_once_in(&cfg2, &home);
+        assert!(r.len() == 1 && r[0].2.is_err() && cfg2.join(DONE_FILE).exists(), "{r:?}");
         let _ = std::fs::remove_dir_all(&d);
     }
 }

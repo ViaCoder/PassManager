@@ -245,7 +245,7 @@ fn by_name(payload: &Payload, token: &str, use_: Use) -> Result<LookupView, ApiE
     let has_base = entry.field(BASE_URL).is_some() && matches!(field.as_deref(), None | Some(BASE_URL));
     let (target, how) = if use_ == Use::Http && has_base {
         let label = format!("{{{{{}.{BASE_URL}}}}}", entry.name);
-        (label.clone(), format!("{} - the base URL stays secret; do not try to find it", http_how(entry, &label, true)))
+        (label.clone(), format!("{} - the base URL stays secret: the server fills it in", http_how(entry, &label, true)))
     } else {
         (format!("{{{{{}}}}}", entry.name), {
             let n = &entry.name;
@@ -713,7 +713,7 @@ mod tests {
     fn git_and_errors() {
         let p = payload();
         let v = lookup(&p, "github.com", Some("git")).unwrap();
-        // git 的写法与规则块 v5 一致：用 passmanager run，不再叫 Agent 安装 git-proxy。
+        // git 的写法：用 passmanager run，不叫 Agent 安装 git-proxy。
         assert!(v.how.starts_with("passmanager run git ") && v.how.contains("https://github.com/<owner>"), "{}", v.how);
         assert!(!v.how.contains("git-proxy"), "{}", v.how);
         assert_eq!(lookup(&p, "api.cloudflare.com", Some("git")).unwrap_err().code, "OP_NOT_ALLOWED");

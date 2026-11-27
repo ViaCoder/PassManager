@@ -694,13 +694,14 @@ async fn tokens_show_enroll_command_and_revoke() {
     let (cookie, csrf) = login(&st).await;
     let r = send(&st, Method::POST, "/tokens", Some(&cookie), Some(&format!("csrf={csrf}&label=laptop")), &[]).await;
     assert_eq!(r.status, StatusCode::OK);
-    // 接入说明：一行命令（HTML 转义后浏览器显示为原文）与给 AI 的规则；没有其他安装方式。
+    // 接入说明：一行命令（HTML 转义后浏览器显示为原文），最后一步是重启 Agent（用法只来自 MCP，没有规则块）；没有其他安装方式。
     assert!(r.body.contains("curl --proto &#x27;=https&#x27; --tlsv1.3 -fsSL https:&#x2f;&#x2f;pm.test&#x2f;a&#x2f;"), "{}", r.body);
-    assert!(r.body.contains("PassManager agent setup") && r.body.contains("MCP tools"));
+    assert!(r.body.contains("PassManager agent setup") && r.body.contains("MCP server") && r.body.contains("its tools describe"));
+    assert!(!r.body.contains("passmanager:begin") && !r.body.contains("follow these rules"));
     assert_eq!(r.body.matches(BOOT_CODE).count(), 1, "开发构建：只有一行命令里有注册码");
     assert!(!r.body.contains("install-agent.sh") && !r.body.contains("irm "));
     let r = send(&st, Method::POST, "/tokens", Some(&cookie), Some(&format!("csrf={csrf}&label=laptop&lang=zh")), &[]).await;
-    assert!(r.body.contains("PassManager 接入说明") && r.body.contains("MCP 工具"));
+    assert!(r.body.contains("PassManager 接入说明") && r.body.contains("MCP 服务") && r.body.contains("工具说明"));
     let r = send(&st, Method::POST, "/tokens/ab12cd34/revoke", Some(&cookie), Some(&format!("csrf={csrf}")), &[]).await;
     assert_eq!(r.status, StatusCode::SEE_OTHER);
     let r = send(&st, Method::POST, "/tokens/nope/revoke", Some(&cookie), Some(&format!("csrf={csrf}")), &[]).await;

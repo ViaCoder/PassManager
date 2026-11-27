@@ -130,7 +130,7 @@ ssh root@pm.example.com passmanager login     # 输出 https://pm.example.com/l/
 ```sh
 ssh root@pm.example.com passmanager show --label laptop            # 默认中文；--lang en 为英文
 ssh root@pm.example.com passmanager show --label laptop --url      # 只打印 pm-enroll:// 注册码（给从源码构建的客户端）
-passmanager show [--rules]                                         # 任何机器：不含注册码的公开说明 / 只打印使用规则
+passmanager show                                                   # 任何机器：不含注册码的公开说明
 ```
 
 `show --label` 打印一段文字，把它交给 Agent 机器上的 AI Agent（网页"Agent 令牌"页也显示同样的文字）。不带 `--label`、
@@ -145,11 +145,13 @@ passmanager show [--rules]                                         # 任何机�
 2. 在 TLS 握手失败（curl 不支持 ML-KEM，例如 macOS 或较旧的发行版）或在 Windows 上时：按文字中固定的发布标签与提交从源码构建客户端
    （`cargo build --release -p passmanager`；需要 Rust、cmake、C 编译器、libclang），再运行它的 `enroll`。服务器是开发构建时
    只给出说明，不给固定值；
-3. 给 AI 的使用规则。
+3. 重启 Agent，让它加载 PassManager 的 MCP 服务；Agent 得到的说明只有 MCP 的服务器说明、工具描述、lookup 的 `how`
+   与错误后面的 `Next:` 提示。
 
 `enroll` 核对注册码里的服务端公钥指纹，令牌存到本人可读的配置目录（Linux `~/.config/passmanager`，0600），为检测到的 Agent 写入
-MCP 配置（不含令牌），并把使用规则写入它们的全局指令文件中 `<!-- passmanager:begin -->` 与 `<!-- passmanager:end -->` 之间
-（备份为 `*.passmanager.bak`；`--no-instructions` 跳过），然后配置基于 HTTPS 的 git（`--no-git-proxy` 跳过）：把
+MCP 配置（不含令牌），不往它们的全局指令文件里写任何东西（0.3.11-rc.28 及以前写在 `<!-- passmanager:begin -->` 与
+`<!-- passmanager:end -->` 之间的规则块在这里删除，备份为 `*.passmanager.bak`；已注册的客户端自动更新后的第一条命令也会删除一次），
+然后配置基于 HTTPS 的 git（`--no-git-proxy` 跳过）：把
 `passmanager git-proxy` 装成用户服务——Linux 上是 `~/.config/systemd/user/passmanager-git-proxy.service`（`systemctl --user enable`
 并重启；以不询问口令的方式尝试 `loginctl enable-linger`，成功时开机即启动，否则登录后启动，输出会说明由管理员运行
 `sudo loginctl enable-linger <用户>`），macOS 上是 LaunchAgent `~/Library/LaunchAgents/com.passmanager.git-proxy.plist`，Windows 上
@@ -162,7 +164,7 @@ PAT 从不到达 Agent 机器。
 注册码：256 位随机数，服务端只在内存里保存 SHA-256，10 分钟有效，只能用一次（取出与作废是同一个原子操作，并发兑换时恰好一个成功）。
 注册失败按来源地址限速（10 分钟内失败 10 次 → 锁定 15 分钟，锁定期间有效的注册码也不受理、不被消耗）。审计日志只记录标签、来源地址与结果，
 从不记录注册码。获取脚本不消耗注册码，`enroll` 才消耗。未知或过期的注册码返回 404；`/a/` 请求限速、记审计日志，并且和整个网页端口一样
-只接受配置的网段。`passmanager unenroll` 从 Agent 机器上移除配置、MCP 项、使用规则与 git-proxy 服务；令牌请在网页"Agent 令牌"页或用
+只接受配置的网段。`passmanager unenroll` 从 Agent 机器上移除配置、MCP 项与 git-proxy 服务；令牌请在网页"Agent 令牌"页或用
 `passmanager token revoke <ID>` 吊销（未使用的注册码由 `token list` 列出，也用同样的方式作废）。
 
 安装脚本把自身的程序复制到 `/var/lib/passmanager/agent-bin/`；其他平台用 `--agent-bundle <目录>` 提供发布包

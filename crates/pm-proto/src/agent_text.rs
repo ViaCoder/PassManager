@@ -1,13 +1,12 @@
 //! 给 AI Agent 的文字（唯一来源）：`passmanager show` 打印的接入说明——服务器上的 root 加 `--label` 时含一次性注册码，
-//! 否则是不含注册码的公开版本——以及写入 Agent 全局指令文件的使用规则（`show --rules`）。
+//! 否则是不含注册码的公开版本——与错误后面附的 `Next:` 提示。Agent 的用法只来自 MCP（服务器说明、工具描述、lookup 的 how）。
 //!
 //! - 接入说明只包含一个一次性注册码（10 分钟、只能用一次）与服务端公钥指纹，没有其他秘密；公开版本两者都没有；
 //! - 源码构建路径固定到服务器自身的构建信息（发布标签 + 提交）；开发构建没有对应的公开标签时给出明确说明，不给错误的固定值；
 //! - 服务器上有这个发布的 SHA256SUMS 时，另给出从 GitHub 发布页下载各平台包的命令，SHA-256 写在命令里（下载后校验）；
-//! - 使用规则写在 `<!-- passmanager:begin -->` 与 `<!-- passmanager:end -->` 之间，原地更新、不重复。
+//! - 不再往 Agent 的全局指令文件里写规则（0.3.11-rc.29 起）；旧版本写过的块由客户端删除。
 
-/// 使用规则的版本（规则内容变化时加 1）。
-pub const INSTRUCTIONS_VERSION: u32 = 7;
+/// 旧版本（≤ 0.3.11-rc.28）写进 Agent 全局指令文件的规则块的标记：现在只用来找到并删除旧块（见 passmanager 的 agent_instructions）。
 pub const BEGIN: &str = "<!-- passmanager:begin -->";
 pub const END: &str = "<!-- passmanager:end -->";
 /// 公开的源码仓库。
@@ -47,115 +46,68 @@ impl BuildInfo {
     }
 }
 
-/// 使用规则（写入 Agent 全局指令文件，也是接入说明的最后一部分）。
-///
-/// 只写流程与边界；每个工具的用法在 MCP 工具描述里，具体写法由 `lookup` 的结果给出，错误的处理由 `Next:` 给出（逐步披露）。
-pub fn rules(lang: Lang) -> &'static str {
-    match lang {
-        Lang::En => {
-            "\
-- Use the PassManager MCP tools (or the `passmanager` CLI). You never see secrets: you write placeholders and
-  PassManager fills them in on the server and redacts the results.
-- Workflow: 1. `lookup` the URL or user@host you need (CLI: `passmanager lookup <target>`). 2. Copy the `how` it
-  returns into `http`, `ssh` or `scp`, replacing only the `<...>` parts.
-- To keep a secret file on a remote host encrypted at rest (bound to the PassManager server, no TPM needed there):
-  `lookup tang` and follow its `how`.
-- An `alias://<name>` address hides the real URL: use only that form (`lookup alias://<name>`). Never try to find, guess or
-  reach the real address; that host is refused directly and it is removed from every result.
-- Never ask the user for a password, token or key; never print, log or store one; never try to reveal one.
-- Shell commands that need a login (git over HTTPS or SSH, ssh, scp, rsync): prefix them with `passmanager run`, e.g.
-  `passmanager run git push`. Authentication is forwarded through the server for that one command; nothing is configured.
-- An error ends with a `Next:` line: do exactly that. Do not retry the same call and do not work around the error.
-- Adding or changing a credential is done by an agent with root SSH on the PassManager server, not by the user:
-    <command that prints the secret> | ssh root@<server> passmanager import --name <name> --domain <host> --ops <http|ssh|git> --note '<purpose>'
-    ssh root@<server> passmanager update --name <name> --domain <host>      (also --add-op, --remove-domain, --note)
-  The secret only travels through the pipe: never echo, cat or save it. A note is one short purpose: no paths, URLs,
-  accounts or secrets. Without root SSH on the server, tell the user what is missing.
-"
-        }
-        Lang::Zh => {
-            "\
-- 使用 PassManager 的 MCP 工具（或 `passmanager` 命令行）。你看不到秘密：只写占位符，PassManager 在服务器上代入并对结果脱敏。
-- 流程：1. 用 `lookup` 查询要访问的 URL 或 user@host（命令行：`passmanager lookup <目标>`）。2. 把返回的 `how` 照抄到
-  `http`、`ssh` 或 `scp`，只替换其中 `<...>` 的部分。
-- 要让远程主机上的秘密文件在磁盘上只以加密形式存在（绑定到 PassManager 服务器，那台主机不需要 TPM）：
-  `lookup tang`，照它的 `how` 做。
-- `alias://<名称>` 隐藏了真实 URL：只使用这种写法（`lookup alias://<名称>`）。不要设法查找、猜测或访问真实地址；
-  那台主机不能被直接访问，它也会从所有结果里去掉。
-- 永远不要向用户索要口令、令牌或私钥；不要打印、记录或保存；不要设法还原秘密。
-- 需要登录的终端命令（基于 HTTPS 或 SSH 的 git、ssh、scp、rsync）：在前面加 `passmanager run`，例如
-  `passmanager run git push`。认证只为这一条命令经服务器转发，不改任何配置。
-- 错误的最后一行是 `Next:`：照它做。不要重复同样的调用，也不要绕过错误。
-- 新增或修改凭据由拥有 PassManager 服务器 root SSH 的 Agent 完成，用户不手动操作：
-    <输出秘密的命令> | ssh root@<服务器> passmanager import --name <名称> --domain <主机> --ops <http|ssh|git> --note '<用途>'
-    ssh root@<服务器> passmanager update --name <名称> --domain <主机>      （还有 --add-op、--remove-domain、--note）
-  秘密只经过管道：不要 echo、cat 或保存。备注只写一句用途：不含路径、URL、账号或秘密。没有服务器的 root SSH 时，告诉用户缺少什么。
-"
-        }
-    }
-}
-
 /// 错误码对应的下一步（附在 MCP 与 CLI 的错误后面，写给 Agent）。`server` 是本机注册的服务器主机名（未注册时为 None）。
+///
+/// 只说明发生了什么、怎样补救，不规定 Agent 能不能重试或换别的做法（2026-11-27 起）：
+/// 安全边界由服务器执行，这里的话越少越不影响 Agent 的正常判断。
 pub fn next_step(code: &str, server: Option<&str>) -> Option<String> {
     let srv = server.unwrap_or("<PassManager server>");
-    let no_root = "Without root SSH on that server, tell the user exactly what is missing.";
+    let no_root = "Without root SSH on that server, tell the user what is missing.";
     let s = match code {
         "NO_CREDENTIAL" => format!(
-            "no credential is stored for this target. If you have root SSH on the PassManager server, import it without displaying it: \
-             <command that prints the secret> | ssh root@{srv} passmanager import --name <name> --domain <host> --ops <http|ssh|git> \
-             --note '<purpose>'. {no_root} Do not guess other credential names."
+            "no credential is stored for this target. With root SSH on the PassManager server it can be imported without \
+             displaying it: <command that prints the secret> | ssh root@{srv} passmanager import --name <name> --domain <host> \
+             --ops <http|ssh|git> --note '<purpose>'. {no_root}"
         ),
         "DOMAIN_MISMATCH" => format!(
-            "this credential is not bound to that host. If it should be, bind it: ssh root@{srv} passmanager update --name <name> \
-             --domain <host>. {no_root} Do not retry with other names."
+            "this credential is not bound to that host. To bind it: ssh root@{srv} passmanager update --name <name> --domain <host>. \
+             {no_root}"
         ),
         "OP_NOT_ALLOWED" => format!(
-            "this credential is not allowed for that use. If it should be, allow it: ssh root@{srv} passmanager update --name <name> \
-             --add-op <http|ssh|git>. {no_root} Do not retry."
+            "this credential is not allowed for that use. To allow it: ssh root@{srv} passmanager update --name <name> \
+             --add-op <http|ssh|git>. {no_root}"
         ),
-        "AMBIGUOUS" => "ask the user which of the named credentials to use, then pick it by name: write {{name}} instead of \
-                        {{secret}} in an http request, or name/user@host for ssh or scp (lookup accepts name/https://... too)."
+        "AMBIGUOUS" => "several credentials match; pick one by name: write {{name}} instead of {{secret}} in an http request, or \
+                        name/user@host for ssh or scp (lookup accepts name/https://... too). Ask the user if the context does not \
+                        say which."
             .into(),
         "UNKNOWN_CREDENTIAL" | "UNKNOWN_FIELD" | "USE_LOOKUP" => {
-            "call lookup with the URL or user@host you want to use, then use exactly the names and placeholders it returns.".into()
+            "call lookup with the URL or user@host to get the names and placeholders to use.".into()
         }
-        "BAD_REQUEST" | "BAD_URL" => "fix the arguments; follow the example in the tool description or lookup's how.".into(),
+        "BAD_REQUEST" | "BAD_URL" => "fix the arguments (see the tool description or lookup's how).".into(),
         "USE_HTTPS" => "use an https:// URL.".into(),
-        "PLACEMENT" => "put the placeholder exactly where lookup's how shows (a credential header, or the whole value of a key/token \
-                        field); never into other text, a prompt or an ssh command. Do not try other positions."
+        "PLACEMENT" => "placeholders are filled in only where lookup's how shows (a credential header, or the whole value of a \
+                        key/token field), not inside other text, a prompt or an ssh command."
             .into(),
-        "LOCKED" | "NOT_READY" => "tell the user PassManager is not available (the message says why). Do not retry.".into(),
+        "LOCKED" | "NOT_READY" => "PassManager is not available (the message says why); the user has to fix that.".into(),
         // 经服务器工作时只能在网页上信任；单机模式的做法在错误信息里（PassManager trust）
         "HOST_KEY_CHANGED" => match server {
-            Some(_) => "tell the user the target's key or certificate changed; they must check it and trust the new fingerprint on \
-                        the Host fingerprints page of the PassManager web UI. Do not retry or work around it."
+            Some(_) => "the target's key or certificate changed. It stays refused until the user checks it and trusts the new \
+                        fingerprint on the Host fingerprints page of the PassManager web UI."
                 .into(),
-            None => "tell the user the server's key or certificate changed; they must verify and trust it. Do not retry or work around it."
-                .into(),
+            None => "the server's key or certificate changed; it stays refused until the user verifies and trusts it.".into(),
         },
         // 主机设成了经客户端连接，但这次的客户端没能转发（旧版本的进程、超时）
         "RELAY_UNAVAILABLE" => "this host is reached through the network of the machine you run on, and that did not work (see the \
-                                message). Tell the user; do not retry and do not try another route."
+                                message)."
             .into(),
         "AUTH_REJECTED" | "AUTH_FAILED" | "BAD_CREDENTIAL" => {
-            "the target rejected the stored credential. Do not retry and do not try other names; tell the user which target \
-             rejected it."
+            "the target rejected the stored credential, so the same credential will be rejected again; tell the user which \
+             target rejected it."
                 .into()
         }
-        "UPSTREAM_ERROR" | "DISCONNECTED" => {
-            "the target or the network failed (see the message). Retry once at most, then tell the user.".into()
-        }
-        "RATE_LIMITED" => "wait a minute before the next call.".into(),
+        "UPSTREAM_ERROR" | "DISCONNECTED" => "the target or the network failed (see the message); this may be temporary.".into(),
+        "RATE_LIMITED" => "too many calls; wait a minute.".into(),
         "TOO_LARGE" => "the file is over 64 MiB; split or compress it first.".into(),
         "NO_TOKEN" => "this machine is not enrolled with PassManager; tell the user.".into(),
-        "FORBIDDEN" => "this is not allowed for agents. Do not retry.".into(),
-        "ALIAS_ONLY" => "this host may only be used through the address the user gave you. Ask the user for its alias:// name if you have \
-             none. Do not try other names or addresses for it."
+        "FORBIDDEN" => "agents cannot do this.".into(),
+        "ALIAS_ONLY" => "this host is only reachable through its alias:// address; ask the user for the alias name if it is \
+                         unknown."
             .into(),
-        "UNKNOWN_ALIAS" => "ask the user for the right alias name; aliases cannot be listed by agents.".into(),
+        "UNKNOWN_ALIAS" => "there is no such alias, and agents cannot list aliases; ask the user for the right name.".into(),
         "NO_TANG" => format!(
-            "this PassManager server does not offer Tang. Tell the user; root on {srv} enables it with passmanager init --tang \
-             127.0.0.1:<port> (see docs/DEPLOY-LAN.md, network-bound encryption). Do not use another key server."
+            "this PassManager server does not offer Tang. Root on {srv} enables it with passmanager init --tang 127.0.0.1:<port> \
+             (see docs/DEPLOY-LAN.md, network-bound encryption)."
         ),
         _ => return None,
     };
@@ -179,7 +131,7 @@ Pin{others}: {pin}
 with a hybrid post-quantum group). Older: tell the user this host cannot use it.
 2. Reach: curl -sS -o /dev/null -w '%{{http_code}}\\n' {origin}/tang/adv must print 200. Connection reset or timed out: the \
 host's address is not allowed by this server (LAN ranges or allowlist); tell the user (root on the server adds it to \
-ALLOW_IPS in the site file and re-runs install-server.sh --site-file <site file> --skip-acme). Do not retry.
+ALLOW_IPS in the site file and re-runs install-server.sh --site-file <site file> --skip-acme).
 3. Encrypt and check: umask 077; mkdir -p /etc/tang-files; clevis encrypt tang '{pin}' < <file> > /etc/tang-files/<name>.jwe \
 && [ \"$(clevis decrypt < /etc/tang-files/<name>.jwe | sha256sum)\" = \"$(sha256sum < <file>)\" ] && echo same
    Go on only if it printed same. Note the file's owner and mode: stat -c '%U:%G %a' <file>
@@ -213,15 +165,6 @@ Undo (one command): cp --preserve=mode,ownership --remove-destination /run/tang-
 While this server cannot be reached the file is not decrypted (the host waits at boot). Tang's own exchange is not \
 post-quantum; the HTTPS transport to this server is."
     )
-}
-
-/// 写入 Agent 全局指令文件的块（含标记）。`passmanager show --rules` 打印的也是它。
-pub fn instruction_block(lang: Lang) -> String {
-    let title = match lang {
-        Lang::En => format!("## PassManager (agent instructions v{INSTRUCTIONS_VERSION})"),
-        Lang::Zh => format!("## PassManager（Agent 使用规则 v{INSTRUCTIONS_VERSION}）"),
-    };
-    format!("{BEGIN}\n{title}\n\n{}{END}\n", rules(lang))
 }
 
 /// 一个发布包：文件名与 SHA-256（来自 GitHub 发布页的 SHA256SUMS）。
@@ -400,7 +343,7 @@ The enrollment code below is valid for {minutes} minutes and works once. Do not 
 1. Install, enroll and configure (needs curl with TLS 1.3 and X25519MLKEM768; works in sh, bash and zsh):
      {one_liner}
    This installs the PassManager client to ~/.local/bin (SHA-256 verified), enrolls it with the server, configures the
-   MCP server for the detected agents and adds the rules below to their global instruction files.
+   MCP server for the detected agents.
 {git}   If the download fails the command prints curl's error and exits with curl's exit code. Exit code 35
    (`curl: (35)`, TLS handshake failure) means this machine's curl cannot do X25519MLKEM768: go to step 2.
    Any other error (for example 22: the code expired or was already used; 6 or 7: server unreachable): stop and tell the user.
@@ -408,23 +351,22 @@ The enrollment code below is valid for {minutes} minutes and works once. Do not 
 2. Only if step 1 exits with code 35 (TLS handshake failure; curl without ML-KEM support, e.g. macOS or older
    distributions) or on Windows: {fallback}
 {source}
-{restart}. Restart the agent so that it loads the PassManager MCP server, then follow these rules:
-{rules}",
+{restart}. Restart the agent so that it loads the PassManager MCP server; its tools describe how to use it.
+",
             git = git_note(lang),
             fallback = match &release {
                 Some(r) => format!(
                     "download the release package for this platform from GitHub, check its SHA-256 (pinned below)
-   and enroll with it (this configures MCP, the rules and git as well).
+   and enroll with it (this configures MCP and git as well).
 {r}
 3. Only if step 2 is not possible (no access to github.com, or no package for this platform): build the client from
    the pinned source and enroll with it."
                 ),
-                None => "build the client from the pinned source and enroll with it (this configures MCP, the
-   rules and git as well)."
+                None => "build the client from the pinned source and enroll with it (this configures MCP and
+   git as well)."
                     .to_string(),
             },
             restart = if release.is_some() { 4 } else { 3 },
-            rules = rules(Lang::En)
         ),
         Lang::Zh => format!(
             "PassManager 接入说明——给需要使用 PassManager 的那台机器上的 AI Agent。
@@ -432,27 +374,25 @@ The enrollment code below is valid for {minutes} minutes and works once. Do not 
 
 1. 安装、注册并配置（需要支持 TLS 1.3 与 X25519MLKEM768 的 curl；在 sh、bash、zsh 中都可以直接运行）：
      {one_liner}
-   它把 PassManager 客户端装到 ~/.local/bin（校验 SHA-256），向服务器注册，为检测到的 Agent 配置 MCP 服务，
-   并把下面的规则写入它们的全局指令文件。
+   它把 PassManager 客户端装到 ~/.local/bin（校验 SHA-256），向服务器注册，为检测到的 Agent 配置 MCP 服务。
 {git}   下载失败时命令会打印 curl 的错误，并以 curl 的退出码退出。退出码 35（`curl: (35)`，TLS 握手失败）表示本机的 curl
    不支持 X25519MLKEM768：转到第 2 步。其他错误（例如 22：注册码已过期或已用过；6 或 7：连不上服务器）：停止并告诉用户。
 
 2. 只有第 1 步以退出码 35 失败（TLS 握手失败；curl 不支持 ML-KEM，例如 macOS 或较旧的发行版）或在 Windows 上时：
    {fallback}
 {source}
-{restart}. 重启 Agent 使其加载 PassManager MCP 服务，然后遵守以下规则：
-{rules}",
+{restart}. 重启 Agent 使其加载 PassManager MCP 服务；怎样使用写在它的工具说明里。
+",
             git = git_note(lang),
             fallback = match &release {
                 Some(r) => format!(
-                    "从 GitHub 发布页下载本平台的包，校验 SHA-256（固定值写在下面的命令里），再用它注册（同样会配置 MCP、规则与 git）。
+                    "从 GitHub 发布页下载本平台的包，校验 SHA-256（固定值写在下面的命令里），再用它注册（同样会配置 MCP 与 git）。
 {r}
 3. 只有第 2 步做不到时（访问不了 github.com，或者没有本平台的包）：从固定的源码构建客户端并用它注册。"
                 ),
-                None => "从固定的源码构建客户端并用它注册（同样会配置 MCP、规则与 git）。".to_string(),
+                None => "从固定的源码构建客户端并用它注册（同样会配置 MCP 与 git）。".to_string(),
             },
             restart = if release.is_some() { 4 } else { 3 },
-            rules = rules(Lang::Zh)
         ),
     }
 }
@@ -488,17 +428,16 @@ pub fn public_text(lang: Lang, connected: Option<&str>) -> String {
    enrollment code (valid for 10 minutes, works once) and one command:
      {example}
    The command installs the PassManager client to ~/.local/bin (SHA-256 verified), enrolls it with the server,
-   configures the MCP server for the detected agents and adds the rules below to their global instruction files.
+   configures the MCP server for the detected agents.
 {git}
 2. Fallback, only if that command exits with code 35 (`curl: (35)`: this machine's curl cannot do post-quantum TLS,
    X25519MLKEM768) or on Windows: build the client from the release source pinned to the tag and commit printed in
    the server's guide, then enroll with the pm-enroll:// URL from the guide (`passmanager show --label <name> --url`
    on the server prints only that URL):
 {source}
-3. Restart the agent so that it loads the PassManager MCP server, then follow these rules:
-{rules}",
+3. Restart the agent so that it loads the PassManager MCP server; its tools describe how to use it.
+",
                 git = git_note(lang),
-                rules = rules(lang)
             )
         }
         Lang::Zh => {
@@ -515,17 +454,15 @@ pub fn public_text(lang: Lang, connected: Option<&str>) -> String {
    并把完整的输出交给需要使用 PassManager 的那台机器上的 AI Agent。其中有一个一次性注册码（10 分钟内有效，只能使用一次）
    与一行命令：
      {example}
-   这行命令把 PassManager 客户端装到 ~/.local/bin（校验 SHA-256），向服务器注册，为检测到的 Agent 配置 MCP 服务，
-   并把下面的规则写入它们的全局指令文件。
+   这行命令把 PassManager 客户端装到 ~/.local/bin（校验 SHA-256），向服务器注册，为检测到的 Agent 配置 MCP 服务。
 {git}
 2. 备用方式，只在那行命令以退出码 35 失败（`curl: (35)`：本机的 curl 不支持后量子 TLS，X25519MLKEM768）或在 Windows 上时：
    按服务器说明里给出的发布标签与提交从源码构建客户端，再用说明里的 pm-enroll:// 注册码注册
    （在服务器上运行 `passmanager show --label <名称> --url` 只打印这个注册码）：
 {source}
-3. 重启 Agent 使其加载 PassManager MCP 服务，然后遵守以下规则：
-{rules}",
+3. 重启 Agent 使其加载 PassManager MCP 服务；怎样使用写在它的工具说明里。
+",
                 git = git_note(lang),
-                rules = rules(lang)
             )
         }
     }
@@ -564,7 +501,9 @@ mod tests {
             assert!(t.contains("35"), "说明握手失败的退出码");
             assert!(t.contains("--branch v0.3.0") && t.contains("0123456789abcdef0123456789abcdef01234567"));
             assert!(t.contains(&format!("enroll '{URL}'")));
-            assert!(t.contains("`lookup`") && t.contains("Next:"));
+            // 用法只来自 MCP：说明里没有规则块，也不让 Agent 遵守什么规则
+            assert!(!t.contains(BEGIN) && !t.contains("follow these rules") && !t.contains("遵守以下规则"), "{t}");
+            assert!(t.contains("its tools describe") || t.contains("工具说明"), "{t}");
             assert!(!t.contains("install-agent.sh") && !t.contains("irm ") && !t.contains("iex"), "没有其他安装方式");
             assert!(t.contains("git-proxy") && t.contains("insteadOf"), "说明注册同时配置 git");
             let dev = setup_text(
@@ -583,7 +522,7 @@ mod tests {
     }
 
     /// 公开说明（不带 --label、或不是服务器上的 root）：没有注册码、没有 /a/<注册码>、没有 pm-enroll:// 注册码，
-    /// 但有完整的流程、备用方式（退出码 35 → 固定源码构建 → enroll）、git 与规则；已注册时说明连接的服务器。
+    /// 但有完整的流程、备用方式（退出码 35 → 固定源码构建 → enroll）与 git；已注册时说明连接的服务器。
     #[test]
     fn public_text_has_no_code() {
         for lang in [Lang::En, Lang::Zh] {
@@ -603,7 +542,7 @@ mod tests {
                 }
                 assert!(!t.split(|c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_').any(|w| w.len() == 43));
                 assert_eq!(t.contains("pm.example.com:8121"), connected.is_some());
-                assert!(t.contains("`lookup`") && t.contains("Next:"));
+                assert!(!t.contains(BEGIN) && !t.contains("follow these rules") && !t.contains("遵守以下规则"), "{t}");
             }
         }
         assert!(public_text(Lang::En, None).contains("not enrolled"));
@@ -633,41 +572,69 @@ mod tests {
     #[test]
     fn next_steps() {
         let n = next_step("NO_CREDENTIAL", Some("pm.example.com")).unwrap();
-        assert!(n.contains("ssh root@pm.example.com passmanager import") && n.contains("Do not guess"), "{n}");
+        assert!(n.contains("ssh root@pm.example.com passmanager import") && n.contains("tell the user what is missing"), "{n}");
         assert!(next_step("DOMAIN_MISMATCH", None).unwrap().contains("<PassManager server> passmanager update"));
         assert!(next_step("OP_NOT_ALLOWED", None).unwrap().contains("--add-op"));
-        for c in
-            ["AMBIGUOUS", "UNKNOWN_CREDENTIAL", "USE_LOOKUP", "LOCKED", "NOT_READY", "HOST_KEY_CHANGED", "AUTH_REJECTED", "BAD_REQUEST"]
-        {
-            assert!(next_step(c, None).is_some(), "{c}");
-        }
-        assert!(next_step("NO_TANG", Some("pm.example.com")).unwrap().contains("root on pm.example.com"));
+        // AMBIGUOUS：先按上下文选，说不清时才问用户
+        let a = next_step("AMBIGUOUS", None).unwrap();
+        assert!(a.contains("{{name}}") && a.contains("name/user@host") && a.contains("if the context does not"), "{a}");
+        assert!(next_step("NO_TANG", Some("pm.example.com")).unwrap().contains("Root on pm.example.com"));
         assert!(next_step("ALIAS_ONLY", None).unwrap().contains("alias://") && next_step("UNKNOWN_ALIAS", None).is_some());
-        assert!(next_step("PLACEMENT", None).unwrap().contains("Do not try other positions"));
+        assert!(next_step("PLACEMENT", None).unwrap().contains("credential header"));
+        assert!(next_step("AUTH_REJECTED", None).unwrap().contains("rejected again"));
         // 指纹变化：注册了服务器时指向网页"主机指纹"页，不出现命令
         let h = next_step("HOST_KEY_CHANGED", Some("pm.example.com")).unwrap();
         assert!(h.contains("Host fingerprints page") && h.contains("web UI") && !h.contains("PassManager trust"), "{h}");
-        assert!(next_step("HOST_KEY_CHANGED", None).unwrap().contains("verify and trust"));
-        // 经客户端网络连接：转发不可用时不重试
-        assert!(next_step("RELAY_UNAVAILABLE", None).unwrap().contains("do not retry"));
+        assert!(next_step("HOST_KEY_CHANGED", None).unwrap().contains("verifies and trusts"));
         assert!(next_step("INTERNAL", None).is_none());
+        // 只说明情况与补救，不限制 Agent 的做法：任何错误码的提示里都没有"不要重试""只试一次"之类的话
+        let all = [
+            "NO_CREDENTIAL",
+            "DOMAIN_MISMATCH",
+            "OP_NOT_ALLOWED",
+            "AMBIGUOUS",
+            "UNKNOWN_CREDENTIAL",
+            "UNKNOWN_FIELD",
+            "USE_LOOKUP",
+            "BAD_REQUEST",
+            "BAD_URL",
+            "USE_HTTPS",
+            "PLACEMENT",
+            "LOCKED",
+            "NOT_READY",
+            "HOST_KEY_CHANGED",
+            "RELAY_UNAVAILABLE",
+            "AUTH_REJECTED",
+            "AUTH_FAILED",
+            "BAD_CREDENTIAL",
+            "UPSTREAM_ERROR",
+            "DISCONNECTED",
+            "RATE_LIMITED",
+            "TOO_LARGE",
+            "NO_TOKEN",
+            "FORBIDDEN",
+            "ALIAS_ONLY",
+            "UNKNOWN_ALIAS",
+            "NO_TANG",
+        ];
+        for c in all {
+            for srv in [None, Some("pm.example.com")] {
+                let t = next_step(c, srv).unwrap_or_else(|| panic!("{c}"));
+                let low = t.to_ascii_lowercase();
+                for bad in ["retry", "do not", "don't", "never", "at most", "exactly", "only once"] {
+                    assert!(!low.contains(bad), "{c}: {bad}: {t}");
+                }
+            }
+        }
     }
 
     #[test]
-    fn instruction_block_has_markers() {
-        let b = instruction_block(Lang::En);
-        assert!(b.starts_with(BEGIN) && b.trim_end().ends_with(END));
-        assert_eq!(b.matches(BEGIN).count(), 1);
-        assert!(b.contains(&format!("v{INSTRUCTIONS_VERSION}")) && b.contains("`lookup`") && !b.contains("`list`"));
-        for blk in [b.clone(), instruction_block(Lang::Zh)] {
-            for must in ["passmanager run", "Next:", "passmanager import", "passmanager update", "`how`"] {
-                assert!(blk.contains(must), "{must}: {blk}");
-            }
-        }
-        // 规则块保持简短（详细用法在工具描述、lookup 结果与 Next: 里）。
-        assert!(rules(Lang::En).lines().count() <= 18, "{}", rules(Lang::En));
+    fn lang_parse() {
         assert_eq!(Lang::parse("ZH").unwrap(), Lang::Zh);
+        assert_eq!(Lang::parse("").unwrap(), Lang::En);
         assert!(Lang::parse("fr").is_err());
+        // 旧块的标记：删除旧块时靠它们找到位置，不能改
+        assert_eq!((BEGIN, END), ("<!-- passmanager:begin -->", "<!-- passmanager:end -->"));
     }
 
     /// 测试用的 SHA256SUMS：0.3.0 的 macOS、Linux x86_64、Windows x64，外加一个别的版本的包。

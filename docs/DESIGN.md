@@ -169,7 +169,7 @@ SealedPayload = { ct_mlkem, ct_mce, nonce_a, nonce_b, c2 }
 
 Compatibility: `list` (and `list_credentials`) no longer lists anything; it returns `USE_LOOKUP`. The MCP tools also accept older names (`http_request`, `ssh_exec`, `ssh_upload`/`ssh_download`) and common argument shapes (headers as an object / array / `"K: V"` text, body as a JSON object, ssh with separate `host`/`user`/`port`, scp with `from`/`to`), but the tool list only advertises the four above. The CLI accepts common curl, OpenSSH, and scp options and ignores unrelated ones such as `-s`, `-L`, `-t`, `-o …`. Clients locate the local service without environment variables (Linux uses `/run/user/<uid>`, Windows derives the pipe name from the user SID), so it also works in MCP child processes with a minimal environment.
 
-The MCP server speaks newline-delimited JSON-RPC 2.0 over stdio, supports protocol versions 2025-11-25 / 2025-06-18 / 2025-03-26 / 2024-11-05, and discloses usage progressively: `instructions` (at most five lines: lookup first, copy `how`, never reveal secrets, follow `Next:`) → tool descriptions (two or three sentences plus one minimal example each, with `readOnlyHint`/`destructiveHint`/`openWorldHint` annotations; a test caps the whole tool list in size) → `lookup`'s `how` → a `Next:` line appended to every error by code (`pm_proto::agent_text::next_step`). Error messages do not list an entry's domains or allowed operations:
+The MCP server speaks newline-delimited JSON-RPC 2.0 over stdio, supports protocol versions 2025-11-25 / 2025-06-18 / 2025-03-26 / 2024-11-05, and discloses usage progressively: `instructions` (two lines of basic usage: secrets are used without being shown; lookup, then make the call its `how` returns; nothing limits retries or tells the agent to obey) → tool descriptions (one sentence plus one minimal example each, with the feature entry points alias://, tang, the jump-host form and `via_client` kept to the shortest mention; with `readOnlyHint`/`destructiveHint`/`openWorldHint` annotations; a test caps the whole tool list in size) → `lookup`'s `how` → a `Next:` line appended to every error by code (`pm_proto::agent_text::next_step`). Error messages do not list an entry's domains or allowed operations:
 
 | Code | Meaning |
 |---|---|
@@ -333,9 +333,9 @@ header v2 = v1 fields + mode byte (device-only); the header hash remains the AAD
 | server (root) | `passmanager status` / `lock` / `unlock` / `reseal` | status, lock, unlock, L2 → L3 |
 | server (root) | `passmanager import --name <n> [--domain …] [--kind ssh-key] [--fields a,b] [--replace]` | import a secret from stdin |
 | server (root) | `passmanager show --label N [--url] [--lang en]` | one-time code + the text block for an AI agent (`--url`: only the code) |
-| anywhere | `passmanager show [--rules] [--lang en]` | public guide without a code (names the server when enrolled) / only the rules |
-| agent | `passmanager enroll 'pm-enroll://…' [--no-instructions] [--no-git-proxy]` | join the server; configures MCP, the usage rules and the git-proxy service |
-| agent | `passmanager unenroll` | remove the configuration, rules and git-proxy service |
+| anywhere | `passmanager show [--lang en]` | public guide without a code (names the server when enrolled) |
+| agent | `passmanager enroll 'pm-enroll://…' [--no-git-proxy]` | join the server; configures MCP and the git-proxy service |
+| agent | `passmanager unenroll` | remove the configuration and git-proxy service |
 | agent | `passmanager ssh-agent [--socket PATH]` | OpenSSH agent bridge (Unix) |
 | agent | `passmanager git-proxy [--listen 127.0.0.1:PORT] [--install \| --uninstall]` | git credential-injecting proxy; `--install`: user service + `insteadOf` lines |
 | server | `scripts/install-server.sh` | one-step server installer (`DRY_RUN=1` for tests) |
@@ -394,10 +394,12 @@ of the same guide with placeholders instead of a code.
   the client from source at the release tag and commit of the running server (embedded at build time from the tag build — `GITHUB_*`
   in CI, `PASSMANAGER_RELEASE_TAG`/`PASSMANAGER_RELEASE_COMMIT`, or a clean checkout at tag `v<version>`), and to refuse if
   `git rev-parse HEAD` differs. Development builds print a note instead of an unverifiable pin.
-- `enroll` writes the usage rules between `<!-- passmanager:begin -->` and `<!-- passmanager:end -->` in the global instruction
-  files of detected agents (Claude Code `~/.claude/CLAUDE.md`, Codex `~/.codex/AGENTS.md`, Gemini CLI `~/.gemini/GEMINI.md`,
-  Windsurf `global_rules.md`): updated in place, never duplicated, previous content kept as `*.passmanager.bak`, refused when the
-  markers are damaged, removed by `unenroll` / `uninstall`.
+- Agents learn PassManager only from MCP; nothing is written into their global instruction files, because standing rules there
+  made agents overly cautious. Versions up to 0.3.11-rc.28 wrote a rules block between `<!-- passmanager:begin -->` and
+  `<!-- passmanager:end -->` (Claude Code `~/.claude/CLAUDE.md`, Codex `~/.codex/AGENTS.md`, Gemini CLI `~/.gemini/GEMINI.md`,
+  Windsurf `global_rules.md`). An enrolled client removes it once, on its first command after updating (a marker file
+  `instructions-removed` in the config directory records that), and so do `enroll`, `unenroll` and `uninstall`: only the block
+  goes, the user's own content stays, the previous file is kept as `*.passmanager.bak`, and damaged markers are reported, not edited.
 - `enroll` (both the one-liner and the source-build fallback) also makes git over HTTPS work for every entry the agent can use
   that has the `git` op — GitHub, self-hosted forges and others are treated identically: it installs `git-proxy` as a per-user
   service (systemd user unit with `Restart=on-failure` and `RestartPreventExitStatus=78`, `loginctl enable-linger` attempted with
