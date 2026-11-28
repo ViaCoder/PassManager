@@ -3,13 +3,33 @@
 {% block body %}
 <div class="auth">
   <section class="card auth-card">
-    <div class="auth-icon">{{ icon("terminal") }}</div>
-    <h1>登录 PassManager</h1>
-    {% if expired %}<p class="hint">{{ icon("clock") }}登录已过期（空闲 2 小时或登录满 12 小时），重新登录即可。</p>{% endif %}
-    <p class="lede">网页管理没有密码：你的电脑经 PassManager 登录服务器，生成一次性链接。</p>
-    <a class="btn block" href="passmanager-web://login">{{ icon("unlock") }}一键登录</a>
-    <p class="hint">点击后允许浏览器打开 PassManager。登录完成后，新打开的标签页会自动关闭，这个页面回到原来的位置。</p>
-    <details>
+    {# 开始：点"一键登录"之前。点下去后脚本换成"等待"，登录完成时换成"成功"再跳转（没有脚本时一直是这一块） #}
+    <div id="login-start">
+      <div class="auth-icon">{{ icon("terminal") }}</div>
+      <h1>登录 PassManager</h1>
+      {% if expired %}<p class="hint">{{ icon("clock") }}登录已过期（空闲 2 小时或登录满 12 小时），重新登录即可。</p>{% endif %}
+      <p class="lede">网页管理没有密码：你的电脑经 PassManager 登录服务器，生成一次性链接。</p>
+      <a class="btn block" href="passmanager-web://login">{{ icon("unlock") }}一键登录</a>
+      <p class="hint">点击后允许浏览器打开 PassManager。登录完成后，新打开的标签页会自动关闭，这个页面回到原来的位置。</p>
+    </div>
+    {# 等待：已请本机的 PassManager 登录，这里自动进入 #}
+    <div id="login-wait" hidden>
+      <div class="auth-icon wait">{{ icon("clock") }}</div>
+      <h1>等待你的电脑完成登录</h1>
+      <p class="lede">已请你电脑上的 PassManager 登录。浏览器询问是否打开 PassManager 时，选择打开。</p>
+      <p class="hint">登录完成后这个页面会自动进入；中途打开的新标签页会自己关闭，不用管它。</p>
+      <div class="form-actions">
+        <a class="btn secondary" href="passmanager-web://login">{{ icon("unlock") }}再试一次</a>
+        <button type="button" class="secondary" id="login-back">返回</button>
+      </div>
+    </div>
+    {# 成功：马上跳到原来的位置 #}
+    <div id="login-done" hidden>
+      <div class="auth-icon">{{ icon("check") }}</div>
+      <h1>登录成功</h1>
+      <p class="lede">正在进入……</p>
+    </div>
+    <details id="login-help">
       <summary>按钮没有反应？</summary>
       <ol class="steps">
         <li>第一次使用，在你的电脑上运行一次，然后再点按钮：

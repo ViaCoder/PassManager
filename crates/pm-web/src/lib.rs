@@ -605,15 +605,30 @@ fn cookie_named(h: &HeaderMap, name: &str) -> Option<String> {
 
 // ---------------- 登录后只留一个页面 ----------------
 //
-// 旧页面（会话过期后的登录页）记住原来的位置，并且每 2 秒问一次"这个浏览器登录了没有"；登录后回到原来的位置。
+// 旧页面（会话过期后的登录页）记住原来的位置，并且每 2 秒（点了一键登录后每 0.5 秒）问一次"这个浏览器登录了没有"；登录后回到原来的位置。
 // 新页面（`passmanager web` 打开的那个）登录后先到 `/continue`：如果同一个浏览器里有旧页面还在等，新页面就关闭自己。
 // 新页面一路都是 Refresh 跳转，历史记录只有一条，浏览器允许脚本关闭它（Chrome 157 实测）；旧页面有历史记录，关不掉，
 // 所以由它留下来。"同一个浏览器"靠 `__Host-pm-wait` Cookie 认出：它不能登录，只决定新页面要不要关闭自己。
 
-/// 旧页面的轮询脚本：问 `/login/state`；回答是本站路径时就回到那里（不新增历史记录）。
-const POLL_JS: &str = "setInterval(function(){fetch('/login/state',{credentials:'same-origin',cache:'no-store'}).then(function(r){return r.text()}).then(function(t){if(t.charAt(0)==='/'&&t.charAt(1)!=='/')location.replace(t)}).catch(function(){})},2000);";
-/// 新页面的关闭脚本。
-const CLOSE_JS: &str = "window.close();";
+/// 旧页面（登录页）的脚本。点"一键登录"时那个链接照常交给本机的 PassManager（不拦截），同时卡片从"开始"换成"等待"：
+/// 不会还是同一张登录页、让人以为没点上（2026-11-28）。登录完成后换成"成功"并回到原来的位置（不新增历史记录）。
+/// - 平时每 2 秒问一次 `/login/state`；等待时每 0.5 秒（最多 3 分钟，比一次性链接的 2 分钟长）；
+/// - 回到这个标签页（focus、visibilitychange）时马上问一次：后台标签页的定时器会被浏览器放慢；
+/// - 新页面关闭前经 BroadcastChannel 通知一声，这里马上去问服务器（只把消息当作"去问一下"，不相信它的内容）；
+/// - "返回"回到开始的样子；"按钮没有反应？"的帮助在开始与等待时都在，成功时收起。
+///
+/// 只改 `hidden`、`document.title`，不写 HTML（CSP 要求 Trusted Types）。
+const POLL_JS: &str = "(function(){var d=document,g=function(i){return d.getElementById(i)},S=g('login-start'),W=g('login-wait'),K=g('login-done'),H=g('login-help'),t0=d.title,f=0,busy=0;\
+function show(x){S.hidden=x!==S;W.hidden=x!==W;K.hidden=x!==K;H.hidden=x===K}\
+function go(t){if(t.charAt(0)==='/'&&t.charAt(1)!=='/'){show(K);d.title='登录成功 · PassManager';location.replace(t)}}\
+function check(){if(busy)return;busy=1;fetch('/login/state',{credentials:'same-origin',cache:'no-store'}).then(function(r){return r.text()}).then(go).catch(function(){}).then(function(){busy=0})}\
+function wait(){show(W);d.title='等待登录 · PassManager';clearInterval(f);f=setInterval(check,500);setTimeout(function(){clearInterval(f)},180000)}\
+var a=d.querySelectorAll('a[href^=\"passmanager-web:\"]');for(var i=0;i<a.length;i++)a[i].addEventListener('click',wait);\
+g('login-back').addEventListener('click',function(){clearInterval(f);show(S);d.title=t0});\
+setInterval(check,2000);addEventListener('focus',check);d.addEventListener('visibilitychange',function(){if(!d.hidden)check()});\
+try{new BroadcastChannel('pm-login').onmessage=check}catch(e){}})();";
+/// 新页面的关闭脚本：先通知旧页面马上去问（见 `POLL_JS`），稍等再关，免得消息还没发出页面就没了。
+const CLOSE_JS: &str = "try{new BroadcastChannel('pm-login').postMessage(1)}catch(e){}setTimeout(function(){window.close()},200);";
 /// 认出同一个浏览器的 Cookie。
 const WAIT_COOKIE: &str = "__Host-pm-wait";
 /// 旧页面多久没有轮询就当作已经关闭（轮询间隔是 2 秒）。

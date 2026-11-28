@@ -1595,6 +1595,60 @@ async fn one_click_link_logs_in_on_get_only_once() {
     assert!(st.links.valid(&p));
 }
 
+/// 一键登录点下去之后：登录页不会还是同一张页面（2026-11-28）。页面里有"开始""等待""成功"三块，后两块先藏着，
+/// 帮助在三块之外（等待时也看得到）；脚本拦不住、也不拦"一键登录"本身（没有 preventDefault），只切换显示与标题，
+/// 等待时加快轮询，回到标签页或收到新页面的通知时马上去问；新页面先通知再关闭。
+#[tokio::test]
+async fn login_page_switches_to_waiting_and_done() {
+    let (st, _) = state();
+    let r = send(&st, Method::GET, "/login", None, None, &[]).await;
+    assert_eq!(r.status, StatusCode::OK);
+    let b = &r.body;
+    // 三块：开始显示，等待与成功先藏着
+    for (id, hidden) in [("login-start", false), ("login-wait", true), ("login-done", true)] {
+        let tag = format!("<div id=\"{id}\"{}>", if hidden { " hidden" } else { "" });
+        assert_eq!(b.matches(&tag).count(), 1, "{tag}: {b}");
+    }
+    // 帮助在三块之后，不属于任何一块
+    let (help, done) = (b.find("<details id=\"login-help\">").unwrap(), b.find("<div id=\"login-done\" hidden>").unwrap());
+    assert!(help > done, "帮助在三块之外");
+    // 等待块：再试一次（同一个协议链接）与返回
+    let wait = &b[b.find("<div id=\"login-wait\" hidden>").unwrap()..done];
+    assert!(
+        wait.contains("href=\"passmanager-web://login\"") && wait.contains("id=\"login-back\"") && wait.contains("type=\"button\""),
+        "{wait}"
+    );
+    assert_eq!(b.matches("href=\"passmanager-web://login\"").count(), 2, "一键登录与再试一次");
+    // 脚本：只监听点击、不拦截；等待时 0.5 秒一次；回到标签页与收到通知时马上问；只改 hidden 与标题
+    for must in [
+        "a[href^=\"passmanager-web:\"]",
+        "addEventListener('click',wait)",
+        "setInterval(check,500)",
+        "setInterval(check,2000)",
+        "'focus'",
+        "visibilitychange",
+        "BroadcastChannel('pm-login')",
+        "location.replace(t)",
+        "d.title=",
+    ] {
+        assert!(POLL_JS.contains(must), "{must}");
+    }
+    for bad in ["preventDefault", "innerHTML", "outerHTML", "insertAdjacentHTML", "document.write", "eval("] {
+        assert!(!POLL_JS.contains(bad), "{bad}");
+    }
+    // 回答必须是本站路径（以 / 开头、不是 //）才跳转
+    assert!(POLL_JS.contains("t.charAt(0)==='/'&&t.charAt(1)!=='/'"));
+    // 新页面：先通知，再稍等关闭
+    let (post, close) = (CLOSE_JS.find("postMessage").unwrap(), CLOSE_JS.find("window.close()").unwrap());
+    assert!(post < close && CLOSE_JS.contains("setTimeout(") && CLOSE_JS.contains("BroadcastChannel('pm-login')"), "{CLOSE_JS}");
+    // 页面里的脚本与 CSP 哈希对得上（改了脚本也一样）
+    assert!(b.contains(&format!("<script>{POLL_JS}</script>")));
+    let csp = r.headers.get(header::CONTENT_SECURITY_POLICY).unwrap().to_str().unwrap().to_string();
+    use base64::Engine;
+    let h = base64::engine::general_purpose::STANDARD.encode(pm_crypto::sha256(POLL_JS.as_bytes()));
+    assert!(csp.contains(&format!("script-src 'sha256-{h}'")), "{csp}");
+}
+
 #[tokio::test]
 async fn login_page_helps_when_not_logged_in() {
     let (st, _) = state();

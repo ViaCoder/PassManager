@@ -4,6 +4,18 @@ English | [简体中文](CHANGELOG.zh-CN.md)
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.3.11-rc.31] - 2026-11-28
+
+### Changed
+
+- **One-click login shows that it is waiting.** Clicking "一键登录" on the login page used to leave the same login page on
+  screen while the browser asked to open PassManager, the client fetched a one-time link and a new tab flashed open and
+  shut, so it looked as if nothing had happened. The card now switches at once to a waiting state ("等待你的电脑完成登录",
+  with "再试一次" and "返回"; the tab title changes too), then to "登录成功" right before it returns to the original page.
+  While waiting it checks every 0.5 seconds instead of 2, checks again when the tab regains focus, and the new tab tells it
+  over a same-origin BroadcastChannel before closing, so the original page moves on within about half a second. The
+  "按钮没有反应？" help stays visible while waiting. Without JavaScript the page works as before.
+
 ## [0.3.11-rc.30] - 2026-11-28
 
 ### Changed

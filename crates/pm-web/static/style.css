@@ -287,6 +287,11 @@ td.actions-cell .row{justify-content:flex-end;flex-wrap:nowrap;align-items:flex-
 .auth-icon{display:inline-flex;align-items:center;justify-content:center;width:3rem;height:3rem;border-radius:var(--radius);background:var(--acc-soft);color:var(--acc-text);margin-bottom:var(--s4)}
 .auth-icon .i{width:1.5rem;height:1.5rem}
 .auth-icon.warn{background:var(--warn-soft);color:var(--warn)}
+/* 一键登录后等待本机的 PassManager：图标缓慢呼吸，表示还在等（减少动态效果时由下面的全局规则关掉） */
+.auth-icon.wait .i{animation:pm-breathe 1.8s ease-in-out infinite}
+@keyframes pm-breathe{50%{opacity:.35}}
+/* 等待卡片里的两个按钮与上面的说明隔开 */
+#login-wait .form-actions{margin-top:var(--s4)}
 .auth-card .lede{margin-bottom:var(--s4)}
 .auth-card button.block{margin-top:var(--s3)}
 .steps{padding-left:1.3em;margin:0}
