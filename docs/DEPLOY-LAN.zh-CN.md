@@ -150,7 +150,7 @@ passmanager show                                                   # 任何机�
 
 `enroll` 核对注册码里的服务端公钥指纹，令牌存到本人可读的配置目录（Linux `~/.config/passmanager`，0600），为检测到的 Agent 写入
 MCP 配置（不含令牌），不往它们的全局指令文件里写任何东西（0.3.11-rc.28 及以前写在 `<!-- passmanager:begin -->` 与
-`<!-- passmanager:end -->` 之间的规则块在这里删除，备份为 `*.passmanager.bak`；已注册的客户端自动更新后的第一条命令也会删除一次），
+`<!-- passmanager:end -->` 之间的规则块在这里删除，不留备份；已注册的客户端自动更新后的第一条命令也会删除一次），
 然后配置基于 HTTPS 的 git（`--no-git-proxy` 跳过）：把
 `passmanager git-proxy` 装成用户服务——Linux 上是 `~/.config/systemd/user/passmanager-git-proxy.service`（`systemctl --user enable`
 并重启；以不询问口令的方式尝试 `loginctl enable-linger`，成功时开机即启动，否则登录后启动，输出会说明由管理员运行

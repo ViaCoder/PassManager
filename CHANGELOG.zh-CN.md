@@ -4,6 +4,13 @@
 
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.3.11-rc.30] - 2026-11-28
+
+### 变更
+
+- **删除旧规则块时不留备份。** 从 Agent 的全局指令文件里删除 PassManager 块时（自动更新后的第一条命令、`enroll`、`unenroll`、
+  `uninstall` 或 `show --rules --write`），不再留下 `*.passmanager.bak`；只删 PassManager 自己写的块，文件的其他内容不变。
+
 ## [0.3.11-rc.29] - 2026-11-27
 
 ### 变更

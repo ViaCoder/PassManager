@@ -204,7 +204,7 @@ pub fn enroll_cmd(url: &str, o: EnrollOpts) -> ExitCode {
                 // Agent 只从 MCP 了解 PassManager：旧版本写进全局指令文件的规则块在这里删除（只做一次，见 agent_instructions）
                 for (name, path, r) in crate::agent_instructions::migrate_once_in(&d, &crate::agent_instructions::home()) {
                     match r {
-                        Ok(_) => println!("  · {name}：已删除旧的使用规则（{}，原文件备份为 .passmanager.bak）", path.display()),
+                        Ok(_) => println!("  · {name}：已删除旧的使用规则（{}）", path.display()),
                         Err(e) => println!("  · {name}：没能删除旧的使用规则（{e}）"),
                     }
                 }

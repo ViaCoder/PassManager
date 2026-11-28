@@ -316,10 +316,10 @@ fn run_agent_setup(single: bool) {
     assert_eq!(std::fs::read_to_string(h2.join(".local/bin/PassManager")).unwrap(), wrapper);
     assert!(h2.join(".local/bin/passmanager").exists());
     assert!(h2.join(".config/passmanager/remote.toml").exists(), "{}", stdout(&o));
-    // Agent 只用 MCP：不写规则块，旧块删除（原文件在 .bak），并记下迁移已完成
+    // Agent 只用 MCP：不写规则块，旧块删除（不留备份），并记下迁移已完成
     assert_eq!(std::fs::read_to_string(h2.join(".claude/CLAUDE.md")).unwrap(), "# my own rules\n");
     assert!(!h2.join(".codex/AGENTS.md").exists(), "不再写规则");
-    assert_eq!(std::fs::read_to_string(h2.join(".claude/CLAUDE.md.passmanager.bak")).unwrap(), with_block);
+    assert!(!h2.join(".claude/CLAUDE.md.passmanager.bak").exists(), "不留备份");
     assert!(h2.join(".config/passmanager/instructions-removed").exists());
     assert!(stdout(&o).contains("已删除旧的使用规则"), "{}", stdout(&o));
     assert!(std::fs::read_to_string(h2.join(".claude.json")).unwrap().contains("passmanager"), "MCP 配置");
@@ -502,7 +502,7 @@ fn run_agent_setup(single: bool) {
     let o = status();
     assert!(stderr(&o).contains("已从 Gemini CLI 的全局指令文件删除旧的使用规则"), "{}{}", stdout(&o), stderr(&o));
     assert!(!h4.join(".gemini/GEMINI.md").exists(), "只有旧块的文件删除");
-    assert_eq!(std::fs::read_to_string(h4.join(".gemini/GEMINI.md.passmanager.bak")).unwrap(), old_block);
+    assert!(!h4.join(".gemini/GEMINI.md.passmanager.bak").exists(), "不留备份");
     assert!(h4.join(".config/passmanager/instructions-removed").exists());
     std::fs::write(h4.join(".gemini/GEMINI.md"), &old_block).unwrap();
     let o = status();

@@ -6,7 +6,7 @@
 //! - 已注册的客户端第一次运行会检查自动更新的命令时（自动更新换上新程序后的第一条命令就是），
 //!   调用 [`migrate_once`] 删除旧块，然后在配置目录里留下标记，以后不再检查；`enroll`、`unenroll`、`uninstall` 也会删除；
 //! - 只删除 `<!-- passmanager:begin -->` 与 `<!-- passmanager:end -->` 之间的内容，文件里用户自己写的部分保持不变；
-//! - 修改前把原文件保存为 `<文件>.passmanager.bak`；
+//! - 不留备份（用户 2026-11-28："no need backup of passmanager memory"）：删掉的只是 PassManager 自己写的块；
 //! - 标记损坏（只有开始没有结束等）时不修改文件，报告错误。
 
 use std::path::{Path, PathBuf};
@@ -62,15 +62,12 @@ pub fn remove_text(old: &str) -> Result<Option<String>, String> {
     Ok(Some(format!("{head}{}", &old[e..])))
 }
 
-/// 移除一个文件中的块；返回是否有改动。移除后文件为空时删除文件（原内容留在 .passmanager.bak）。
+/// 移除一个文件中的块；返回是否有改动。移除后文件为空时删除文件。不留备份。
 pub fn remove(path: &Path) -> Result<bool, String> {
     // 文件不存在或读不了：没有可删的
     let Ok(old) = std::fs::read_to_string(path) else { return Ok(false) };
     // 没有块：不改
     let Some(new) = remove_text(&old)? else { return Ok(false) };
-    // 先备份原文件
-    let bak = PathBuf::from(format!("{}.passmanager.bak", path.display()));
-    std::fs::write(&bak, &old).map_err(|e| format!("备份 {} 失败：{e}", path.display()))?;
     if new.trim().is_empty() {
         // 文件里只有这个块：删除文件
         std::fs::remove_file(path).map_err(|e| format!("删除 {} 失败：{e}", path.display()))?;
@@ -134,10 +131,9 @@ pub fn migrate_once() {
     }
     for (name, path, r) in migrate_once_in(&d, &home()) {
         match r {
-            Ok(_) => eprintln!(
-                "PassManager：已从 {name} 的全局指令文件删除旧的使用规则（{}，原文件备份为 .passmanager.bak）；Agent 改为只用 MCP 的说明。",
-                path.display()
-            ),
+            Ok(_) => {
+                eprintln!("PassManager：已从 {name} 的全局指令文件删除旧的使用规则（{}）；Agent 改为只用 MCP 的说明。", path.display())
+            }
             Err(e) => eprintln!("PassManager：没能从 {name} 的全局指令文件删除旧的使用规则（{e}）。"),
         }
     }
@@ -179,16 +175,16 @@ mod tests {
     }
 
     #[test]
-    fn remove_backs_up_and_deletes_empty_files() {
+    fn remove_deletes_empty_files_without_backup() {
         let d = tmp("rm");
         let b = old_block();
-        // 只有块的文件：删除，原内容在备份里
+        // 只有块的文件：删除，不留备份
         let f = d.join(".claude/CLAUDE.md");
         std::fs::create_dir_all(f.parent().unwrap()).unwrap();
         std::fs::write(&f, &b).unwrap();
         assert!(remove(&f).unwrap());
         assert!(!f.exists());
-        assert_eq!(std::fs::read_to_string(format!("{}.passmanager.bak", f.display())).unwrap(), b);
+        assert!(!PathBuf::from(format!("{}.passmanager.bak", f.display())).exists(), "不留备份");
         // 有用户内容的文件：只删块
         let g = d.join(".codex/AGENTS.md");
         std::fs::create_dir_all(g.parent().unwrap()).unwrap();

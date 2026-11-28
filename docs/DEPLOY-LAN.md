@@ -140,7 +140,7 @@ enrolled machine it also names the server. The block contains a one-time enrollm
 
 `enroll` verifies the pinned server key fingerprint, stores the token in a private file, writes the MCP config of detected
 agents (without the token), writes nothing into their global instruction files (it removes the rules block that versions up to
-0.3.11-rc.28 put between `<!-- passmanager:begin -->` / `<!-- passmanager:end -->`, backup `*.passmanager.bak`; an enrolled
+0.3.11-rc.28 put between `<!-- passmanager:begin -->` / `<!-- passmanager:end -->`, without a backup; an enrolled
 client does the same once on its first command after updating), and sets up git over HTTPS (`--no-git-proxy` skips
 this): it installs `passmanager git-proxy` as a per-user service — `~/.config/systemd/user/passmanager-git-proxy.service`
 (`systemctl --user enable` + restart; it tries `loginctl enable-linger` without prompting so the proxy starts at boot, otherwise

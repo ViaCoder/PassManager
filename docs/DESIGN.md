@@ -399,7 +399,7 @@ of the same guide with placeholders instead of a code.
   `<!-- passmanager:end -->` (Claude Code `~/.claude/CLAUDE.md`, Codex `~/.codex/AGENTS.md`, Gemini CLI `~/.gemini/GEMINI.md`,
   Windsurf `global_rules.md`). An enrolled client removes it once, on its first command after updating (a marker file
   `instructions-removed` in the config directory records that), and so do `enroll`, `unenroll` and `uninstall`: only the block
-  goes, the user's own content stays, the previous file is kept as `*.passmanager.bak`, and damaged markers are reported, not edited.
+  goes, the user's own content stays, no backup is kept (since 0.3.11-rc.30), and damaged markers are reported, not edited.
 - `enroll` (both the one-liner and the source-build fallback) also makes git over HTTPS work for every entry the agent can use
   that has the `git` op — GitHub, self-hosted forges and others are treated identically: it installs `git-proxy` as a per-user
   service (systemd user unit with `Restart=on-failure` and `RestartPreventExitStatus=78`, `loginctl enable-linger` attempted with

@@ -917,7 +917,7 @@ fn show(label: Option<String>, url: bool, rules: bool, write: bool, lang: &str) 
         let mut ok = true;
         for (name, path, r) in agent_instructions::remove_all() {
             match r {
-                Ok(true) => println!("{name}：已删除旧的使用规则（{}，原文件备份为 .passmanager.bak）", path.display()),
+                Ok(true) => println!("{name}：已删除旧的使用规则（{}）", path.display()),
                 Ok(false) => {}
                 Err(e) => {
                     ok = false;

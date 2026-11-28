@@ -81,7 +81,7 @@ passmanager show --label laptop                                            # 打
 注册、为检测到的 Agent（Claude Code、Codex、Cursor、Gemini CLI、VS Code、Windsurf）配置 MCP 服务，并配置基于 HTTPS 的 git。
 Agent 只从 MCP 了解 PassManager 的用法（服务器说明、工具描述、lookup 的 `how` 与错误后面的 `Next:` 提示），不往它们的全局指令
 文件里写任何东西；0.3.11-rc.28 及以前写进 `~/.claude/CLAUDE.md`、`~/.codex/AGENTS.md` 等的规则块，会在客户端自动更新后的下一条
-命令里删除一次（备份为 `*.passmanager.bak`）。`git-proxy` 成为开机或登录时自动启动的
+命令里删除一次（不留备份）。`git-proxy` 成为开机或登录时自动启动的
 用户服务（systemd 用户单元；macOS 上是 LaunchAgent；Windows 上打印手动步骤），每个有 `git` 用途条目的主机（GitHub、自建的 git
 服务器等）都写入一行 `insteadOf`，普通的 `git clone https://…` 即可使用，令牌留在服务器上。Agent 的 curl 不支持后量子 TLS
 （退出码 35）时，这段文字会让它从固定的发布源码构建客户端再运行 `enroll`，效果相同。

@@ -4,6 +4,14 @@ English | [简体中文](CHANGELOG.zh-CN.md)
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.3.11-rc.30] - 2026-11-28
+
+### Changed
+
+- **No backup when the old rules block is removed.** Removing the PassManager block from an agent's global instruction
+  file (on the first command after an update, on `enroll`, `unenroll`, `uninstall` or `show --rules --write`) no longer
+  leaves a `*.passmanager.bak` copy; only PassManager's own block is removed and the rest of the file stays.
+
 ## [0.3.11-rc.29] - 2026-11-27
 
 ### Changed

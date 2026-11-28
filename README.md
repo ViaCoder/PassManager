@@ -85,7 +85,7 @@ and fails loudly with curl's exit code) — which installs the client (SHA-256 v
 enrolls it, configures the MCP server for the detected agents (Claude Code, Codex, Cursor, Gemini CLI, VS Code, Windsurf), and sets up git over
 HTTPS. Agents learn how to use PassManager only from MCP (the server instructions, the tool descriptions, lookup's `how` and the
 `Next:` hint after an error); nothing is written into their global instruction files, and the rules block that versions up to
-0.3.11-rc.28 put into `~/.claude/CLAUDE.md`, `~/.codex/AGENTS.md`, … is removed once (backup `*.passmanager.bak`) by the next
+0.3.11-rc.28 put into `~/.claude/CLAUDE.md`, `~/.codex/AGENTS.md`, … is removed once, without a backup, by the next
 command after the client updates itself. `git-proxy` becomes a per-user service that starts at boot or login (systemd user unit; LaunchAgent on macOS; manual steps
 on Windows) and every host of an entry with the `git` op (GitHub, a self-hosted forge, …) gets an `insteadOf` line, so plain
 `git clone https://…` works while the token stays on the server. If the agent's curl cannot do post-quantum TLS (exit code 35),

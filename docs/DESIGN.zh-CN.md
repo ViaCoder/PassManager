@@ -388,7 +388,7 @@ v2 文件头 = v1 的字段 + 模式字节（device-only）；文件头哈希仍
   在 `<!-- passmanager:begin -->` 与 `<!-- passmanager:end -->` 之间写过规则块（Claude Code `~/.claude/CLAUDE.md`、Codex
   `~/.codex/AGENTS.md`、Gemini CLI `~/.gemini/GEMINI.md`、Windsurf `global_rules.md`）。已注册的客户端在自动更新后的第一条命令里
   删除一次（配置目录里的标记文件 `instructions-removed` 记下已经做过），`enroll`、`unenroll`、`uninstall` 也会删除：只删这个块，
-  用户自己的内容保留，原文件保存为 `*.passmanager.bak`，标记损坏时只报告、不修改。
+  用户自己的内容保留，不留备份（0.3.11-rc.30 起），标记损坏时只报告、不修改。
 - `enroll`（一行命令与源码构建的回退方式都一样）还让基于 HTTPS 的 git 对 Agent 能使用的每个有 `git` 用途的条目直接可用——GitHub、
   自建的 git 服务器等一视同仁：把 `git-proxy` 装成用户服务（systemd 用户单元，`Restart=on-failure`、`RestartPreventExitStatus=78`；
   以 `--no-ask-password` 尝试 `loginctl enable-linger`，没有权限时给出说明；macOS 上是 LaunchAgent；Windows 上打印 `schtasks` 步骤），
